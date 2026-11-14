@@ -148,3 +148,41 @@ Checks: scan caption address vs CoStar address, scan date (CoStar
 scanned space vs CoStar, FEMA flood zone at the pin. `--offline` skips network
 calls. Houston run: 7 of 1,731 scanned properties have a scan captioned with a
 different address (most captions name no address, so only ~44 can be tested).
+
+## Physical fit (`space_fit.py`, `exterior.py`, `interior.py`)
+
+Answers "can this building or listed space physically support the proposed use?"
+for `pickleball`, `gym`, `restaurant`, `daycare` and `workshop`, with every fact in
+the shared evidence-record contract. The browser shows it live in the
+**Space & condition** specialist; the API is
+`GET /api/space-fit?property_id=<CoStar id>&use=<use>[&suite=<suite>]`.
+
+```sh
+set -a; source .env; set +a
+python3 playground/space_fit.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --property-id 13890701 --use pickleball
+python3 playground/space_fit.py --kit <unzipped kit dir> --property-id 23296 --use daycare --offline
+```
+
+`--kit` takes the encrypted zip (with `COSTAR_KIT_PASSWORD`) or an unzipped folder.
+Vexcel and Matterport responses are cached in `playground/output/` (gitignored), so
+`--offline` replays them.
+
+**Verdict:** `supported` (nothing in the data rules the use out), `investigate`
+(something that decides fit is unknown), `does_not_fit` (the evidence rules it out).
+Only use-specific checks drive the verdict; general building facts and the
+ask-before-signing checklist are shown, not judged.
+
+| Evidence | Source | Rule |
+| --- | --- | --- |
+| Size, stories, docks, drive-in doors, power (phases/amps/volts), parking, sprinklers, floor load | CoStar kit | Missing values are `unknown`, never assumed |
+| Listed spaces in this building | CoStar listings (`forLeaseSummary.spaces` with this `propertyId`) | Park-wide listings are not counted against one building |
+| Which space is judged | `--suite`, else a listed space that has a same-address scan, else the largest | Scans match a listing by suite, or by advertised size within 2% |
+| Footprint, roof height, ground elevation, roof type and defects, rooftop AC, vehicles | Vexcel `property/extract` with `include=precomputed,calculated` | Only the footprint containing the CoStar pin is used; roof height under 8 ft per story is a data error; roof condition score is shown, not judged |
+| Measured area and clear height | Matterport rooms | Scans captioned with another address are not measured; height 0 = unknown; a scan's height applies only to the listed space it names |
+| Thresholds | USA Pickleball rule 3.A.3 (30x60 / 34x64 ft per court); Texas 26 TAC 746 (30 sq ft indoor, 80 sq ft outdoor per child) | 18 ft pickleball ceiling is unofficial guidance, low confidence |
+
+Good demo properties: **6855 Wynnwood Ln (13890701)**, a listed 9,900 sq ft
+warehouse whose scan measures 96% of it with a 21.1 ft clear height (5 courts,
+supported). **9700 Tanner Rd (23296)**: supported on CoStar's 18 ft and Vexcel's
+33.8 ft roof, but its scan is captioned 9750 Tanner Rd and is not used.
+**8203 Willow Place (239686)**: office suite 315 measured at 7.9 ft (does not fit).
