@@ -64,6 +64,7 @@ def specialist(model, name, description, schema, state, work, tools=()):
 
 def run_review(address, use, property_records, public_records, *, skip_market=False):
     from threading import Lock
+    market_area = address.rsplit(",", 2)[-2].strip() + ", " + address.rsplit(",", 1)[-1].strip()[:2]
     model = ChatUpstage(model="solar-mini4", reasoning_effort="none", timeout=25, max_retries=1)
     state = {}
     market = []
@@ -72,7 +73,7 @@ def run_review(address, use, property_records, public_records, *, skip_market=Fa
 
     @tool
     def lookup_market() -> str:
-        """Find public Houston operator pages for the configured proposed use. Returns dated evidence."""
+        """Find public operator pages in the selected city for the configured proposed use. Returns dated evidence."""
         nonlocal searched
         with lock:
             if not searched:
@@ -80,7 +81,7 @@ def run_review(address, use, property_records, public_records, *, skip_market=Fa
                     market.append(record("public:web", "market-skipped", "Market search", None,
                                          note="The run skipped external market research."))
                 else:
-                    market.extend(market_sources("Houston, Texas", use))
+                    market.extend(market_sources(market_area, use))
                 searched = True
         return json.dumps(market)
 
@@ -115,7 +116,7 @@ def run_review(address, use, property_records, public_records, *, skip_market=Fa
                    "Call out unresolved scan identity and any missing provenance. Cite only source IDs provided.",
                    Findings, state, evidence_input),
         specialist(model, "market-research",
-                   "Use lookup_market once. The subject address is a proposed site; study other Houston operators as comparables. "
+                   "Use lookup_market once. The subject address is a proposed site; study other operators in the selected city as comparables. "
                    "Report up to three observations about those other operators, including published facility offerings if pricing or hours are absent. "
                    "For each, cite one page ID "
                    "and copy the exact supporting excerpt from that page into the excerpt field. "
@@ -206,8 +207,8 @@ def main():
         address, property_records = "9700 Tanner Rd, Houston, TX 77041", []
     elif args.kit:
         address, property_records = collect_property(args.kit, args.property_id)
-        if ", Houston, TX " not in address:
-            parser.error("Location and demand currently supports Houston properties.")
+        if not any(city in address.casefold() for city in (", houston, tx ", ", los angeles, ca ")):
+            parser.error("Location and demand supports Houston and Los Angeles properties.")
     else:
         parser.error("Provide --kit or use --public-only.")
     result = run_review(address, args.use, property_records, collect_official(address),

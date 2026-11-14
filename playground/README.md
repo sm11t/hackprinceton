@@ -157,3 +157,13 @@ Start the existing Python web server, choose Tanner Road and indoor pickleball,
 then open the saved review in the Location & Demand panel. Re-run the CLI and
 reload the review to refresh it. The endpoint serves accepted findings and
 source references. Raw sponsor and search payloads stay in the local report.
+
+### Live Location & Demand demo
+
+Start the web server with the CoStar kit and the same credentials as the
+Location & Demand CLI. Open `/location-demo`, pick Houston or Los Angeles,
+filter the property dropdown by address, choose a proposed use, and click
+**Run live review**. Houston starts with 9700 Tanner Rd selected. Allow a few
+minutes for source retrieval and agent review. The page shows findings,
+citations, and verification gaps. Each run uses its own temporary report and
+does not overwrite the saved Tanner review.

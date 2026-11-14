@@ -9,6 +9,9 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+from tempfile import TemporaryDirectory
+from threading import Lock
 from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
@@ -105,11 +108,18 @@ def main():
     args = parser.parse_args()
     buyer = buyer_from_nessie(args.nessie_account) if args.nessie_account else None
     password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+    location_properties = {}
+    location_lock = Lock()
     with ZipFile(args.kit) as kit, kit.open("commercial-properties.csv", pwd=password) as stream:
         properties = {}
         for row in csv.DictReader(io.TextIOWrapper(stream, encoding="utf-8-sig")):
             if row["City"].casefold() == "houston":
                 properties.setdefault(row["PropertyId"], row)
+            city = {"houston": "Houston", "los angeles": "Los Angeles"}.get(row["City"].strip().casefold())
+            if city and row["PropertyId"].isdigit() and row["Address"].strip():
+                location_properties.setdefault(row["PropertyId"], {
+                    "id": row["PropertyId"], "address": row["Address"], "city": city,
+                })
 
     @lru_cache(maxsize=64)
     def property_data(property_id):
@@ -184,7 +194,58 @@ def main():
             self.end_headers()
             self.wfile.write(body)
 
+        def location_run(self):
+            def respond(body, status=200):
+                self.send(json.dumps(body).encode(), "application/json", status)
+
+            if self.headers.get_content_type() != "application/json":
+                respond({"error": "Send an application/json request."}, 415)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024:
+                    raise ValueError()
+                payload = json.loads(self.rfile.read(length))
+                property_id = payload["property_id"]
+                use = payload["use"]
+                if property_id not in location_properties or use not in ("indoor pickleball", "fitness studio"):
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                respond({"error": "Choose a property and use from the demo."}, 400)
+                return
+            if not os.environ.get("UPSTAGE_API_KEY"):
+                respond({"error": "Set UPSTAGE_API_KEY in the server environment to run agents."}, 503)
+                return
+            if not location_lock.acquire(blocking=False):
+                respond({"error": "A review is already running. Try again when it finishes."}, 409)
+                return
+            try:
+                with TemporaryDirectory(prefix="reuse-location-") as directory:
+                    output = Path(directory) / "report.json"
+                    subprocess.run(
+                        ["uv", "run", str(ROOT / "location_run.py"), "--kit", str(args.kit.resolve()),
+                         "--property-id", property_id, "--use", use, "--output", str(output)],
+                        check=True, timeout=240, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    report = json.loads(output.read_text())
+                respond({key: report[key] for key in
+                         ("address", "proposed_use", "demand_verified", "findings", "unknowns", "validation_issues")}
+                        | {"sources": [{key: source.get(key) for key in
+                                       ("source_id", "fact", "evidence_url", "captured_at", "note")}
+                                       for source in report["evidence"]]})
+            except subprocess.TimeoutExpired:
+                respond({"error": "The review timed out. Try again."}, 504)
+            except FileNotFoundError:
+                respond({"error": "The review runner is unavailable. Install uv on the server."}, 503)
+            except (subprocess.CalledProcessError, OSError, ValueError, KeyError):
+                respond({"error": "The review could not finish. Check the server keys and provider availability."}, 502)
+            finally:
+                location_lock.release()
+
         def do_POST(self):
+            if urlsplit(self.path).path == "/api/location/run":
+                self.location_run()
+                return
             if urlsplit(self.path).path != "/api/pilot/simulate":
                 self.send(b"Not found", "text/plain", 404)
                 return
@@ -207,7 +268,14 @@ def main():
                 filename = "pilot.html" if route.path == "/pilot" else "index.html"
                 self.send((ROOT / "static" / filename).read_bytes(), "text/html; charset=utf-8")
                 return
-            assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
+            if route.path == "/location-demo":
+                self.send((ROOT / "static/location-demo.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            if route.path == "/api/location/properties":
+                rows = sorted(location_properties.values(), key=lambda row: (row["city"], row["address"]))
+                self.send(json.dumps(rows).encode(), "application/json")
+                return
+            assets = {"/static/location-demo.js": "text/javascript","/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
                       "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
