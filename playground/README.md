@@ -129,3 +129,22 @@ node --check playground/static/pilot.js
 Tanner demo path: open `/pilot` → inspect aerial/tour → compare the three evidence scopes →
 change opening delay from 0 to 3 → observe the $5,000 reserve gap in month 6 →
 review the suite identity and dimension check before estimating court count.
+
+## Evidence reconciliation (`reconcile.py`)
+
+Cross-checks CoStar, Matterport and public data for one property and emits
+facts in the shared evidence-record contract (Spec canvas → API contracts):
+`fact, value, source, source_id, captured_at, confidence, evidence_url,
+status (agrees|conflict|unknown), needs_human, note`.
+
+```sh
+set -a; source .env; set +a
+python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --property-id 23296
+python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --scan-identity Houston
+```
+
+Checks: scan caption address vs CoStar address, scan date (CoStar
+`originationDate`, never Matterport `created`), ceiling height of the largest
+scanned space vs CoStar, FEMA flood zone at the pin. `--offline` skips network
+calls. Houston run: 7 of 1,731 scanned properties have a scan captioned with a
+different address (most captions name no address, so only ~44 can be tested).
