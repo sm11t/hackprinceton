@@ -31,12 +31,13 @@ query PropertyRooms($id: ID!) {
 """
 
 
-def load_property(kit_path, property_id, password):
+def load_property(kit_path, property_id, password, *, require_model=True):
     with ZipFile(kit_path) as kit:
         with kit.open("commercial-properties.csv", pwd=password) as stream:
             matches = [
                 row for row in csv.DictReader(io.TextIOWrapper(stream, encoding="utf-8-sig"))
-                if row["PropertyId"] == str(property_id) and row["MatterportModelId"]
+                if row["PropertyId"] == str(property_id)
+                and (row["MatterportModelId"] or not require_model)
             ]
         if not matches:
             raise ValueError(f"No Matterport mapping for CoStar property {property_id}.")

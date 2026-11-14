@@ -30,3 +30,14 @@ limited to the hackathon.
 - [Sponsor quickstart](https://beta-app.matterport.com/2026-princeton-hackathon/quickstart)
 - [Matterport Model Playground](https://beta-app.matterport.com/2026-princeton-hackathon/graphiql)
 - [Matterport API](https://developers.matterport.com/api/)
+
+## Browser view
+
+Load the same environment as above, then run:
+
+```sh
+python3 playground/web.py --kit ~/Downloads/costar-hackathon-kit.zip
+```
+
+Open [localhost:8765](http://127.0.0.1:8765). Search the Houston addresses
+in the kit by street number or words in the street name.
