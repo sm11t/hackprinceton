@@ -15,6 +15,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from space_fit import USES, run as space_fit_run
 
 
 def words(value):
@@ -115,6 +116,10 @@ def main():
     def property_data(property_id):
         return load_property(args.kit, int(property_id), password, require_model=False)
 
+    @lru_cache(maxsize=64)
+    def fit_for(property_id, use, suite):
+        return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password)
+
     @lru_cache(maxsize=32)
     def image_for(property_id):
         if args.offline:
@@ -208,7 +213,8 @@ def main():
                 self.send((ROOT / "static" / filename).read_bytes(), "text/html; charset=utf-8")
                 return
             assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
-                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript"}
+                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript",
+                      "/static/space-fit.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
@@ -225,6 +231,19 @@ def main():
                                     "Saved local capture · not refreshed" if args.offline else "CoStar kit + live Matterport")
                     self.send(json.dumps(body).encode(), "application/json")
                 except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit":
+                try:
+                    property_id = int(params.get("property_id", [""])[0])
+                    use = params.get("use", [""])[0]
+                    if use not in USES:
+                        raise ValueError(f"use must be one of {', '.join(USES)}")
+                    body = fit_for(property_id, use, params.get("suite", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
                 return
             query = params.get("q", [""])[0].strip()

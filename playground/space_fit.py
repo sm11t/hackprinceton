@@ -361,34 +361,39 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model
     }
 
 
+def run(kit_path, property_id, use_id, suite=None, offline=False, password=None):
+    """Load the property from the kit, gather Vexcel and Matterport evidence (cached), and judge fit.
+    Provider errors are reported in result["errors"], never fatal."""
+    prop = load_property(kit_path, property_id, password)
+    spaces = listed_spaces(kit_path, property_id, password)
+    errors, vexcel, rooms_by_model = {}, None, {}
+    address = prop.get("primaryAddress") or {}
+    try:
+        vexcel = fetch_property(address.get("latitude"), address.get("longitude"), prop["id"], offline)
+    except (OSError, RuntimeError, ValueError) as error:
+        errors["vexcel"] = str(error)
+    for scan in unique_scans(prop):
+        try:
+            rooms_by_model[scan["model_id"]] = fetch_rooms(scan["model_id"], offline)
+        except Exception as error:  # provider errors are reported, never fatal
+            errors[f"matterport:{scan['model_id']}"] = str(error)
+    result = space_fit(prop, use_id, spaces, suite, vexcel, rooms_by_model)
+    result["errors"].update(errors)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--kit", type=Path, required=True, help="Kit zip (with COSTAR_KIT_PASSWORD) or unzipped folder")
     parser.add_argument("--property-id", type=int, required=True)
     parser.add_argument("--use", choices=sorted(USES), required=True)
-    parser.add_argument("--suite", help="Evaluate this listed suite instead of the largest one")
+    parser.add_argument("--suite", help="Evaluate this listed suite (default: a scanned listed space, else the largest)")
     parser.add_argument("--offline", action="store_true", help="Skip network calls; use cached provider responses.")
     args = parser.parse_args()
-    password = kit_password()
     try:
-        prop = load_property(args.kit, args.property_id, password)
-        spaces = listed_spaces(args.kit, args.property_id, password)
+        result = run(args.kit, args.property_id, args.use, args.suite, args.offline, kit_password())
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
-    errors, vexcel = {}, None
-    address = prop.get("primaryAddress") or {}
-    try:
-        vexcel = fetch_property(address.get("latitude"), address.get("longitude"), prop["id"], args.offline)
-    except (OSError, RuntimeError, ValueError) as error:  # provider errors are reported, never fatal
-        errors["vexcel"] = str(error)
-    rooms_by_model = {}
-    for scan in unique_scans(prop):
-        try:
-            rooms_by_model[scan["model_id"]] = fetch_rooms(scan["model_id"], args.offline)
-        except Exception as error:  # provider errors are reported, never fatal
-            errors[f"matterport:{scan['model_id']}"] = str(error)
-    result = space_fit(prop, args.use, spaces, args.suite, vexcel, rooms_by_model)
-    result["errors"].update(errors)
     print(json.dumps(result, indent=2))
 
 
