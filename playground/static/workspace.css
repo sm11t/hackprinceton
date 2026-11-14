@@ -1158,3 +1158,4 @@ p {
 .lf-form input[type=text], .lf-form input[type=number] { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; }
 .lf-form .lf-check { flex-direction: row; align-items: center; gap: 6px; }
 .lf-form button { align-self: end; }
+.live-deal { margin-bottom: 20px; }

@@ -15,6 +15,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from deal import run_deal
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
@@ -120,6 +121,10 @@ def main():
     def fit_for(property_id, use, suite, requirements=(), label=""):
         return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password,
                              dict(requirements), label or None)
+
+    @lru_cache(maxsize=128)
+    def deal_for(property_id, capital, suite, square_feet):
+        return run_deal(args.kit, property_id, capital, password, suite or None, square_feet)
 
     @lru_cache(maxsize=64)
     def rank_for(property_id, suite):
@@ -236,6 +241,20 @@ def main():
                                     "Saved local capture · not refreshed" if args.offline else "CoStar kit + live Matterport")
                     self.send(json.dumps(body).encode(), "application/json")
                 except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/deal":
+                try:
+                    number = lambda name: float(params[name][0]) if params.get(name, [""])[0] else None  # noqa: E731
+                    capital, square_feet = number("capital"), number("square_feet")
+                    if capital is not None and not 0 <= capital <= 1e10:
+                        raise ValueError("capital must be between 0 and 10,000,000,000")
+                    body = deal_for(int(params.get("property_id", [""])[0]), capital,
+                                    params.get("suite", [""])[0], square_feet)
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
                 return
             if route.path == "/api/space-fit/rank":

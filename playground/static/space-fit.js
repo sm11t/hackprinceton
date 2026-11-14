@@ -34,6 +34,8 @@
     req_min_drive_in_bays: "Drive-in doors you need", req_min_parking_spaces: "Parking you need",
     req_min_amps: "Power you need", req_min_floor_load_psf: "Floor load you need",
     req_three_phase: "Three-phase power", req_sprinklers: "Sprinklers",
+    lease_asking_rent: "Asking rent", sale_asking_price: "Asking price", last_sale_price: "Sold",
+    capital_vs_lease: "Your capital vs leasing", capital_vs_purchase: "Your capital vs buying",
   };
   const unit = (fact) =>
     fact === "req_min_amps" ? " A" : fact.endsWith("_sf") ? " sq ft" : fact.endsWith("_ft") || fact.endsWith("clear_height") || fact.endsWith("upper_bound")
@@ -41,6 +43,8 @@
   const show = (r) => {
     if (r.value === null || r.value === undefined) return "—";
     if (typeof r.value === "boolean") return r.value ? "Yes" : "No";
+    if (typeof r.value === "number" && /rent|price|capital_vs/.test(r.fact))
+      return "$" + r.value.toLocaleString("en-US") + (r.fact === "lease_asking_rent" ? "/mo" : r.fact === "capital_vs_lease" ? " yr 1" : "");
     if (typeof r.value === "number")
       return r.fact === "footprint_vs_costar_floor" ? `${r.value}×` : r.value.toLocaleString("en-US") + unit(r.fact);
     return r.value;
@@ -173,5 +177,50 @@
     }
   }
 
-  window.spaceFit = { mount: (root) => root.querySelectorAll(".live-fit[data-property]").forEach(load) };
+  const DEAL_GROUPS = [
+    ["capital", "Your capital", (r) => r.fact.startsWith("capital_")],
+    ["lease", "Lease: asking rents in this building", (r) => r.fact === "lease_asking_rent"],
+    ["buy", "Buy: for-sale listing", (r) => r.fact === "sale_asking_price"],
+    ["sold", "Sale history", (r) => r.fact === "last_sale_price"],
+  ];
+
+  function dealView(d) {
+    const paths = d.paths.length ? d.paths.map((p) => `<span class="lf-verdict lf-good">${esc(p)}</span>`).join(" ")
+      : `<span class="lf-verdict lf-amber">not on the market</span>`;
+    return `<div class="lf-top"><div><div class="eyebrow">LIVE DEAL FACTS · ${esc(d.address)}</div><h3>What this property asks, and what it last sold for</h3><p class="small">From CoStar listings and sale comps. Asking figures, not signed or sold prices. The capital check states gaps; it does not choose lease or buy.</p></div><div>${paths}</div></div>${DEAL_GROUPS.map(([k, name, test]) => {
+      const rows = d.records.filter(test);
+      if (!rows.length) return "";
+      const shown = rows.slice(0, 4), rest = rows.slice(4);
+      return `<h4 class="lf-group">${name}</h4><ul class="lf-list">${shown.map(row).join("")}</ul>${rest.length ? `<details class="lf-more"><summary class="small">${rest.length} more</summary><ul class="lf-list">${rest.map(row).join("")}</ul></details>` : ""}`;
+    }).join("")}`;
+  }
+
+  async function loadDeal(el) {
+    const fit = [...cache.entries()].find(([k]) => k.startsWith(`${el.dataset.property}:`));
+    const fitResult = fit ? await fit[1].catch(() => null) : null;
+    const q = new URLSearchParams({ property_id: el.dataset.property });
+    if (el.dataset.capital) q.set("capital", el.dataset.capital);
+    if (fitResult && fitResult.suite) q.set("suite", fitResult.suite);
+    const key = `deal:${q}`;
+    if (el.dataset.loaded === key) return;
+    el.dataset.loaded = key;
+    el.innerHTML = `<p class="small muted">Reading CoStar listings and sale comps…</p>`;
+    if (!cache.has(key)) cache.set(key, fetch(`/api/deal?${q}`).then((r) => r.json()));
+    try {
+      const d = await cache.get(key);
+      if (d.error) throw new Error(d.error);
+      if (el.isConnected) el.innerHTML = dealView(d);
+    } catch (err) {
+      cache.delete(key);
+      el.dataset.loaded = "";
+      if (el.isConnected) el.innerHTML = `<p class="small muted">Deal facts unavailable: ${esc(err.message)}</p>`;
+    }
+  }
+
+  window.spaceFit = {
+    mount: (root) => {
+      root.querySelectorAll(".live-fit[data-property]").forEach(load);
+      root.querySelectorAll(".live-deal[data-property]").forEach(loadDeal);
+    },
+  };
 })();
