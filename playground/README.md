@@ -81,7 +81,7 @@ its own API key.
 
 ## Tanner Road redevelopment pilot (`feature/pilot`)
 
-The root URL now opens the Tanner Road workspace. The existing address search
+The root URL now opens the UI-only onboarding and agent-workspace mock (see `MOCK_FLOW.md`). The Tanner Road evidence workspace remains at `/pilot`. The existing address search
 is available at `/search` (and existing `/?q=...` links still work).
 
 The pilot compares **two tenant operations in the advertised 10,000 SF suite**.
@@ -126,6 +126,6 @@ python3 -m unittest discover -s playground -p 'test_*.py'
 node --check playground/static/pilot.js
 ```
 
-Demo path: open `/` → inspect aerial/tour → compare the three evidence scopes →
+Tanner demo path: open `/pilot` → inspect aerial/tour → compare the three evidence scopes →
 change opening delay from 0 to 3 → observe the $5,000 reserve gap in month 6 →
 review the suite identity and dimension check before estimating court count.

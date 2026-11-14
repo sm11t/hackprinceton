@@ -204,9 +204,11 @@ def main():
             route = urlsplit(self.path)
             params = parse_qs(route.query)
             if route.path in ("/", "/pilot") and not route.query:
-                self.send((ROOT / "static/pilot.html").read_bytes(), "text/html; charset=utf-8")
+                filename = "pilot.html" if route.path == "/pilot" else "index.html"
+                self.send((ROOT / "static" / filename).read_bytes(), "text/html; charset=utf-8")
                 return
-            assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript"}
+            assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
+                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
