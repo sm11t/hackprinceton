@@ -34,35 +34,35 @@ function displayReview(report) {
     claim.source_ids.some((id) => id.startsWith("market-page-")));
   const context = report.findings.filter((claim) => !market.includes(claim));
 
-  addText(results, "h3", "Next decision: validate demand before committing");
+  addText(results, "h3", "What we found");
+  if (!report.findings.length) addText(results, "p", "This run returned no findings.");
+  for (const claim of context) displayClaim(results, claim, sources);
+  if (!market.length) {
+    addText(results, "p", "This run did not verify any comparable businesses. It leaves local competition and customer demand unresolved.");
+  }
+  for (const claim of market) displayClaim(results, claim, sources);
+
+  addText(results, "h3", "What this means for your decision");
   addText(results, "p", market.length
-    ? "Use the comparable businesses below to benchmark your offer. You still need evidence that customers will pay for it at this location."
-    : "This review found no verified local comparables. The household estimate describes the Census tract. It cannot tell you how many people would book or join.");
+    ? "Use the businesses above to compare your offer. Paid demand at this address is still untested."
+    : "The area figures alone are too limited to make a go/no-go decision. A household estimate describes the tract and gives no booking forecast.");
   const actions = addText(results, "ol", "");
   const activity = report.proposed_use === "fitness studio" ? "a trial class" : "a trial court session";
-  addText(actions, "li", "Compare three nearby operators. Record travel time, prices, and availability at the times you plan to operate.");
-  addText(actions, "li", `Offer ${activity} at your target price and track paid bookings. Compare that turnout with the bookings you need to cover costs.`);
+  addText(actions, "li", "Compare nearby operators on price, travel time, and availability.");
+  addText(actions, "li", `Test ${activity} at your target price before committing to a build-out.`);
   if (report.unknowns.some((note) => /scan-to-suite/i.test(note))) {
     addText(actions, "li", "Ask the broker to confirm which suite was scanned and send a dimensioned floor plan before estimating capacity.");
   }
-
-  addText(results, "h3", "Local comparables");
-  if (!market.length) addText(results, "p", "No comparable businesses could be verified in this run.");
-  for (const claim of market) displayClaim(results, claim, sources);
-
-  const details = addText(results, "details", "");
-  addText(details, "summary", "Area and site evidence");
-  for (const claim of context) displayClaim(details, claim, sources);
-  if (!context.length) addText(details, "p", "No area or site evidence was available.");
 }
 
 function displayClaim(parent, claim, sources) {
   const card = document.createElement("article");
   addText(card, "p", claim.statement);
-  for (const id of claim.source_ids) {
-    const source = sources.get(id);
-    if (!source) continue;
-    const item = addText(card, "div", "");
+  const references = claim.source_ids.map((id) => sources.get(id)).filter(Boolean);
+  const details = references.length ? addText(card, "details", "") : null;
+  if (details) addText(details, "summary", "Sources and context");
+  for (const source of references) {
+    const item = addText(details, "div", "");
     if (source.evidence_url?.startsWith("https://")) {
       const link = addText(item, "a", source.fact);
       link.href = source.evidence_url;
@@ -105,7 +105,7 @@ byId("review").addEventListener("submit", async (event) => {
     const report = await response.json();
     if (!response.ok) throw new Error(report.error);
     displayReview(report);
-    status.textContent = "Review complete. See the next decision below.";
+    status.textContent = "Review complete. Findings are shown below.";
   } catch (error) {
     status.textContent = error.message || "Review failed. Try again.";
   } finally {
