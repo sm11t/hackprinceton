@@ -27,6 +27,7 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
+from exterior import exterior_records, fetch_property, roof_height_ft
 from reconcile import costar_address, costar_ceiling_ft, record
 
 # --- Use requirements ------------------------------------------------------------
@@ -218,11 +219,23 @@ def best_area(candidates):
     return None, None, None, None
 
 
-def evaluate_use(use_id, area, ceiling_ft, ceiling_source):
-    """Return evidence records judging fit for one use from the best area + clear height."""
+def evaluate_use(use_id, area, ceiling_ft, ceiling_source, roof_ft=None):
+    """Return evidence records judging fit for one use from the best area + clear height.
+
+    roof_ft (Vexcel roof height above ground) is a hard upper bound: no interior is taller than its roof."""
     use = USES[use_id]
     area_label, area_sf, area_src, area_id = area
     out = []
+    need_ft = use.get("min_clear_height_ft")
+    if need_ft and roof_ft:
+        ok = roof_ft >= need_ft
+        out.append(record(
+            f"{use_id}_roof_upper_bound", roof_ft, "vexcel", None, confidence=0.6,
+            status="agrees" if ok else "conflict", needs_human=not ok,
+            note=(f"The roof is {roof_ft:g} ft above ground, so the inside cannot exceed that; "
+                  + (f"it leaves room for the {need_ft} ft clear height {use['label'].lower()} needs, but the usable "
+                     "height under the roof structure still has to be measured."
+                     if ok else f"that is below the {need_ft} ft clear height {use['label'].lower()} needs."))))
     if use_id == "pickleball":
         if area_sf:
             courts = math.floor(area_sf / use["area_per_unit_sf"])
@@ -296,8 +309,10 @@ def verdict(fit_records):
     return "supported"
 
 
-def space_fit(prop, use_id, spaces=None, suite=None):
-    """Fit report for one property and proposed use (CoStar-only; Vexcel/Matterport add records later)."""
+def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None):
+    """Fit report for one property and proposed use.
+
+    vexcel: a Vexcel property/extract response for the CoStar pin (see exterior.fetch_property), or None."""
     if use_id not in USES:
         raise ValueError(f"Unknown use {use_id!r}; choose one of {', '.join(USES)}")
     spaces = spaces or []
@@ -319,8 +334,12 @@ def space_fit(prop, use_id, spaces=None, suite=None):
         ("the building (RBA)", prop.get("rentableBuildingAreaSquareFeet"), "costar", prop["id"]),
         ("the building (GBA)", prop.get("grossBuildingAreaSquareFeet"), "costar", prop["id"]),
     ])
+    floor_sf = prop.get("grossTypicalFloorSquareFeet") or (
+        (prop.get("grossBuildingAreaSquareFeet") or 0) / (prop.get("numStoriesAboveGrade") or 1)) or None
+    ext = exterior_records(prop, vexcel, floor_sf)[0] if vexcel else []
+    records += ext
     ceiling_ft, _ = costar_ceiling_ft(prop)
-    fit = evaluate_use(use_id, area, ceiling_ft, "costar" if ceiling_ft else None)
+    fit = evaluate_use(use_id, area, ceiling_ft, "costar" if ceiling_ft else None, roof_height_ft(ext))
     return {
         "property_id": prop["id"], "address": costar_address(prop)["display"], "use": use_id,
         "use_label": USES[use_id]["label"], "suite": (chosen or {}).get("suite"),
@@ -335,14 +354,22 @@ def main():
     parser.add_argument("--property-id", type=int, required=True)
     parser.add_argument("--use", choices=sorted(USES), required=True)
     parser.add_argument("--suite", help="Evaluate this listed suite instead of the largest one")
-    parser.add_argument("--offline", action="store_true", help="Skip network calls (CoStar kit only).")
+    parser.add_argument("--offline", action="store_true", help="Skip network calls; use cached provider responses.")
     args = parser.parse_args()
     password = kit_password()
     try:
         prop = load_property(args.kit, args.property_id, password)
-        result = space_fit(prop, args.use, listed_spaces(args.kit, args.property_id, password), args.suite)
+        spaces = listed_spaces(args.kit, args.property_id, password)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
+    errors, vexcel = {}, None
+    address = prop.get("primaryAddress") or {}
+    try:
+        vexcel = fetch_property(address.get("latitude"), address.get("longitude"), prop["id"], args.offline)
+    except (OSError, RuntimeError, ValueError) as error:  # provider errors are reported, never fatal
+        errors["vexcel"] = str(error)
+    result = space_fit(prop, args.use, spaces, args.suite, vexcel)
+    result["errors"].update(errors)
     print(json.dumps(result, indent=2))
 
 
