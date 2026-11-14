@@ -1,4 +1,5 @@
 """Join the team checks for one property and one explicitly selected suite."""
+from alternatives import CATALOG, rank_alternatives
 from decision_context import attach_context
 from approvals_timeline import analyze_approvals, build_timeline
 from eligibility import evidence_overview, review_eligibility
@@ -8,7 +9,7 @@ from money_runway import analyze_money
 from reconcile import load_tenancies, reconcile_evidence
 from space_fit import gather, listed_spaces, load_property, space_fit
 
-REVIEW_USES = {"indoor pickleball": "pickleball", "fitness studio": "gym"}
+REVIEW_USES = {name: spec["fit"] for name, spec in CATALOG.items()}
 
 
 def space_option(space):
@@ -78,8 +79,15 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
     blocked_scans = {row["source_id"] for row in audit["records"]
                      if row["fact"] in {"scan_address", "scan_suite"} and row["status"] == "conflict"}
     fit = space_fit(prop, REVIEW_USES[use], spaces=selected if listing else [], suite=unit,
+                    requirements={"min_area_sf": 1} if REVIEW_USES[use] == "custom" else None,
                     vexcel=vexcel, rooms_by_model={model: value for model, value in rooms.items()
                                                   if model not in blocked_scans})
+    alternatives_fit = {}
+    for candidate, spec in CATALOG.items():
+        alternatives_fit[candidate] = space_fit(
+            prop, spec['fit'], spaces=selected if listing else [], suite=unit, vexcel=vexcel,
+            rooms_by_model={m: r for m, r in rooms.items() if m not in blocked_scans},
+            requirements={'min_area_sf': 1} if spec['fit'] == 'custom' else None)
     # An area calculation cannot determine court layout.
     fit["records"] = [row for row in fit["records"] if row["fact"] != "pickleball_courts_by_area"]
     if (blocked_scans or not listing) and fit["verdict"] == "supported":
@@ -150,7 +158,7 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
         "identity": audit, "space": fit, "deal": deal, "approvals": approvals,
         "location": location, "money": cash, "actions": actions,
         "unavailable_sources": list(errors),
-        "tour": tour,
+        "tour": tour, "_fits": alternatives_fit, "_prop": prop, "_listing": listing,
     }
 
 
@@ -160,4 +168,7 @@ def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
     assumptions(inputs)
     report = _review_property(kit, entry, use, suite, ownership, inputs, **kwargs)
     report['source_mode'] = 'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)'
-    return attach_context(report, inputs)
+    attach_context(report, inputs)
+    report['alternatives'] = rank_alternatives(report, report.pop('_prop', {}), report.pop('_fits', {}),
+        report.pop('_listing', None), report['decision_context']['cash_budget'], float(inputs.get('reserve', 50000)))
+    return report

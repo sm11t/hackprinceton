@@ -28,6 +28,7 @@ async function json(url, payload) {
 }
 
 async function updateSuites() {
+  reportBox.replaceChildren();
   const request = ++suiteRequest;
   const id = byId("property").value;
   submit.disabled = true;
@@ -205,7 +206,21 @@ function display(report) {
   node(hero, "p", `${report.scope_label} · ${report.proposed_use} · ${report.ownership}`);
   node(hero, "h3", report.eligibility.status === "conditional" ? report.headline : report.eligibility.headline);
   node(hero, "p", report.eligibility.reason);
-  showRecords(hero, report.eligibility.records);
+  node(hero, "p", report.source_mode);
+  node(hero, "h3", report.alternatives.recommendation);
+  node(hero, "p", report.alternatives.reversal);
+  const alternativePanel = panel(reportBox, "Alternatives within your budget");
+  node(alternativePanel, "p", report.alternatives.ranking_basis);
+  for (const option of report.alternatives.options) {
+    const card = node(alternativePanel, "article");
+    node(card, "h3", option.use);
+    node(card, "p", `${option.status} · Budget: ${option.budget_fit} · Physical fit: ${option.physical_fit}`);
+    node(card, "p", `Key blocker: ${option.key_blocker}`);
+    node(card, "p", `Next: ${option.next_check}`);
+  }
+  const excluded = node(alternativePanel, "details");
+  node(excluded, "summary", "All screened uses and exclusions");
+  for (const option of report.alternatives.all_options) node(excluded, "p", `${option.use}: ${option.status}. ${option.key_blocker}`);
   const list = node(hero, "ol");
   for (const action of report.actions) {
     const item = node(list, "li");
@@ -318,7 +333,7 @@ function display(report) {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const suite = byId("suite").value;
-  const inputs = {};
+  const inputs = {starting_cash: Number(byId("budget").value), reserve: Number(byId("reserve").value)};
   for (const [parameter, field] of [["capital", "starting_cash"], ["fitout", "build_cost"], ["reserve", "reserve"]]) {
     if (query.has(parameter) && Number.isFinite(Number(query.get(parameter)))) inputs[field] = Number(query.get(parameter));
   }
