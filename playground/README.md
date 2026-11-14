@@ -129,3 +129,31 @@ node --check playground/static/pilot.js
 Tanner demo path: open `/pilot` → inspect aerial/tour → compare the three evidence scopes →
 change opening delay from 0 to 3 → observe the $5,000 reserve gap in month 6 →
 review the suite identity and dimension check before estimating court count.
+
+### Tanner Location & Demand
+
+Load the sponsor keys along with `UPSTAGE_API_KEY`, `TAVILY_API_KEY` and the
+activated `CENSUS_API_KEY` into your shell. From the repo root, run:
+
+```sh
+uv run playground/location_run.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" \
+  --output playground/output/location-tanner.json
+```
+
+CoStar archive joins, Matterport rooms and Vexcel structure data build the
+property evidence packet. The Census geocoder, FEMA and ACS provide public
+context. A Deep Agents supervisor calls three specialists for property
+evidence, market research and independent claim review. Market research makes
+at most one Tavily search and extracts up to three pages. Candidate web claims
+must match an exact excerpt from a fetched page and pass the reviewer. Census
+and FEMA summaries come directly from the API values. Demand remains unverified.
+
+The kit run sends selected property evidence fields to Upstage. Use
+`--public-only` for the public Tanner address and public sources. Add
+`--skip-market` to omit Tavily retrieval. Individual source gaps are recorded
+in the review. The saved report is local and gitignored.
+
+Start the existing Python web server, choose Tanner Road and indoor pickleball,
+then open the saved review in the Location & Demand panel. Re-run the CLI and
+reload the review to refresh it. The endpoint serves accepted findings and
+source references. Raw sponsor and search payloads stay in the local report.

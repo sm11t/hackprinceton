@@ -229,7 +229,7 @@ function field(
 }
 function shell(body) {
   const stage = { preferences: 0, shortlist: 1, workspace: 2 }[state.view];
-  return `<header class="header"><a class="brand" href="/" aria-label="Reuse home"><b>↗</b>reuse</a><div class="header-right">${badge("INTERACTIVE PROTOTYPE", "amber")}<span class="small muted">${esc(state.name || "Demo workspace")}</span><span class="avatar">${esc((state.name || "D").slice(0, 1).toUpperCase())}</span><button class="text-button small" data-action="logout">Exit demo</button></div></header><div class="layout"><aside class="sidebar"><div class="eyebrow">YOUR NEXT BEGINNING</div>${["Your brief", "Find a property", "Property workspace"].map((s, i) => `<button class="nav-step ${stage === i ? "active" : ""}" data-action="nav" data-step="${i}" ${i > stage ? "disabled" : ""}><i>${i < stage ? "✓" : i + 1}</i>${s}</button>`).join("")}<div class="sidebar-bottom">A better use for<br>what’s already here.<div class="divider"></div><a href="/pilot">Tanner evidence pilot ↗</a><p class="mt">Demo data. No authentication, live search or agents connected.</p></div></aside><main class="main">${body}<div class="footer-note"><span>REUSE / REDEVELOPMENT WORKSPACE</span><span>Mock experience · illustrative outputs · nothing submitted externally</span></div></main></div>`;
+  return `<header class="header"><a class="brand" href="/" aria-label="Reuse home"><b>↗</b>reuse</a><div class="header-right">${badge("INTERACTIVE PROTOTYPE", "amber")}<span class="small muted">${esc(state.name || "Demo workspace")}</span><span class="avatar">${esc((state.name || "D").slice(0, 1).toUpperCase())}</span><button class="text-button small" data-action="logout">Exit demo</button></div></header><div class="layout"><aside class="sidebar"><div class="eyebrow">YOUR NEXT BEGINNING</div>${["Your brief", "Find a property", "Property workspace"].map((s, i) => `<button class="nav-step ${stage === i ? "active" : ""}" data-action="nav" data-step="${i}" ${i > stage ? "disabled" : ""}><i>${i < stage ? "✓" : i + 1}</i>${s}</button>`).join("")}<div class="sidebar-bottom">A better use for<br>what’s already here.<div class="divider"></div><a href="/pilot">Tanner evidence pilot ↗</a><p class="mt">Demo sign-in and shortlist. Tanner Road can display a saved Location & Demand review.</p></div></aside><main class="main">${body}<div class="footer-note"><span>REUSE / REDEVELOPMENT WORKSPACE</span><span>Demo workspace · Tanner Road research is labeled separately</span></div></main></div>`;
 }
 function render() {
   app.innerHTML =
@@ -430,7 +430,44 @@ function fitOutput() {
   const u = currentUse();
   return `<div class="output-grid"><div><h3>${labels[u]} · fit questions</h3><ul class="list-plain">${requirements[u].map((r) => `<li>□ ${r}<span>Request measurements or plans before estimating capacity.</span></li>`).join("")}</ul>${finding("Area alone does not prove layout fit.", "An activity zone, circulation and support rooms must fit around columns and fixed services. Court count, seats or class capacity remains unverified.", "Matterport / measured plan", "Subject suite")}</div><div class="plan"><span class="eyebrow">CONCEPT ONLY · NOT TO SCALE</span><svg viewBox="0 0 330 200" role="img" aria-label="Illustrative space allocation: activity, circulation and support"><rect x="10" y="15" width="310" height="170" fill="white" stroke="#9cad8d" stroke-width="2"/><rect x="20" y="25" width="208" height="110" rx="3" fill="#d9e7bf"/><text x="124" y="84" text-anchor="middle" fill="#476044" font-size="13">Activity space</text><rect x="238" y="25" width="72" height="150" fill="#e5dfcf"/><text x="274" y="105" text-anchor="middle" fill="#746a53" font-size="11">Support</text><path d="M20 155H225" stroke="#bdccae" stroke-width="20"/><text x="124" y="159" text-anchor="middle" fill="#536c4a" font-size="11">Circulation</text></svg><p class="small">Illustrates what a future measured layout should account for. No geometry or capacity is inferred.</p></div></div><div class="grid2 mt">${finding("Exterior: roof, parking and loading", "Use the correct Vexcel footprint to inspect visible roof features, rooftop HVAC, docks and access. Verify allocated parking and vehicle turning access separately.", "Vexcel + CoStar", "Building / site")}${finding("Interior: visible condition clues", "Jev output will show room/photo references for water marks, damaged finishes, exits or equipment. Any apparent issue becomes an inspector question. No photo analysis ran.", "Jev + Matterport", "Room / photo")}</div><details class="mt"><summary>Additional inspection checklist</summary><ul class="list-plain"><li>Foundation, plumbing and sewer service<span>Request professional reports and utility records.</span></li><li>Pests, concealed moisture and electrical condition<span>Not established by an aerial or interior scan.</span></li><li>Three-phase power, HVAC and fire protection<span>Verify serving equipment, capacity and suite coverage.</span></li></ul></details>`;
 }
+let tannerLocation = null;
+let tannerLocationLoading = false;
+async function loadTannerLocation() {
+  tannerLocationLoading = true;
+  render();
+  try {
+    const response = await fetch("/api/location/tanner");
+    tannerLocation = response.ok ? await response.json() : { missing: true };
+  } catch {
+    tannerLocation = { missing: true };
+  } finally {
+    tannerLocationLoading = false;
+    render();
+  }
+}
 function locationOutput() {
+  if (state.property === "tanner" && currentUse() === "pickleball") {
+    const loadButton = `<button class="secondary mt" data-action="load-tanner-location" ${tannerLocationLoading ? "disabled" : ""}>${tannerLocationLoading ? "Loading…" : "Open saved Location & Demand review"}</button>`;
+    if (!tannerLocation || tannerLocation.missing) {
+      const status = tannerLocation?.missing ? "No saved review is available." : "Open the saved Tanner Road research when available.";
+      return `<p>${status}</p>${loadButton}`;
+    }
+    const sources = new Map(tannerLocation.sources.map((s) => [s.source_id, s]));
+    const findings = tannerLocation.findings.map((claim) => {
+      const links = claim.source_ids.map((id) => {
+        const source = sources.get(id);
+        if (!source) return "";
+        const label = esc(source.fact);
+        const url = source.evidence_url;
+        const ref = /^https:\/\//.test(url || "") ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${label}</a>` : label;
+        return `<li>${ref}${source.captured_at ? ` · ${esc(source.captured_at)}` : ""}</li>`;
+      }).join("");
+      return `<article class="finding"><h3>${esc(claim.statement)}</h3><ul>${links}</ul></article>`;
+    }).join("");
+    const gaps = [...tannerLocation.unknowns, ...tannerLocation.validation_issues]
+      .map((gap) => `<li>${esc(gap)}</li>`).join("");
+    return `<div class="notice">Saved Tanner Road review · Demand remains unverified.</div><div class="mt">${findings || "<p>No claims cleared review.</p>"}</div><h3 class="mt">What to verify</h3><ul>${gaps}</ul>${loadButton}`;
+  }
   const city = state.prefs.city;
   return `<div class="notice">No location datasets were queried. These are the questions and source slots the real workflow will populate for ${city}.</div><div class="grid2 mt">${finding("Who could use this business?", "Show catchment households, daytime population and relevant age/income distributions with dataset vintage and geographic scope. Validate demand through customer interviews and paid tests.", "Census ACS", "Catchment / tract")}${finding("What else is nearby?", "Map relevant businesses and complementary destinations. Verify whether a registered or mapped business is still operating; record hours and observed prices.", "Business registry / maps", "Trade area")}${finding(city === "Houston" ? "Flood and environmental context" : "Flood, wildfire and geological context", `Retrieve official mapped exposures for the exact parcel in ${city}. Nearby environmental records prompt further review; proximity alone does not establish contamination.`, "FEMA / EPA / local hazard maps", "Parcel / nearby area")}${finding("History and neighborhood context", "Review prior sales, permits and reported incident data with dates and limitations. No appreciation forecast or neighborhood “safe/unsafe” label.", "CoStar sales / public records", "Property / reporting area")}</div><div class="panel brief mt"><h3>Before calling this a good market</h3><p class="small">Test willingness to pay, peak-hour demand and competing capacity. Demographics describe an area; they do not prove bookings.</p></div>`;
 }
@@ -672,6 +709,7 @@ app.addEventListener("click", (e) => {
   const b = e.target.closest("[data-action]");
   if (!b) return;
   const a = b.dataset.action;
+  if (a === "load-tanner-location") { loadTannerLocation(); return; }
   readBrief();
   if (a === "city") {
     state.prefs.city = b.dataset.value;

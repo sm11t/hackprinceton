@@ -212,6 +212,24 @@ def main():
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
+            if route.path == "/api/location/tanner":
+                try:
+                    path = ROOT / "output" / "location-tanner.json"
+                    report = json.loads(path.read_text())
+                    if report.get("property_id") != 23296 or report.get("proposed_use") != "indoor pickleball":
+                        raise ValueError("Report belongs to another scenario")
+                    # Return only accepted claims, gaps, and evidence references.
+                    body = {key: report[key] for key in ("findings", "unknowns", "validation_issues")}
+                    body["sources"] = [
+                        {key: item.get(key) for key in
+                         ("source_id", "fact", "evidence_url", "captured_at", "note")}
+                        for item in report["evidence"]
+                    ]
+                    self.send(json.dumps(body).encode(), "application/json")
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.send(b'{"error":"No saved Location & Demand review for this scenario."}',
+                              "application/json", 404)
+                return
             if route.path == "/api/pilot/evidence":
                 try:
                     prop, matches = property_data("23296")
