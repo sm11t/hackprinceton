@@ -76,6 +76,10 @@ a {{ color: #24543f }}
 .meta {{ color: #515b54; margin: 0 0 20px }}
 .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 28px }}
 img {{ width: 100%; height: auto; display: block; background: #e6e9e3 }}
+details {{ margin: 12px 0 }}
+summary {{ color: #24543f; cursor: pointer }}
+iframe {{ display: block; width: 100%; aspect-ratio: 4 / 3; margin-top: 8px; border: 0;
+  background: #e6e9e3 }}
 table {{ width: 100%; border-collapse: collapse; font-size: 14px }}
 th, td {{ border-bottom: 1px solid #d9ded8; text-align: left; padding: 7px 6px }}
 th:last-child, td:last-child {{ text-align: right }}
@@ -137,9 +141,13 @@ def main():
                 rooms = room_table(rooms_for(scan))
             except (KeyError, RuntimeError, ValueError) as error:
                 rooms = f"<p>{value(error)}</p>"
+            tour_url = escape("https://my.matterport.com/show/?" + urlencode({"m": scan}), quote=True)
             interior = (
-                f'<p>{scan_links} · <a href="https://my.matterport.com/show/?m={escape(scan, quote=True)}"'
-                f' target="_blank" rel="noreferrer">Open 3D tour</a></p>{rooms}'
+                f'<p>{scan_links}</p><details><summary>View 3D tour</summary>'
+                f'<iframe src="{tour_url}" title="Matterport 3D tour" loading="lazy"'
+                ' allow="fullscreen; xr-spatial-tracking"></iframe>'
+                f'<p><a href="{tour_url}" target="_blank" rel="noreferrer">Open in a new tab</a></p>'
+                f'</details>{rooms}'
             )
         try:
             image_for(property_id)

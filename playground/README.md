@@ -46,7 +46,7 @@ python3 playground/web.py --kit "$HOME/Downloads/costar-hackathon-kit.zip"
 
 Open [localhost:8765](http://127.0.0.1:8765). Search for **9700 Tanner Rd**
 to verify the CoStar record, Vexcel aerial, and Matterport room table. Select
-a scan to see its rooms, or use **Open 3D tour** to view that scan. Use
+a scan to see its rooms, or expand **View 3D tour** to open the Matterport player inline. Use
 `--port 8766` and open port 8766 if port 8765 is already occupied.
 
 ## Run the command-line probe
