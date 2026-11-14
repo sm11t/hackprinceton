@@ -1,17 +1,29 @@
 """Join the team checks for one property and one explicitly selected suite."""
 from approvals_timeline import analyze_approvals, build_timeline
+from eligibility import evidence_overview, review_eligibility
 from deal import deal_facts, load_deal_data, rent_for_simulation
 from location_sources import record
 from money_runway import analyze_money
 from reconcile import load_tenancies, reconcile_evidence
-from space_fit import gather, listed_spaces, space_fit
+from space_fit import gather, listed_spaces, load_property, space_fit
 
 REVIEW_USES = {"indoor pickleball": "pickleball", "fitness studio": "gym"}
 
 
+def space_option(space):
+    suite = str(space["suite"] or "").strip()
+    if suite:
+        return {"value": suite, "label": f"Suite {suite}"}
+    size = space["square_feet"]
+    if size:
+        return {"value": f"listing:{space['listing_id']}:{size:g}", "label": f"{size:,.0f} sq ft (unnamed)"}
+    return None
+
+
 def suite_options(kit, property_id, password):
-    return sorted({str(space["suite"]).strip() for space in listed_spaces(kit, property_id, password)
-                   if space["suite"] and str(space["suite"]).strip()})
+    options = [option for space in listed_spaces(kit, property_id, password)
+               if (option := space_option(space))]
+    return list({option["value"]: option for option in options}.values())
 
 
 def project_cash(inputs, use, ownership, buyer=None):
@@ -27,27 +39,49 @@ def project_cash(inputs, use, ownership, buyer=None):
 def review_property(kit, entry, use, suite, ownership, inputs, *, password=None, offline=False,
                     buyer=None, research=None):
     property_id = int(entry["id"])
-    prop, spaces, vexcel, rooms, errors = gather(kit, property_id, offline, password)
+    prop = load_property(kit, property_id, password)
+    spaces = listed_spaces(kit, property_id, password)
     region = "TX" if entry["city"] == "Houston" else "CA"
     address = f'{entry["address"]}, {entry["city"]}, {region}'
-    tenancies = load_tenancies(kit, {property_id}, password).get(property_id, [])
-    deals, offers, comps = load_deal_data(kit, property_id, password)
-    selected = [space for space in spaces if suite and str(space["suite"]).strip() == suite]
+    selected = [space for space in spaces if suite and (option := space_option(space))
+                and option["value"] == suite]
     if suite and not selected:
         raise ValueError("Choose an advertised suite for this property.")
-    unit = suite if len(selected) == 1 else None
-    matched_deals = [space for space in deals if unit and str(space.get("suite")).strip() == unit
-                     and space["listing_id"] == selected[0]["listing_id"]
-                     and space.get("squareFeetMax") == selected[0]["square_feet"]]
+    listing = selected[0] if len(selected) == 1 else None
+    unit = str(listing["suite"]).strip() if listing and listing["suite"] else None
+    scope_label = space_option(listing)["label"] if listing else "Building scope"
+    # A building-only lease cannot select a specific commercial space.
+    deals, offers, comps = load_deal_data(kit, property_id, password) if listing or ownership == "buy" else ([], [], [])
+    matched_deals = [space for space in deals if listing and str(space.get("suite") or "").strip() == (unit or "")
+                     and space["listing_id"] == listing["listing_id"]
+                     and space.get("squareFeetMax") == listing["square_feet"]]
+    eligibility = review_eligibility(prop, suite, selected, matched_deals, offers, ownership)
+    if eligibility["status"] != "conditional":
+        audit = reconcile_evidence(prop, selected_suite=unit)
+        audit["records"].extend(eligibility["records"])
+        return {
+            "property_id": property_id, "address": address, "proposed_use": use, "suite": unit,
+            "requested_suite": suite, "scope_label": scope_label, "ownership": ownership, "headline": eligibility["headline"],
+            "eligibility": eligibility, "identity": audit, "evidence_overview": evidence_overview(audit["records"]),
+            "money": None, "space": None, "approvals": None, "location": None,
+            "tour": next((row["evidence_url"] for row in eligibility["records"] if row["evidence_url"]), None),
+            "actions": [{"title": "Verify an available commercial space or pick another property",
+                         "owner": "Broker or property manager",
+                         "request": "Ask for the current listing, the premises on a floor plan and the allowed use. Verify that any tour covers those premises."}],
+            "unavailable_sources": [],
+        }
+
+    prop, _, vexcel, rooms, errors = gather(kit, property_id, offline, password, property_data=(prop, spaces))
+    tenancies = load_tenancies(kit, {property_id}, password).get(property_id, [])
     audit = reconcile_evidence(prop, rooms, selected_suite=unit, tenancies=tenancies)
     blocked_scans = {row["source_id"] for row in audit["records"]
                      if row["fact"] in {"scan_address", "scan_suite"} and row["status"] == "conflict"}
-    fit = space_fit(prop, REVIEW_USES[use], spaces=selected if unit else [], suite=unit,
+    fit = space_fit(prop, REVIEW_USES[use], spaces=selected if listing else [], suite=unit,
                     vexcel=vexcel, rooms_by_model={model: value for model, value in rooms.items()
                                                   if model not in blocked_scans})
     # An area calculation cannot determine court layout.
     fit["records"] = [row for row in fit["records"] if row["fact"] != "pickleball_courts_by_area"]
-    if blocked_scans or not unit:
+    if (blocked_scans or not listing) and fit["verdict"] == "supported":
         fit["verdict"] = "investigate"
     deal = deal_facts(property_id, deals, offers, comps, prop.get("grossBuildingAreaSquareFeet"),
                       suite=unit)
@@ -73,16 +107,22 @@ def review_property(kit, entry, use, suite, ownership, inputs, *, password=None,
     if property_id == 23296 and unit == "A" and ownership == "lease" and not buyer:
         # Match the pilot: $2k in assumed NNN charges plus $2k in pre-opening overhead.
         cash_inputs.setdefault("monthly_carry", 4000)
-    cash = project_cash(cash_inputs, use, ownership, buyer)
-    cash["rent_source"] = rent_source
+    cash = None
+    if fit["verdict"] == "does_not_fit":
+        eligibility["headline"] = "Fit check failed under the available measurements"
+        eligibility["reason"] = "Review the physical fit findings before modeling this conversion."
+        eligibility["status"] = "blocked"
+    else:
+        cash = project_cash(cash_inputs, use, ownership, buyer)
+        cash["rent_source"] = rent_source
     building = record("costar", f"property-{property_id}", "CoStar building record",
                       {"zoningDescription": prop.get("zoningDescription")})
     approvals = analyze_approvals(address, use, [building], {
         "permit_months": cash["inputs"]["permit_months"], "build_months": cash["inputs"]["build_months"],
         "delay_months": cash["inputs"]["delay"],
-    })
+    } if cash else None)
     location = {"findings": [], "sources": [], "status": "offline" if offline else "unavailable"}
-    if not offline and research:
+    if not offline and research and cash:
         try:
             report = research(property_id, use)
             location.update(status="complete", findings=report["findings"], sources=report["evidence"])
@@ -103,8 +143,9 @@ def review_property(kit, entry, use, suite, ownership, inputs, *, password=None,
     ]
     return {
         "property_id": property_id, "address": address, "proposed_use": use, "suite": unit,
-        "requested_suite": suite, "ownership": ownership,
-        "headline": "Confirm the suite before committing" if conflict or not unit else "Verify layout, approvals and demand before committing",
+        "requested_suite": suite, "scope_label": scope_label, "ownership": ownership,
+        "headline": "Confirm the suite before committing" if conflict or not listing else "Verify layout, approvals and demand before committing",
+        "eligibility": eligibility, "evidence_overview": evidence_overview(audit["records"]),
         "identity": audit, "space": fit, "deal": deal, "approvals": approvals,
         "location": location, "money": cash, "actions": actions,
         "unavailable_sources": list(errors),

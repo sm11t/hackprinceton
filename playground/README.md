@@ -306,3 +306,9 @@ delay update the modeled opening month together. Before relying on court capacit
 confirm the scan covers the advertised suite and obtain a dimensioned plan. City
 guidance identifies approvals to investigate. Parcel jurisdiction, approved use,
 and paid demand still require verification.
+
+A property review pauses when the kit cannot establish the commercial premises for
+the selected deal. Cypresswood (966604) is the residential regression, Tanner Suite A
+and Wynnwood's unnamed 9,900 sq ft listing are the commercial paths. A separately
+requested hypothetical scenario uses editable placeholders. The property decision
+shows evidence by issue and records behind expandable details.

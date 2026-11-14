@@ -600,8 +600,12 @@ def check_size(prop):
                                               "wrong (or a mezzanine/basement is counted). Ask for a measured plan "
                                               "before pricing per sq ft."))))
     else:
+        missing = [label for label, value in (
+            ("gross building area", gba), ("typical floor area", typical), ("story count", stories),
+        ) if not value]
         out.append(record(fact="gross_area_vs_floors", value=None, **common, confidence=0.1, status="unknown",
-                          note="CoStar is missing gross area, typical floor or story count."))
+                          note=f"CoStar has no recorded {', '.join(missing)} for this property. "
+                               "The building area comparison is unresolved."))
     if gba and rba and rba > gba * 1.02:
         out.append(record(
             fact="rentable_vs_gross_area", value=round(rba / gba, 2), **common, confidence=0.7, status="conflict",

@@ -302,6 +302,8 @@ def main():
                 if use not in REVIEW_USES or ownership not in ("lease", "buy") or not isinstance(inputs, dict):
                     raise ValueError("Choose a supported use and lease or buy.")
                 if route.endswith("/cash"):
+                    if payload.get("scenario_only") is not True:
+                        raise ValueError("Confirm that you want a hypothetical cash scenario.")
                     report = project_cash(inputs, use, ownership, buyer)
                 else:
                     entry = location_properties[str(payload["property_id"])]

@@ -36,8 +36,8 @@ async function updateSuites() {
   try {
     const options = await json(`/api/maximo/suites?id=${encodeURIComponent(id)}`);
     if (request !== suiteRequest) return;
-    for (const suite of options) byId("suite").add(new Option(suite, suite));
-    if (options.length === 1) byId("suite").value = options[0];
+    for (const option of options) byId("suite").add(new Option(option.label, option.value));
+    if (options.length === 1) byId("suite").value = options[0].value;
     statusLine.textContent = options.length > 1 ? "Select a suite to tie its fit and asking rent together." : "";
   } catch (error) {
     if (request === suiteRequest) statusLine.textContent = error.message;
@@ -118,10 +118,21 @@ function showCash(parent, cash, report) {
       : `The conversion crosses reserve in month ${c.first_month_below_reserve}. It needs ${money(c.extra_funding_needed)} more cash to maintain reserve.`);
     node(summary, "p", `With three more months of delay: ${money(data.stress.extra_funding_needed)} reserve gap. Operating break-even: ${data.boundaries.break_even_monthly_bookings ?? "unavailable"} bookings per month.`);
     node(summary, "p", `${data.buyer_source}. ${money(data.bank_monthly_bills)} per month in bank bills included. Count each rent or holding expense once.`);
+    const openingCosts = node(summary, "details");
+    node(openingCosts, "summary", "Where cash goes before opening");
+    const costs = node(openingCosts, "ul");
+    const values = data.inputs;
+    node(costs, "li", `Build-out: ${money(values.build_cost)} (editable allowance; get itemized bids for design, building work and equipment).`);
+    node(costs, "li", `Upfront deal cash: ${money(values.upfront_cost)} (editable allowance).`);
+    for (const phase of data.timeline.phases) {
+      node(costs, "li", `Months ${phase.start_month}–${phase.end_month}: ${phase.name}. Holding costs continue through both phases.`);
+    }
+    node(costs, "li", `Pre-opening outflow in the chart: ${money(values.upfront_cost + data.conversion.rows
+      .filter((row) => row.month < data.timeline.opening_month).reduce((sum, row) => sum + row.outflow, 0))}.`);
     drawCash(summary, data);
   }
   renderCash(cash);
-  if (report.ownership === "lease") node(parent, "p", `Starting rent input: ${cash.rent_source}.`);
+  if (report.ownership === "lease") node(parent, "p", `Starting rent input: ${cash.rent_source ?? "Editable assumption"}.`);
   for (const [name, label] of fields) {
     if (name === "monthly_rent" && report.ownership === "buy") continue;
     const input = node(node(controls, "label", label), "input");
@@ -145,7 +156,7 @@ function showCash(parent, cash, report) {
     message.textContent = "";
     try {
       const inputs = { ...cash.inputs, ...Object.fromEntries([...new FormData(controls)].map(([k, v]) => [k, Number(v)])) };
-      renderCash(await json("/api/maximo/cash", { inputs, use: report.proposed_use, ownership: report.ownership }));
+      renderCash(await json("/api/maximo/cash", { inputs, use: report.proposed_use, ownership: report.ownership, scenario_only: true }));
       message.textContent = "Cash curve and modeled opening updated.";
     } catch (error) {
       message.textContent = error.message;
@@ -191,8 +202,10 @@ function drawCash(parent, cash) {
 
 function display(report) {
   const hero = panel(reportBox, report.address);
-  node(hero, "p", `${report.suite ? "Suite " + report.suite : "Building scope"} · ${report.proposed_use} · ${report.ownership}`);
-  node(hero, "h3", report.headline);
+  node(hero, "p", `${report.scope_label} · ${report.proposed_use} · ${report.ownership}`);
+  node(hero, "h3", report.eligibility.status === "conditional" ? report.headline : report.eligibility.headline);
+  node(hero, "p", report.eligibility.reason);
+  showRecords(hero, report.eligibility.records);
   const list = node(hero, "ol");
   for (const action of report.actions) {
     const item = node(list, "li");
@@ -214,17 +227,61 @@ function display(report) {
       tour.src = report.tour;
     }
   });
-  showCash(panel(reportBox, "Money and runway"), report.money, report);
   const columns = node(reportBox, "div", undefined, "review-columns");
   const evidence = panel(columns, "Evidence and identity");
-  node(evidence, "p", `${report.identity.conflicts} evidence conflicts across linked records.`);
-  const conflicts = report.identity.records.filter((row) => row.status === "conflict");
-  showRecords(evidence, conflicts);
+  const ranked = node(evidence, "ul");
+  for (const issue of report.evidence_overview.slice(0, 3)) {
+    const item = node(ranked, "li");
+    node(item, "strong", issue.title);
+    node(item, "p", issue.note);
+  }
+  if (!ranked.childElementCount) node(evidence, "p", "Available comparisons found no decision-changing discrepancies. Verify coverage before relying on them.");
   const all = node(evidence, "details");
-  node(all, "summary", "All identity, size and occupancy checks");
-  showRecords(all, report.identity.records);
+  node(all, "summary", "Source records by issue");
+  const issues = new Map();
+  for (const record of report.identity.records) {
+    if (!issues.has(record.fact)) issues.set(record.fact, []);
+    issues.get(record.fact).push(record);
+  }
+  for (const [fact, rows] of issues) {
+    const group = node(all, "details");
+    node(group, "summary", `${fact.replaceAll("_", " ")} (${rows.length})`);
+    showRecords(group, rows);
+  }
+  if (!report.money) {
+    const held = panel(reportBox, "Cash modeling paused");
+    node(held, "p", "Verify that the space is available and suitable before using cash estimates for this address.");
+    const explore = node(held, "button", "Open a hypothetical cash scenario", "secondary");
+    explore.addEventListener("click", async () => {
+      explore.disabled = true;
+      try {
+        const cash = await json("/api/maximo/cash", {
+          use: report.proposed_use, ownership: report.ownership, scenario_only: true, inputs: {},
+        });
+        explore.remove();
+        node(held, "p", "Generic planning example. These assumptions do not establish costs, rent, demand or suitability for this property.");
+        showCash(held, cash, report);
+      } catch (error) {
+        node(held, "p", error.message);
+        explore.disabled = false;
+      }
+    });
+  } else {
+    const cash = panel(reportBox, "Conditional cash scenario");
+    node(cash, "p", "Runway under editable assumptions. Build-out costs, bookings and approval durations need independent estimates; a surplus does not establish site feasibility.");
+    showCash(cash, report.money, report);
+  }
+  if (!report.space) return;
   const space = panel(columns, "Space and condition");
-  node(space, "p", "Verify usable dimensions and obstructions on a measured plan before estimating layout.");
+  const fitLabel = {
+    supported: "Available measurements support initial screening. Verify the layout and overhead obstructions.",
+    investigate: "Fit remains unverified. Ask for a measured plan and usable dimensions for the selected space.",
+    does_not_fit: "Available measurements flag a fit problem. Review the limiting evidence before spending on this conversion.",
+  };
+  node(space, "p", fitLabel[report.space.verdict]);
+  const decisions = report.space.records.filter((row) => row.status === "conflict" ||
+    (row.status === "unknown" && ["footprint_vs_costar_floor", "roof_height_ft"].includes(row.fact)));
+  showRecords(space, decisions.slice(0, 2));
   const keyFacts = new Set(["ceiling_height_ft", "listed_space_sf", "roof_defects"]);
   showRecords(space, [
     ...report.identity.records.filter((row) => row.fact === "ceiling_height_ft").slice(0, 3),
@@ -237,7 +294,12 @@ function display(report) {
   const deal = panel(columns, "Listing and deal facts");
   if (!report.deal.records.length) node(deal, "p", "The kit returned no listing or sale records.");
   if (report.deal.purchase_note) node(deal, "p", report.deal.purchase_note);
-  showRecords(deal, report.deal.records);
+  const currentFacts = report.deal.records.filter((row) => row.fact.startsWith(report.ownership === "lease" ? "lease_" : "sale_"));
+  if (!currentFacts.length) node(deal, "p", "Asking terms for this deal type are unverified.");
+  showRecords(deal, currentFacts.slice(0, 4));
+  const history = node(deal, "details");
+  node(history, "summary", "All listing records and sale history");
+  showRecords(history, report.deal.records);
   const approvals = panel(columns, "Approvals and timeline");
   node(approvals, "p", report.approvals.summary);
   showClaims(approvals, report.approvals.findings, report.approvals.evidence);
@@ -246,6 +308,10 @@ function display(report) {
     node(area, "p", report.location.status === "offline" ? "Offline mode skipped live location research." : "Live location research was unavailable for this run.");
   }
   showClaims(area, report.location.findings, report.location.sources);
+  if (report.location.sources.some((row) => row.source_id === "fema-effective-zone" &&
+      Array.isArray(row.value) && row.value.some((zone) => /^(A|V)/.test(zone.FLD_ZONE ?? "")))) {
+    node(area, "p", "The address point is in a FEMA A or V zone. Verify parcel coverage and ask an insurance broker for terms before adding a premium to cash costs.");
+  }
   node(area, "p", "Paid demand at this site still needs a trial or direct customer evidence.");
 }
 
@@ -265,7 +331,7 @@ form.addEventListener("submit", async (event) => {
       property_id: byId("property").value, suite, use: byId("use").value, ownership: byId("ownership").value, inputs,
     });
     display(report);
-    statusLine.textContent = "Review ready.";
+    statusLine.textContent = report.money ? "Review ready." : "Eligibility needs review.";
   } catch (error) {
     statusLine.textContent = error.message;
   } finally {

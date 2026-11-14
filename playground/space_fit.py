@@ -469,8 +469,9 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model
         ("the building (RBA)", prop.get("rentableBuildingAreaSquareFeet"), "costar", prop["id"]),
         ("the building (GBA)", prop.get("grossBuildingAreaSquareFeet"), "costar", prop["id"]),
     ])
-    floor_sf = prop.get("grossTypicalFloorSquareFeet") or (
-        (prop.get("grossBuildingAreaSquareFeet") or 0) / (prop.get("numStoriesAboveGrade") or 1)) or None
+    floor_sf = prop.get("grossTypicalFloorSquareFeet")
+    if not floor_sf and prop.get("numStoriesAboveGrade") == 1:
+        floor_sf = prop.get("grossBuildingAreaSquareFeet")
     ext = exterior_records(prop, vexcel, floor_sf)[0] if vexcel else []
     records += ext
     inside, suite_heights = interior_records(prop, rooms_by_model, spaces) if rooms_by_model is not None else ([], {})
@@ -524,10 +525,11 @@ def rank_uses(prop, spaces=None, suite=None, vexcel=None, rooms_by_model=None):
             "area_basis": base["area_basis"], "uses": rows}
 
 
-def gather(kit_path, property_id, offline=False, password=None):
+def gather(kit_path, property_id, offline=False, password=None, *, property_data=None):
     """Property, listed spaces, and cached Vexcel + Matterport evidence. Provider errors are collected, not raised."""
-    prop = load_property(kit_path, property_id, password)
-    spaces = listed_spaces(kit_path, property_id, password)
+    prop, spaces = property_data if property_data is not None else (
+        load_property(kit_path, property_id, password), listed_spaces(kit_path, property_id, password),
+    )
     errors, vexcel, rooms_by_model = {}, None, {}
     address = prop.get("primaryAddress") or {}
     try:
