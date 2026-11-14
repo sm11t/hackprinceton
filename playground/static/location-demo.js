@@ -29,35 +29,52 @@ function addText(parent, tag, value) {
 function displayReview(report) {
   const sources = new Map(report.sources.map((source) => [source.source_id, source]));
   addText(results, "h2", report.address);
-  addText(results, "p", `Proposed use: ${report.proposed_use}. Paid demand remains unverified.`);
-  addText(results, "h3", "Findings");
-  if (!report.findings.length) addText(results, "p", "No findings cleared review.");
-  for (const claim of report.findings) {
-    const card = document.createElement("article");
-    addText(card, "p", claim.statement);
-    for (const id of claim.source_ids) {
-      const source = sources.get(id);
-      if (!source) continue;
-      const item = addText(card, "div", "");
-      if (source.evidence_url?.startsWith("https://")) {
-        const link = addText(item, "a", source.fact);
-        link.href = source.evidence_url;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
-      } else {
-        addText(item, "span", source.fact);
-      }
-      if (source.captured_at) addText(item, "small", ` · ${source.captured_at}`);
-      if (source.note) addText(item, "p", source.note);
+  addText(results, "p", `Proposed use: ${report.proposed_use}`);
+  const market = report.findings.filter((claim) =>
+    claim.source_ids.some((id) => id.startsWith("market-page-")));
+  const context = report.findings.filter((claim) => !market.includes(claim));
+
+  addText(results, "h3", "Next decision: validate demand before committing");
+  addText(results, "p", market.length
+    ? "Use the comparable businesses below to benchmark your offer. You still need evidence that customers will pay for it at this location."
+    : "This review found no verified local comparables. The household estimate describes the Census tract. It cannot tell you how many people would book or join.");
+  const actions = addText(results, "ol", "");
+  const activity = report.proposed_use === "fitness studio" ? "a trial class" : "a trial court session";
+  addText(actions, "li", "Compare three nearby operators. Record travel time, prices, and availability at the times you plan to operate.");
+  addText(actions, "li", `Offer ${activity} at your target price and track paid bookings. Compare that turnout with the bookings you need to cover costs.`);
+  if (report.unknowns.some((note) => /scan-to-suite/i.test(note))) {
+    addText(actions, "li", "Ask the broker to confirm which suite was scanned and send a dimensioned floor plan before estimating capacity.");
+  }
+
+  addText(results, "h3", "Local comparables");
+  if (!market.length) addText(results, "p", "No comparable businesses could be verified in this run.");
+  for (const claim of market) displayClaim(results, claim, sources);
+
+  const details = addText(results, "details", "");
+  addText(details, "summary", "Area and site evidence");
+  for (const claim of context) displayClaim(details, claim, sources);
+  if (!context.length) addText(details, "p", "No area or site evidence was available.");
+}
+
+function displayClaim(parent, claim, sources) {
+  const card = document.createElement("article");
+  addText(card, "p", claim.statement);
+  for (const id of claim.source_ids) {
+    const source = sources.get(id);
+    if (!source) continue;
+    const item = addText(card, "div", "");
+    if (source.evidence_url?.startsWith("https://")) {
+      const link = addText(item, "a", source.fact);
+      link.href = source.evidence_url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    } else {
+      addText(item, "span", source.fact);
     }
-    results.append(card);
+    if (source.captured_at) addText(item, "small", ` · ${source.captured_at}`);
+    if (source.note) addText(item, "p", source.note);
   }
-  const gaps = [...report.unknowns, ...report.validation_issues];
-  if (gaps.length) {
-    addText(results, "h3", "What to verify");
-    const list = addText(results, "ul", "");
-    for (const gap of gaps) addText(list, "li", gap);
-  }
+  parent.append(card);
 }
 
 city.addEventListener("change", () => {
@@ -88,7 +105,7 @@ byId("review").addEventListener("submit", async (event) => {
     const report = await response.json();
     if (!response.ok) throw new Error(report.error);
     displayReview(report);
-    status.textContent = "Review complete.";
+    status.textContent = "Review complete. See the next decision below.";
   } catch (error) {
     status.textContent = error.message || "Review failed. Try again.";
   } finally {
