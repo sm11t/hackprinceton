@@ -179,18 +179,20 @@ def market_sources(city, use):
     headers = {"Authorization": f"Bearer {key}"}
     try:
         search = get_json("https://api.tavily.com/search", headers=headers, body={
-            "query": f"{city} {use} operators official location hours booking rates",
-            "max_results": 5, "include_answer": False, "auto_parameters": False,
+            "query": f"{use} business membership classes rentals near {city} official locations address -equipment -supplies -fresha -yahoo",
+            "max_results": 8, "include_answer": False, "auto_parameters": False,
         })
         urls = list(dict.fromkeys(item["url"] for item in search["results"]
-                                  if urlsplit(item["url"]).scheme == "https"))[:3]
+                                  if urlsplit(item["url"]).scheme == "https"
+                                  and not any(domain in (urlsplit(item['url']).hostname or '')
+                                              for domain in ('yahoo.com','fresha.com','yelp.com','facebook.com','instagram.com'))))[:4]
         if not urls:
             raise ValueError("No eligible search results")
         extracts = get_json("https://api.tavily.com/extract", headers=headers, body={"urls": urls})
         retrieved = datetime.now(timezone.utc).isoformat()
         records = [
             record("public:web", f"market-page-{i}", "Public operator research candidate",
-                   {"excerpt": item["raw_content"][:2400], "retrieved_at": retrieved},
+                   {"excerpt": item["raw_content"][:10000], "retrieved_at": retrieved},
                    item["url"], note="Confirm operator identity and exact location. Retrieval date is not publication date.")
             for i, item in enumerate(extracts["results"], 1)
             if item.get("raw_content") and item.get("url") in urls

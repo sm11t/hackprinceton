@@ -391,7 +391,20 @@ function display(report) {
       Array.isArray(row.value) && row.value.some((zone) => /^(A|V)/.test(zone.FLD_ZONE ?? "")))) {
     node(area, "p", "The address point is in a FEMA A or V zone. Verify parcel coverage and ask an insurance broker for terms before adding a premium to cash costs.");
   }
-  node(area, "p", "Paid demand at this site still needs a trial or direct customer evidence.");
+  for (const [use, result] of Object.entries(report.demand_by_use ?? {})) {
+    node(area, "h3", use);
+    node(area, "p", result.status);
+    node(area, "p", result.limitation);
+    for (const competitor of result.competitors) {
+      const card = node(area, "article");
+      node(card, "strong", competitor.name);
+      node(card, "p", competitor.address);
+      node(card, "p", `Observed ${competitor.observed_at} · ${competitor.distance_miles === null ? "Distance unverified" : competitor.distance_miles + " miles straight-line"}. ${competitor.catchment}`);
+      node(card, "p", `Published price: ${competitor.published_price ?? "unverified"}. Publication date: ${competitor.publication_date ?? "unknown"}.`);
+      sourceLink(card, competitor.evidence_url);
+    }
+  }
+  node(area, "p", "Paid demand at this site still needs a trial or direct customer evidence. ACS and FEMA are context, not willingness to pay.");
 }
 
 form.addEventListener("submit", async (event) => {

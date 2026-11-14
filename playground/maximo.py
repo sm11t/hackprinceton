@@ -137,7 +137,7 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
     if not offline and research and cash:
         try:
             report = research(property_id, use)
-            location.update(status="complete", findings=report["findings"], sources=report["evidence"])
+            location.update(status="complete", findings=report["findings"], sources=report["evidence"], competition=report.get("competition"))
             audit["records"].extend(row for row in report["evidence"] if row["source"] == "public:fema")
         except (OSError, RuntimeError, ValueError, KeyError):
             pass
@@ -190,4 +190,17 @@ def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
         if not report['alternatives']['options']:
             report['alternatives']['recommendation']='Do not commit: no screened option fits the current planning budget.'
         report['alternatives']['ranking_basis']='Deterministic eligibility and physical fit first, then budget. All uses share your editable cost envelope until use-specific bids exist; requested use breaks ties. No claim that one use is cheaper without evidence.'
+    report['demand_by_use'] = {}
+    if report.get('location'):
+        report['demand_by_use'][use] = report['location'].get('competition') or {'status':'demand unverified','competitors':[], 'limitation':'Research unavailable or no validated local operators.'}
+        research = kwargs.get('research')
+        for option in report['alternatives']['options']:
+            candidate=option['use']
+            if candidate in report['demand_by_use']: continue
+            result={'status':'demand unverified','competitors':[], 'limitation':'No research completed; no inference about competition.'}
+            if not kwargs.get('offline') and research:
+                try:
+                    result=research(int(entry['id']),candidate).get('competition') or result
+                except (OSError,RuntimeError,ValueError,KeyError): pass
+            report['demand_by_use'][candidate]=result
     return report
