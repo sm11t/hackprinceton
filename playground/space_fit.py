@@ -28,6 +28,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from exterior import exterior_records, fetch_property, roof_height_ft
+from interior import fetch_rooms, interior_records, scanned_suites, space_key, unique_scans
 from reconcile import costar_address, costar_ceiling_ft, record
 
 # --- Use requirements ------------------------------------------------------------
@@ -309,14 +310,19 @@ def verdict(fit_records):
     return "supported"
 
 
-def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None):
+def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model=None):
     """Fit report for one property and proposed use.
 
-    vexcel: a Vexcel property/extract response for the CoStar pin (see exterior.fetch_property), or None."""
+    vexcel: a Vexcel property/extract response for the CoStar pin (see exterior.fetch_property), or None.
+    rooms_by_model: {matterport model id: rooms} for the property's scans (see interior.fetch_rooms), or None."""
     if use_id not in USES:
         raise ValueError(f"Unknown use {use_id!r}; choose one of {', '.join(USES)}")
     spaces = spaces or []
+    # Suite choice: the one asked for; else a listed space that has a same-address scan (evidence inside);
+    # else the largest listed space.
+    with_scan = scanned_suites(prop, spaces)
     chosen = next((s for s in spaces if suite and str(s["suite"]).lower() == str(suite).lower()), None) \
+        or max((s for s in spaces if space_key(s) in with_scan), key=lambda s: s["square_feet"] or 0, default=None) \
         or max(spaces, key=lambda s: s["square_feet"] or 0, default=None)
     records = costar_facts(prop)
     for space in spaces:
@@ -326,7 +332,8 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None):
             note=(f"Active listing: suite {space['suite'] or '(unnamed)'}, available "
                   f"{space['available_on'] or 'date not given'}. Advertised size can be rounded.")))
     area = best_area([
-        (f"listed suite {chosen['suite'] or '(unnamed)'}", (chosen or {}).get("square_feet"), "costar",
+        (f"listed suite {chosen['suite']}" if chosen["suite"]
+         else f"the listed {chosen['square_feet'] or 0:,.0f} sq ft space", (chosen or {}).get("square_feet"), "costar",
          (chosen or {}).get("listing_id")),
         ("the building (RBA)", prop.get("rentableBuildingAreaSquareFeet"), "costar", prop["id"]),
         ("the building (GBA)", prop.get("grossBuildingAreaSquareFeet"), "costar", prop["id"]),
@@ -338,8 +345,14 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None):
         (prop.get("grossBuildingAreaSquareFeet") or 0) / (prop.get("numStoriesAboveGrade") or 1)) or None
     ext = exterior_records(prop, vexcel, floor_sf)[0] if vexcel else []
     records += ext
+    inside, suite_heights = interior_records(prop, rooms_by_model, spaces) if rooms_by_model is not None else ([], {})
+    records += inside
     ceiling_ft, _ = costar_ceiling_ft(prop)
-    fit = evaluate_use(use_id, area, ceiling_ft, "costar" if ceiling_ft else None, roof_height_ft(ext))
+    ceiling_source = "costar" if ceiling_ft else None
+    measured = suite_heights.get(space_key(chosen)) if chosen else None
+    if measured:  # a scan of the chosen suite measured its main space: prefer that over the recorded value
+        ceiling_ft, ceiling_source = measured[0], "matterport"
+    fit = evaluate_use(use_id, area, ceiling_ft, ceiling_source, roof_height_ft(ext))
     return {
         "property_id": prop["id"], "address": costar_address(prop)["display"], "use": use_id,
         "use_label": USES[use_id]["label"], "suite": (chosen or {}).get("suite"),
@@ -368,7 +381,13 @@ def main():
         vexcel = fetch_property(address.get("latitude"), address.get("longitude"), prop["id"], args.offline)
     except (OSError, RuntimeError, ValueError) as error:  # provider errors are reported, never fatal
         errors["vexcel"] = str(error)
-    result = space_fit(prop, args.use, spaces, args.suite, vexcel)
+    rooms_by_model = {}
+    for scan in unique_scans(prop):
+        try:
+            rooms_by_model[scan["model_id"]] = fetch_rooms(scan["model_id"], args.offline)
+        except Exception as error:  # provider errors are reported, never fatal
+            errors[f"matterport:{scan['model_id']}"] = str(error)
+    result = space_fit(prop, args.use, spaces, args.suite, vexcel, rooms_by_model)
     result["errors"].update(errors)
     print(json.dumps(result, indent=2))
 
