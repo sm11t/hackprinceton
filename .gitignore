@@ -4,3 +4,13 @@
 __pycache__/
 playground/output/
 .DS_Store
+
+# Sponsor data and data-pilot outputs (never commit)
+costar-hackathon-kit/
+*.zip
+reports/data-pilot/*.pkl
+reports/data-pilot/raw/
+reports/data-pilot/img/
+reports/data-pilot/sheets/
+reports/data-pilot/evidence/
+reports/data-pilot/keys.env
