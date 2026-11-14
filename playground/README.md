@@ -221,3 +221,11 @@ Examples: Tanner suite A asks $0.85/sq ft/month NNN = $8,500/month (the pilot's
 scenario rent, now sourced). Wynnwood's 9,900 sq ft space asks $7,920/month NNN and the
 property is also for sale at $7.93M with one other property, so leasing and buying can
 both be compared there.
+
+**Cash simulation uses the kit's rent.** `POST /api/pilot/simulate` replaces the scenario's
+"Suite base rent" bill with the CoStar asking rent for the scenario's space (`costar_id` and
+`suite_sqft` in `scenarios/tanner_pickleball_tenant.json`, via `deal.rent_for_simulation`).
+The response says where the rent came from (`rent_source`, `bills`), and `/pilot` prints it.
+If the kit can't be read or the space has no asking rent, the scenario's assumed rent stays
+and `rent_source` is `scenario assumption`. Build cost, bookings and other dollars remain
+editable assumptions.

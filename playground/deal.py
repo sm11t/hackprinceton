@@ -196,18 +196,35 @@ def capital_records(capital, lease, offers):
     return out
 
 
-def chosen_rent(spaces, suite=None, square_feet=None):
-    """(monthly rent, description) for the space being considered: the named suite, else the space of that
-    size, else the lowest listed rent."""
+def chosen_space(spaces, suite=None, square_feet=None):
+    """(monthly rent, space) being considered: the named suite, else the space of that size, else the lowest
+    listed rent."""
     priced = [(monthly_rent(s)[0], s) for s in spaces if monthly_rent(s)[0]]
     if not priced:
         return None
-    pick = (next(((m, s) for m, s in priced if suite and str(s.get("suite")).lower() == str(suite).lower()), None)
+    return (next(((m, s) for m, s in priced if suite and str(s.get("suite")).lower() == str(suite).lower()), None)
             or next(((m, s) for m, s in priced if square_feet and s.get("squareFeetMax") == square_feet), None)
             or min(priced, key=lambda ms: ms[0]))
-    m, s = pick
-    which = f"suite {s['suite']}" if s.get("suite") else f"the {s.get('squareFeetMax') or 0:,.0f} sq ft space"
-    return m, which
+
+
+def space_name(space):
+    return f"suite {space['suite']}" if space.get("suite") else f"the {space.get('squareFeetMax') or 0:,.0f} sq ft space"
+
+
+def chosen_rent(spaces, suite=None, square_feet=None):
+    """(monthly rent, description) for the space being considered."""
+    pick = chosen_space(spaces, suite, square_feet)
+    return (pick[0], space_name(pick[1])) if pick else None
+
+
+def rent_for_simulation(spaces, suite=None, square_feet=None):
+    """{'monthly', 'source'} for the cash simulator, or None when no listed space has an asking rent."""
+    pick = chosen_space(spaces, suite, square_feet)
+    if not pick:
+        return None
+    monthly, space = pick
+    basis = SERVICE.get(space.get("serviceType"), ("",))[0]
+    return {"monthly": monthly, "source": f"CoStar asking rent, {space_name(space)}" + (f", {basis}" if basis else "")}
 
 
 def deal_facts(property_id, spaces, offers, comps, building_sf=None, capital=None, suite=None, square_feet=None):

@@ -13,7 +13,19 @@ LIMITS = {'build_cost': (0, 2000000), 'bookings': (0, 100), 'delay': (0, 24),
           'reserve': (0, 2000000), 'warehouse_income': (0, 200000)}
 
 
-def comparison(inputs, buyer=None):
+RENT_PAYEE = 'Suite base rent'
+
+
+def with_rent(buyer, rent):
+    """Swap the scenario's base-rent bill for a sourced asking rent ({'monthly', 'source'})."""
+    if not rent or not rent.get('monthly'):
+        return buyer
+    bills = [b for b in buyer['recurring_bills'] if not str(b.get('payee', '')).startswith(RENT_PAYEE)]
+    return {**buyer, 'recurring_bills': [{'payee': f"{RENT_PAYEE} ({rent['source']})",
+                                          'monthly': rent['monthly']}, *bills]}
+
+
+def comparison(inputs, buyer=None, rent=None):
     values = dict(DEFAULTS)
     for key, raw in inputs.items():
         if key not in LIMITS:
@@ -27,7 +39,7 @@ def comparison(inputs, buyer=None):
         if key == 'delay' and not number.is_integer():
             raise ValueError('Opening delay must be a whole number of months')
         values[key] = number
-    buyer = buyer or {**CONFIG['buyer'], 'source': 'Demo scenario • simulated cash and bills'}
+    buyer = with_rent(buyer or {**CONFIG['buyer'], 'source': 'Demo scenario • simulated cash and bills'}, rent)
     sports = {**CONFIG['scenarios'][0], 'name': 'Indoor pickleball',
               'build_cost': values['build_cost'],
               'monthly_income': 3 * 12 * 30 * values['bookings'] / 100 * 35}
@@ -38,7 +50,9 @@ def comparison(inputs, buyer=None):
                simulate(sports, buyer, 24, values['reserve'], int(values['delay']))]
     return {'inputs': values, 'starting_cash': buyer['starting_cash'],
             'monthly_bills': sum(b['monthly'] for b in buyer['recurring_bills']),
-            'buyer_source': buyer['source'], 'results': results}
+            'buyer_source': buyer['source'], 'bills': buyer['recurring_bills'],
+            'rent_source': rent['source'] if rent and rent.get('monthly') else 'scenario assumption',
+            'results': results}
 
 
 def evidence(prop, models, model=None, error=None, source='Live provider data'):

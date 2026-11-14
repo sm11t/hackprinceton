@@ -13,9 +13,9 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
 from probe import aerial_image, load_property, matterport_model
-from pilot import ROOT, comparison, evidence
+from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
-from deal import run_deal
+from deal import load_deal_data, rent_for_simulation, run_deal
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
@@ -126,6 +126,16 @@ def main():
     def deal_for(property_id, capital, suite, square_feet):
         return run_deal(args.kit, property_id, capital, password, suite or None, square_feet)
 
+    @lru_cache(maxsize=1)
+    def pilot_rent():
+        """The kit's asking rent for the pilot scenario's space; None keeps the scenario's assumed rent."""
+        scenario = CONFIG["property"]
+        try:
+            spaces, _, _ = load_deal_data(args.kit, scenario["costar_id"], password)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            return None
+        return rent_for_simulation(spaces, square_feet=scenario.get("suite_sqft"))
+
     @lru_cache(maxsize=64)
     def rank_for(property_id, suite):
         return space_fit_rank(args.kit, property_id, suite or None, args.offline, password)
@@ -210,7 +220,7 @@ def main():
                 inputs = json.loads(self.rfile.read(length))
                 if not isinstance(inputs, dict):
                     raise ValueError("Expected an assumptions object")
-                body = comparison(inputs, buyer)
+                body = comparison(inputs, buyer, pilot_rent())
                 self.send(json.dumps(body).encode(), "application/json")
             except (ValueError, TypeError, OverflowError) as error:
                 self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)

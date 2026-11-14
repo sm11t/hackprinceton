@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deal import deal_facts, load_deal_data, monthly_rent
+from deal import deal_facts, load_deal_data, monthly_rent, rent_for_simulation
 
 CONTRACT_KEYS = {"fact", "value", "source", "source_id", "captured_at", "confidence",
                  "evidence_url", "status", "needs_human", "note"}
@@ -103,6 +103,16 @@ class Capital(unittest.TestCase):
                             capital=1)
         for r in result["records"]:
             self.assertEqual(set(r), CONTRACT_KEYS)
+
+
+class SimulatorRent(unittest.TestCase):
+    def test_rent_of_the_scenario_space_with_its_basis(self):
+        spaces = [space(suite="B", sf=2000.0), space(suite="A", sf=10000.0)]
+        self.assertEqual(rent_for_simulation(spaces, square_feet=10000.0),
+                         {"monthly": 8500, "source": "CoStar asking rent, suite A, triple net (NNN)"})
+
+    def test_no_priced_space_means_no_sourced_rent(self):
+        self.assertIsNone(rent_for_simulation([space(rate=0)]))
 
 
 class KitLoading(unittest.TestCase):

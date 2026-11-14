@@ -37,7 +37,7 @@ function render(data) {
   $('cash-rows').replaceChildren(); results[0].rows.forEach((row,i)=>{const tr=document.createElement('tr'); [row.month,money(row.cash),money(results[1].rows[i].cash),money(reserve)].forEach(v=>{const td=document.createElement('td');td.textContent=v;tr.append(td);});$('cash-rows').append(tr);});
   const sport=results[1];
   $('finance-status').textContent = sport.first_month_below_reserve ? `Pickleball crosses the ${money(reserve)} reserve in month ${sport.first_month_below_reserve}. Cover a ${money(sport.extra_funding_needed)} gap or revise the plan.` : `Pickleball stays at or above the ${money(reserve)} reserve over 24 months. Physical fit and approvals still need confirmation.`;
-  $('buyer').textContent = `${data.buyer_source}. Starting cash ${money(data.starting_cash)}; shared recurring bills ${money(data.monthly_bills)}/month (demo: $8,500 rent + $2,000 NNN). Month 0 is starting cash. Carry continues during delays.`;
+  $('buyer').textContent = `${data.buyer_source}. Starting cash ${money(data.starting_cash)}; shared recurring bills ${money(data.monthly_bills)}/month: ${data.bills.map(b=>`${b.payee} ${money(b.monthly)}`).join(' + ')}. Month 0 is starting cash. Carry continues during delays.`;
 }
 async function update(version) {
   if (!$('assumptions').checkValidity()) { $('finance-status').textContent='Enter valid values in all fields. The chart shows the last valid scenario.'; return; }

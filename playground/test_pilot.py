@@ -37,6 +37,18 @@ class PilotTests(unittest.TestCase):
         self.assertEqual(result['buyer_source'], 'test sandbox')
         self.assertEqual(result['results'][1]['lowest_cash'], 158000)
 
+    def test_sourced_rent_replaces_the_assumed_rent_bill(self):
+        rent = {'monthly': 9000, 'source': 'CoStar asking rent, suite A'}
+        data = comparison({}, rent=rent)
+        self.assertEqual(data['rent_source'], 'CoStar asking rent, suite A')
+        self.assertEqual(data['monthly_bills'], 11000)  # $9,000 sourced rent + $2,000 NNN charges, no double count
+        self.assertEqual(comparison({})['results'][1]['lowest_cash'] - 3 * 500,
+                         data['results'][1]['lowest_cash'])  # $500/mo more rent for the 3 months before opening
+
+    def test_no_sourced_rent_keeps_the_scenario(self):
+        self.assertEqual(comparison({}, rent=None)['rent_source'], 'scenario assumption')
+        self.assertEqual(comparison({}, rent=None)['monthly_bills'], 10500)
+
     def test_invalid_inputs(self):
         for inputs in ({'bookings': 101}, {'delay': 1.5}, {'reserve': -1},
                        {'build_cost': float('nan')}, {'bookings': True}, {'unknown': 0}):
