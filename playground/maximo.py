@@ -1,4 +1,5 @@
 """Join the team checks for one property and one explicitly selected suite."""
+from decision_context import attach_context
 from approvals_timeline import analyze_approvals, build_timeline
 from eligibility import evidence_overview, review_eligibility
 from deal import deal_facts, load_deal_data, rent_for_simulation
@@ -36,7 +37,7 @@ def project_cash(inputs, use, ownership, buyer=None):
     return result
 
 
-def review_property(kit, entry, use, suite, ownership, inputs, *, password=None, offline=False,
+def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None, offline=False,
                     buyer=None, research=None):
     property_id = int(entry["id"])
     prop = load_property(kit, property_id, password)
@@ -151,3 +152,12 @@ def review_property(kit, entry, use, suite, ownership, inputs, *, password=None,
         "unavailable_sources": list(errors),
         "tour": tour,
     }
+
+
+def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
+    # Validate before providers; contract is additive to preserve existing callers.
+    from money_runway import assumptions
+    assumptions(inputs)
+    report = _review_property(kit, entry, use, suite, ownership, inputs, **kwargs)
+    report['source_mode'] = 'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)'
+    return attach_context(report, inputs)
