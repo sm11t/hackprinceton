@@ -62,8 +62,14 @@ def specialist(model, name, description, schema, state, work, tools=()):
             payload = work()
             if payload is None:
                 return {"messages": [AIMessage(content="Prerequisite stages must complete first.")]}
-            result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(payload)}]},
-                                  config={"recursion_limit": 12})["structured_response"]
+            try:
+                result = agent.invoke({"messages": [{"role": "user", "content": json.dumps(payload)}]},
+                                      config={"recursion_limit": 12})["structured_response"]
+            except Exception as error:
+                # Preserve official deterministic context when a model/provider fails.
+                message = f"{name} unavailable ({type(error).__name__}); no unsupported claims accepted."
+                result = (Review(accepted_claim_ids=[], accepted_competitor_ids=[], issues=[message])
+                          if schema is Review else Findings(claims=[], unknowns=[message]))
             state[name] = result
         return {"messages": [AIMessage(content=result.model_dump_json())]}
 
@@ -161,14 +167,15 @@ def run_review(address, use, property_records, public_records, *, skip_market=Fa
         supervisor.invoke({"messages": [{"role": "user", "content":
                           "Run property-evidence, then market-research, then validator, one task at a time."}]},
                           config={"recursion_limit": 18})
-    except GraphRecursionError:
+    except Exception:
         # Finish any missing stages in order when the supervisor exhausts its budget.
         pass
     for subagent in subagents:
         if subagent["name"] not in state:
             subagent["runnable"].invoke({"messages": []})
-    if "validator" not in state or not searched:
-        raise RuntimeError("The supervisor did not complete the required evidence, research and validation stages.")
+    if not searched:
+        market.append(record('public:web', 'market-unavailable', 'Market research', None,
+                             note='Research agent did not complete a search; demand remains unverified.'))
     claims = candidates()
     review = state["validator"]
     accepted = set(review.accepted_claim_ids)
