@@ -11,6 +11,9 @@ let catalog = [];
 let suiteRequest = 0;
 let reportRevision = 0;
 let financialRevision = 0;
+// Opened from a market-ranking link: preselect its suite and run the review once.
+let pendingSuite = query.get("suite");
+let pendingRun = query.get("run") === "1";
 
 function node(parent, tag, text, className) {
   const child = document.createElement(tag);
@@ -42,11 +45,14 @@ async function updateSuites() {
     if (request !== suiteRequest) return;
     for (const option of options) byId("suite").add(new Option(option.label, option.value));
     if (options.length === 1) byId("suite").value = options[0].value;
+    if (pendingSuite && options.some((option) => option.value === pendingSuite)) byId("suite").value = pendingSuite;
+    pendingSuite = null;
     statusLine.textContent = options.length > 1 ? "Select a suite to tie its fit and asking rent together." : "";
   } catch (error) {
     if (request === suiteRequest) statusLine.textContent = error.message;
   } finally {
     if (request === suiteRequest) submit.disabled = false;
+    if (request === suiteRequest && pendingRun) { pendingRun = false; form.requestSubmit(); }
   }
 }
 
@@ -509,6 +515,6 @@ json("/api/location/properties").then((rows) => {
   const initial = catalog.find((row) => row.id === id);
   if (initial) byId("city").value = initial.city;
   if (query.get("ownership") === "buy") byId("ownership").value = "buy";
-  if (query.get("use") === "fitness studio") byId("use").value = "fitness studio";
+  if ([...byId("use").options].some((option) => option.value === query.get("use"))) byId("use").value = query.get("use");
   updateProperties(id);
 }).catch((error) => { statusLine.textContent = error.message; });

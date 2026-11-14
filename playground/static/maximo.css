@@ -23,3 +23,9 @@
 .ledger-form label { display: grid; gap: 6px; flex: 1 1 140px; }
 .ledger-form input, .ledger-form select { width: 100%; min-width: 0; }
 #report article { padding: 12px 0; border-bottom: 1px solid #d5ded7; }
+.market-rank ol { padding-left: 1.3em; }
+.market-rank li { padding: 6px 0; border-bottom: 1px solid #d5ded7; }
+.market-rank li p { margin: 3px 0; }
+.market-rank .fit-ok { color: #245c49; }
+.market-rank .fit-check { color: #996522; }
+.market-rank .flag { color: #996522; }

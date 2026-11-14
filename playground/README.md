@@ -206,6 +206,34 @@ scanned space vs CoStar, FEMA flood zone at the pin. `--offline` skips network
 calls. Houston run: 7 of 1,731 scanned properties have a scan captioned with a
 different address (most captions name no address, so only ~44 can be tested).
 
+## Market ranking (`market_rank.py`)
+
+"Where should I do this?" Ranks every active for-lease space in a market for one use and
+cash budget, then links each result into the full `/maximo` review (suite preselected, review
+runs on open). On `/maximo`, use **Find the best matches** under the form.
+
+```sh
+set -a; source .env; set +a
+python3 playground/market_rank.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --use "indoor pickleball" --capital 500000
+```
+
+API: `GET /api/maximo/rank?use=&capital=&reserve=&market=Houston[&min_sf=&max_sf=]`. The
+server reads the market once at startup (~30 s, in the background), then each ranking takes
+0.5–3 s.
+
+Rules: property type must suit the use, residential properties and dwelling tours are out,
+`space_fit` on CoStar facts must not rule it out, and the space must meet a minimum size
+(pickleball: 3 courts = 5,400 sq ft, matching the cash scenario's 3-court revenue; fitness
+1,500 sq ft; others 1,000 sq ft; override with `--min-sf`). Ranked by fit verdict, then
+within budget, then no evidence flag (tour for another address, CoStar size math, asking rent
+under $3/sq ft/yr), then a listed rent, then lowest planning cash to open. One space per
+building, no numeric score. Limits: no per-building aerial/scan data, so most non-pickleball
+uses are "investigate"; cash uses the same unverified allowances as the review; lease only.
+
+Houston, pickleball, $500k: 2,431 spaces in 240 buildings → 37 pass, top 5 = 15603 W Hardy
+Rd #350, 5829 W Sam Houston Pky #1009, 6855 Wynnwood Ln (9,900 sq ft), 1923 Kolfahl St,
+5025 Jensen Dr.
+
 ## Physical fit (`space_fit.py`, `exterior.py`, `interior.py`)
 
 Answers "can this building or listed space physically support the proposed use?"

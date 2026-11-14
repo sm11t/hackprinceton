@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 from tempfile import TemporaryDirectory
-from threading import Lock
+from threading import Lock, Thread
 from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
@@ -21,6 +21,7 @@ from nessie_pilot import buyer_from_nessie
 from advisor_money import advisor_cash, comparison_inputs
 from cost_ledger import estimate_costs
 from maximo import REVIEW_USES, project_cash, review_property, suite_options
+from market_rank import load_market, rank_market
 from deal import load_deal_data, rent_for_simulation, run_deal
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
@@ -126,6 +127,20 @@ def main():
                 location_properties.setdefault(row["PropertyId"], {
                     "id": row["PropertyId"], "address": row["Address"], "city": city,
                 })
+
+    market_lock = Lock()
+
+    @lru_cache(maxsize=2)
+    def load_market_once(market):
+        return load_market(args.kit, market, password)
+
+    def market_candidates(market):
+        """Listed spaces for a whole market; ~30 s to read once, then cached for every ranking.
+        The lock makes a request that arrives during the startup warm-up wait instead of reading twice."""
+        with market_lock:
+            return load_market_once(market)
+
+    Thread(target=market_candidates, args=("Houston",), daemon=True).start()  # warm before the first click
 
     @lru_cache(maxsize=64)
     def property_data(property_id):
@@ -378,6 +393,23 @@ def main():
             if route.path == "/maximo":
                 self.send((ROOT / "static/maximo.html").read_bytes(), "text/html; charset=utf-8")
                 return
+            if route.path == "/api/maximo/rank":
+                try:
+                    market = params.get("market", ["Houston"])[0]
+                    if market not in ("Houston", "Los Angeles"):
+                        raise ValueError("Choose Houston or Los Angeles.")
+                    number = lambda name, default=None: float(params[name][0]) if params.get(name, [""])[0] else default  # noqa: E731
+                    capital, reserve = number("capital", 320000), number("reserve", 50000)
+                    if not (0 <= capital <= 1e9 and 0 <= reserve <= 1e9):
+                        raise ValueError("Cash and reserve must be between 0 and 1,000,000,000.")
+                    body = rank_market(market_candidates(market), params.get("use", [""])[0], capital, reserve,
+                                       min_sf=number("min_sf"), max_sf=number("max_sf"))
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError, KeyError):
+                    self.send(b'{"error":"Market ranking unavailable. Check the local kit."}', "application/json", 502)
+                return
             if route.path == "/api/maximo/suites":
                 try:
                     entry = location_properties[params.get("id", [""])[0]]
@@ -397,7 +429,7 @@ def main():
                 return
             assets = {"/static/location-demo.js": "text/javascript","/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
                       "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript", "/static/space-fit.js": "text/javascript", "/static/maximo.js": "text/javascript",
-                      "/static/maximo.css": "text/css"}
+                      "/static/maximo.css": "text/css", "/static/market-rank.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
