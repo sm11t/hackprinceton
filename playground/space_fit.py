@@ -460,8 +460,8 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model
             note=(f"Active listing: suite {space['suite'] or '(unnamed)'}, available "
                   f"{space['available_on'] or 'date not given'}. Advertised size can be rounded.")))
     area = best_area([
-        (f"listed suite {chosen['suite']}" if chosen["suite"]
-         else f"the listed {chosen['square_feet'] or 0:,.0f} sq ft space", (chosen or {}).get("square_feet"), "costar",
+        (f"listed suite {chosen['suite']}" if chosen["suite"] else "the listed space (no suite name)",
+         (chosen or {}).get("square_feet"), "costar",
          (chosen or {}).get("listing_id")),
         ("the building (RBA)", prop.get("rentableBuildingAreaSquareFeet"), "costar", prop["id"]),
         ("the building (GBA)", prop.get("grossBuildingAreaSquareFeet"), "costar", prop["id"]),
@@ -492,9 +492,40 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model
     }
 
 
-def run(kit_path, property_id, use_id, suite=None, offline=False, password=None, requirements=None, label=None):
-    """Load the property from the kit, gather Vexcel and Matterport evidence (cached), and judge fit.
-    Provider errors are reported in result["errors"], never fatal."""
+VERDICT_ORDER = {"supported": 0, "investigate": 1, "does_not_fit": 2}
+
+
+def rank_uses(prop, spaces=None, suite=None, vexcel=None, rooms_by_model=None):
+    """Judge every built-in use against one space, best first, each with the deciding reason.
+
+    The reason is the first conflict (why it is ruled out), else the first unknown (what to find out),
+    else the first supporting judgement. Uses with no data-checkable threshold say so plainly."""
+    rows = []
+    for use_id in (u for u in USES if u != "custom"):
+        result = space_fit(prop, use_id, spaces, suite, vexcel, rooms_by_model)
+        judged = [r for r in result["records"]
+                  if r["source"] != "checklist" and (r["fact"].startswith(f"{use_id}_") or r["fact"].startswith("req_"))]
+        deciding = (next((r for r in judged if r["status"] == "conflict"), None)
+                    or next((r for r in judged if r["status"] == "unknown"), None)
+                    or next(iter(judged), None))
+        checklist = [r["value"] for r in result["records"] if r["source"] == "checklist"]
+        rows.append({
+            "use": use_id, "use_label": result["use_label"], "verdict": result["verdict"],
+            "headline": None if not deciding else {"fact": deciding["fact"], "value": deciding["value"],
+                                                   "source": deciding["source"], "status": deciding["status"]},
+            "reason": deciding["note"] if deciding else (
+                "No threshold for this use can be checked against CoStar, Matterport or Vexcel data; it depends on "
+                f"the checklist ({len(checklist)} items), starting with: {checklist[0] if checklist else 'n/a'}."),
+            "open_checks": len(checklist),
+        })
+    rows.sort(key=lambda r: (VERDICT_ORDER[r["verdict"]], r["headline"] is None))
+    base = space_fit(prop, "workshop", spaces, suite, vexcel, rooms_by_model)
+    return {"property_id": prop["id"], "address": base["address"], "suite": base["suite"],
+            "area_basis": base["area_basis"], "uses": rows}
+
+
+def gather(kit_path, property_id, offline=False, password=None):
+    """Property, listed spaces, and cached Vexcel + Matterport evidence. Provider errors are collected, not raised."""
     prop = load_property(kit_path, property_id, password)
     spaces = listed_spaces(kit_path, property_id, password)
     errors, vexcel, rooms_by_model = {}, None, {}
@@ -508,6 +539,20 @@ def run(kit_path, property_id, use_id, suite=None, offline=False, password=None,
             rooms_by_model[scan["model_id"]] = fetch_rooms(scan["model_id"], offline)
         except Exception as error:  # provider errors are reported, never fatal
             errors[f"matterport:{scan['model_id']}"] = str(error)
+    return prop, spaces, vexcel, rooms_by_model, errors
+
+
+def run_rank(kit_path, property_id, suite=None, offline=False, password=None):
+    prop, spaces, vexcel, rooms_by_model, errors = gather(kit_path, property_id, offline, password)
+    result = rank_uses(prop, spaces, suite, vexcel, rooms_by_model)
+    result["errors"] = errors
+    return result
+
+
+def run(kit_path, property_id, use_id, suite=None, offline=False, password=None, requirements=None, label=None):
+    """Load the property from the kit, gather Vexcel and Matterport evidence (cached), and judge fit.
+    Provider errors are reported in result["errors"], never fatal."""
+    prop, spaces, vexcel, rooms_by_model, errors = gather(kit_path, property_id, offline, password)
     result = space_fit(prop, use_id, spaces, suite, vexcel, rooms_by_model, requirements, label)
     result["errors"].update(errors)
     return result
@@ -517,7 +562,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--kit", type=Path, required=True, help="Kit zip (with COSTAR_KIT_PASSWORD) or unzipped folder")
     parser.add_argument("--property-id", type=int, required=True)
-    parser.add_argument("--use", choices=sorted(USES), required=True)
+    parser.add_argument("--use", choices=sorted(USES))
+    parser.add_argument("--rank", action="store_true", help="Judge every built-in use for this space, best first")
     parser.add_argument("--suite", help="Evaluate this listed suite (default: a scanned listed space, else the largest)")
     parser.add_argument("--offline", action="store_true", help="Skip network calls; use cached provider responses.")
     parser.add_argument("--require", action="append", default=[], metavar="KEY=VALUE",
@@ -528,8 +574,11 @@ def main():
         reqs = dict(item.split("=", 1) for item in args.require)
     except ValueError:
         parser.error("--require takes KEY=VALUE")
+    if not args.rank and not args.use:
+        parser.error("pass --use or --rank")
     try:
-        result = run(args.kit, args.property_id, args.use, args.suite, args.offline, kit_password(), reqs, args.label)
+        result = (run_rank(args.kit, args.property_id, args.suite, args.offline, kit_password()) if args.rank else
+                  run(args.kit, args.property_id, args.use, args.suite, args.offline, kit_password(), reqs, args.label))
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
     print(json.dumps(result, indent=2))

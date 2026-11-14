@@ -15,7 +15,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
-from space_fit import REQUIREMENTS, USES, run as space_fit_run
+from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
 def words(value):
@@ -120,6 +120,10 @@ def main():
     def fit_for(property_id, use, suite, requirements=(), label=""):
         return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password,
                              dict(requirements), label or None)
+
+    @lru_cache(maxsize=64)
+    def rank_for(property_id, suite):
+        return space_fit_rank(args.kit, property_id, suite or None, args.offline, password)
 
     @lru_cache(maxsize=32)
     def image_for(property_id):
@@ -232,6 +236,15 @@ def main():
                                     "Saved local capture · not refreshed" if args.offline else "CoStar kit + live Matterport")
                     self.send(json.dumps(body).encode(), "application/json")
                 except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit/rank":
+                try:
+                    body = rank_for(int(params.get("property_id", [""])[0]), params.get("suite", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
                 return
             if route.path == "/api/space-fit":

@@ -80,7 +80,7 @@ class FitUsesTheRightHeight(unittest.TestCase):
     def test_measured_height_of_the_chosen_suite_overrides_costar(self):
         result = space_fit(prop(["Warehouse Space - 9,900SF"], ceiling=14), "pickleball", SPACES,
                            rooms_by_model={"m0": rooms(8853, 21.1, 664)})
-        self.assertEqual(result["area_basis"], "the listed 9,900 sq ft space")  # the scanned space is preferred
+        self.assertEqual(result["area_basis"], "the listed space (no suite name)")  # the scanned space is preferred
         height = fact(result["records"], "pickleball_clear_height")
         self.assertEqual((height["value"], height["source"]), (21.1, "matterport"))
         self.assertEqual(result["verdict"], "supported")

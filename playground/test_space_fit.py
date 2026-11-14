@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from space_fit import USES, evaluate_use, listed_spaces, load_property, parse_requirements, space_fit, verdict
+from space_fit import (USES, evaluate_use, listed_spaces, load_property, parse_requirements, rank_uses, space_fit,
+                       verdict)
 
 CONTRACT_KEYS = {"fact", "value", "source", "source_id", "captured_at", "confidence",
                  "evidence_url", "status", "needs_human", "note"}
@@ -136,6 +137,26 @@ class TypedRequirements(unittest.TestCase):
         result = space_fit(flex(), "pickleball", SUITE_A, requirements={"min_area_sf": 12000})
         self.assertEqual(result["verdict"], "does_not_fit")  # courts fit, but the user's own minimum does not
         self.assertEqual(fact(result, "pickleball_courts_by_area")["status"], "agrees")
+
+
+class Ranking(unittest.TestCase):
+    def test_best_first_with_a_reason_for_each(self):
+        ranked = rank_uses(flex(), SUITE_A)
+        uses = [u["use"] for u in ranked["uses"]]
+        self.assertNotIn("custom", uses)
+        self.assertEqual(uses[0], "pickleball")  # the only use the data fully supports here
+        self.assertTrue(all(u["reason"] for u in ranked["uses"]))
+
+    def test_ruled_out_uses_sink_and_explain_why(self):
+        ranked = rank_uses(flex(ceiling=10), SUITE_A)
+        last = ranked["uses"][-1]
+        self.assertEqual((last["use"], last["verdict"]), ("pickleball", "does_not_fit"))
+        self.assertIn("below the minimum", last["reason"])
+
+    def test_uses_without_checkable_thresholds_say_so(self):
+        gym = next(u for u in rank_uses(flex(), SUITE_A)["uses"] if u["use"] == "gym")
+        self.assertEqual(gym["verdict"], "investigate")
+        self.assertIn("No threshold", gym["reason"])
 
 
 class KitFolder(unittest.TestCase):
