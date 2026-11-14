@@ -1,7 +1,7 @@
 import json, pickle, os, re
 D=os.path.dirname(os.path.abspath(__file__)); RAW=f'{D}/raw'
 S=pickle.load(open(f'{D}/sample.pkl','rb'))
-def num(a): 
+def num(a):
     m=re.match(r'\s*(\d+)',a or ''); return m.group(1) if m else None
 res=[]
 for r in S:

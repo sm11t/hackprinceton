@@ -31,5 +31,5 @@ for l in open(f'{KIT}/data/commercial-property.jsonl'):
         if n not in nums and not inr:
             stats['different_number_same_street']+=1
             if len(examples)<15: examples.append((p['id'],(p.get('primaryAddress') or {}).get('streetNumber'),(p.get('primaryAddress') or {}).get('streetName'),cap[:70]))
-print(dict(stats)); 
+print(dict(stats));
 for e in examples: print(e)

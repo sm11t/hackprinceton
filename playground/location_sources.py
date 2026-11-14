@@ -42,7 +42,8 @@ def collect_property(kit, property_id):
         prop, "id", "buildingName", "propertyType", "parcelNumbers", "parcelReferences",
         "grossBuildingAreaSquareFeet", "rentableBuildingAreaSquareFeet",
         "grossTypicalFloorSquareFeet", "numStoriesAboveGrade", "parking", "parkingRatio",
-        "zoningDescription", "propertyFlex", "hasSprinklers", "environmental", "amenities",
+        "zoningDescription", "propertyFlex", "propertyIndustrial", "hasSprinklers", "environmental", "amenities",
+        "yearBuilt", "yearRenovated", "primaryAddress", "constructionType", "propertyRetail", "propertyOffice",
     ), note="Building-level inventory. Recorded zoning requires jurisdictional verification.")]
     with ZipFile(kit) as archive:
         for dataset in ("commercial-listing-summary", "location-occupancy", "commercial-sale-comp"):
@@ -54,7 +55,7 @@ def collect_property(kit, property_id):
                         value = select(row, "soldDate", "soldForPrice", "salePriceStatus", "saleType", "monetaryUnit")
                     elif dataset == "location-occupancy":
                         matched = row.get("propertyId") == property_id
-                        value = select(row, "fromDate", "moveInDate", "industryType", "spaces")
+                        value = select(row, "fromDate", "moveInDate", "moveOutDate", "toDate", "industryType", "tenantName", "name", "spaces")
                     else:
                         matched = row.get("propertyId") == property_id
                         value = select(row, "listingStatus", "listingType", "certifiedFreshDate")
@@ -75,7 +76,7 @@ def collect_property(kit, property_id):
     for scan_id in dict.fromkeys(m["MatterportModelId"] for m in mapping if m["MatterportModelId"]):
         url = f"https://my.matterport.com/show/?m={scan_id}"
         attachment = next((a for a in prop.get("attachments") or []
-                           if scan_id in (a.get("attachmentUri") or "")), {})
+                           if a.get("videoKey") == scan_id or scan_id in (a.get("attachmentUri") or "")), {})
         try:
             scan = matterport_model(scan_id)
             rooms = []
@@ -107,7 +108,8 @@ def collect_property(kit, property_id):
         structure = {}
     value = select(structure, "footprint.area", "roof-characteristics.condition",
                    "roof-characteristics.material.class", "roof-characteristics.shape.value",
-                   "roof-objects.ac-unit.count", "metadata.collection")
+                   "roof-objects.ac-unit.count", "roof-objects.solar-panel.count", "roof-defects",
+                   "vehicle.count", "metadata.collection")
     records.append(record("vexcel", f"structure-at-{property_id}", "Primary structure at CoStar pin",
                           value or None, endpoint, structure.get("metadata.ortho-date-estimate"),
                           "Imagery date is estimated. Footprint is in square meters; roof observations are vendor detections."))

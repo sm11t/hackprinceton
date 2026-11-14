@@ -286,3 +286,23 @@ The response says where the rent came from (`rent_source`, `bills`), and `/pilot
 If the kit can't be read or the space has no asking rent, the scenario's assumed rent stays
 and `rent_source` is `scenario assumption`. Build cost, bookings and other dollars remain
 editable assumptions.
+
+### Combined redevelopment review
+
+Open `/maximo` and choose a kit property, an advertised suite, and a proposed use.
+The review brings together dated identity and occupancy checks, space and condition,
+listing terms, location research, approvals to confirm, and a cash comparison.
+Tanner's demo shortlist card also opens the combined review with your budget inputs.
+
+Start the server using the kit and sponsor credentials above. Live location research
+also needs `uv` and `UPSTAGE_API_KEY`; configure Tavily and Census for their findings.
+With `--offline`, the review uses the kit and any cached property evidence and skips
+live market research. `--nessie-account` reads sandbox starting cash and recurring
+bills. Review the displayed monthly costs for overlap with those bills.
+
+The same advertised suite must match one active listing before its base rent is
+prefilled. Cash inputs remain editable, and the approval allowance, build-out, and
+delay update the modeled opening month together. Before relying on court capacity,
+confirm the scan covers the advertised suite and obtain a dimensioned plan. City
+guidance identifies approvals to investigate. Parcel jurisdiction, approved use,
+and paid demand still require verification.

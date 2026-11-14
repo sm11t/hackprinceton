@@ -755,6 +755,16 @@ app.addEventListener("click", (e) => {
   if (a === "select") {
     state.property = b.dataset.id;
     state.chosenUse = null;
+    const selected = properties.find((item) => item.id === state.property);
+    if (selected?.costarId) {
+      const { tenure, capital, fitout, reserve, uses } = state.prefs;
+      const params = new URLSearchParams({
+        property: selected.costarId, ownership: tenure, capital, fitout, reserve,
+        use: uses.includes("gym") && !uses.includes("pickleball") ? "fitness studio" : "indoor pickleball",
+      });
+      window.location.assign(`/maximo?${params}`);
+      return;
+    }
     state.view = "workspace";
     window.scrollTo(0, 0);
     startRun();
