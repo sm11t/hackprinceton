@@ -204,3 +204,20 @@ warehouse whose scan measures 96% of it with a 21.1 ft clear height (5 courts,
 supported). **9700 Tanner Rd (23296)**: supported on CoStar's 18 ft and Vexcel's
 33.8 ft roof, but its scan is captioned 9750 Tanner Rd and is not used.
 **8203 Willow Place (239686)**: office suite 315 measured at 7.9 ft (does not fit).
+
+## Deal facts for lease-or-buy (`deal.py`)
+
+What a property actually asks and last sold for, as evidence records, for the money
+step. Shown live in the **Money** panel; API `GET /api/deal?property_id=<id>[&capital=&suite=&square_feet=]`.
+
+| Fact | From | Rule |
+| --- | --- | --- |
+| `lease_asking_rent` | Active `forLeaseSummary.spaces` in this building | Normalized to $/month and $/sq ft/year from `rateBasis`; lease basis explained (NNN = plus taxes, insurance, common-area costs); no rate = unknown |
+| `sale_asking_price` | Active `forSaleSummary` on this property | Asking price, $/sq ft, owner/user vs investment, days on market; a bundle of properties is flagged |
+| `last_sale_price` | Sale comps that include this property | Undisclosed Texas prices are unknown; bulk-portfolio and entity sales are not this building's value |
+| `capital_vs_lease`, `capital_vs_purchase` | The above + the buyer's capital | States what each path needs up front; never recommends a path (the Nessie simulator compares cash flows) |
+
+Examples: Tanner suite A asks $0.85/sq ft/month NNN = $8,500/month (the pilot's
+scenario rent, now sourced). Wynnwood's 9,900 sq ft space asks $7,920/month NNN and the
+property is also for sale at $7.93M with one other property, so leasing and buying can
+both be compared there.
