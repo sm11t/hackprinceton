@@ -369,6 +369,19 @@ function display(report) {
   const approvals = panel(columns, "Approvals and timeline");
   node(approvals, "p", report.approvals.summary);
   showClaims(approvals, report.approvals.findings, report.approvals.evidence);
+  if (report.approvals.path) {
+    const path = report.approvals.path;
+    node(approvals, "p", `Parcel: ${JSON.stringify(path.parcel_ids)} · ${path.parcel_identity_status}. Jurisdiction ${path.jurisdiction_verified ? "boundary verified" : "unverified"}.`);
+    node(approvals, "p", path.summary);
+    const steps = node(approvals, "ol");
+    for (const step of path.critical_path) {
+      const item = node(steps, "li");
+      node(item, "strong", step.title);
+      node(item, "p", `${step.status} · ${step.authority}. Timing: ${step.time_provenance}.`);
+      node(item, "p", step.next_action);
+      sourceLink(item, step.official_source_url);
+    }
+  }
   const area = panel(reportBox, "Location and demand");
   if (report.location.status !== "complete") {
     node(area, "p", report.location.status === "offline" ? "Offline mode skipped live location research." : "Live location research was unavailable for this run.");

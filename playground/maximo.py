@@ -1,4 +1,5 @@
 """Join the team checks for one property and one explicitly selected suite."""
+from approval_path import approval_path
 from cost_ledger import estimate_costs
 from alternatives import CATALOG, rank_alternatives
 from decision_context import attach_context
@@ -131,6 +132,7 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
         "permit_months": cash["inputs"]["permit_months"], "build_months": cash["inputs"]["build_months"],
         "delay_months": cash["inputs"]["delay"],
     } if cash else None)
+    approvals['path'] = approval_path(approvals, prop, scope_label, use, audit['records'])
     location = {"findings": [], "sources": [], "status": "offline" if offline else "unavailable"}
     if not offline and research and cash:
         try:
