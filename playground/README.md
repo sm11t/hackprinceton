@@ -181,6 +181,24 @@ ask-before-signing checklist are shown, not judged.
 | Measured area and clear height | Matterport rooms | Scans captioned with another address are not measured; height 0 = unknown; a scan's height applies only to the listed space it names |
 | Thresholds | USA Pickleball rule 3.A.3 (30x60 / 34x64 ft per court); Texas 26 TAC 746 (30 sq ft indoor, 80 sq ft outdoor per child) | 18 ft pickleball ceiling is unofficial guidance, low confidence |
 
+**Your own requirements** (the "type and decide" path): `--use custom --label "Climbing gym"
+--require min_clear_height_ft=20 --require min_area_sf=6000 --require three_phase=yes`, or the
+same keys as query parameters on `/api/space-fit`. Keys: `min_clear_height_ft`,
+`min_area_sf`, `max_area_sf`, `min_docks`, `min_drive_in_bays`, `min_parking_spaces`,
+`min_amps`, `min_floor_load_psf`, `three_phase`, `sprinklers`. On a built-in use they add to
+its own checks. Missing data is `unknown`, never a pass or a fail.
+
+**Open to suggestions:** `--rank` (or `GET /api/space-fit/rank?property_id=`) judges every
+built-in use for the space, best first, each with the deciding reason. Uses with no
+data-checkable threshold (gym, restaurant, workshop) say so instead of getting a score.
+
+**Known-answer checks** on the pilot's real buildings (Wynnwood, Willow Place, Northgreen,
+Tanner, Grant Rd) run when the kit is available, using cached provider responses:
+
+```sh
+COSTAR_KIT="$HOME/Downloads/costar-hackathon-kit.zip" python3 -m unittest playground/test_known_cases.py
+```
+
 Good demo properties: **6855 Wynnwood Ln (13890701)**, a listed 9,900 sq ft
 warehouse whose scan measures 96% of it with a 21.1 ft clear height (5 courts,
 supported). **9700 Tanner Rd (23296)**: supported on CoStar's 18 ft and Vexcel's
