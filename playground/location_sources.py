@@ -36,7 +36,8 @@ def collect_property(kit, property_id):
     password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
     prop, mapping = load_property(kit, property_id, password, require_model=False)
     pin = prop["primaryAddress"]
-    address = f'{mapping[0]["Address"]}, {pin["city"]}, {pin["state"]} {pin["postcode"]}'
+    postal_code = str(pin.get("postcode") or "")[:5]
+    address = f'{mapping[0]["Address"]}, {pin["city"]}, {pin["state"]} {postal_code}'.strip()
     records = [record("costar", f"property-{property_id}", "Building record", select(
         prop, "id", "buildingName", "propertyType", "parcelNumbers", "parcelReferences",
         "grossBuildingAreaSquareFeet", "rentableBuildingAreaSquareFeet",
