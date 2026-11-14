@@ -16,10 +16,15 @@ Checks so far:
                Matterport's own `created` is the re-hosting date and must not be used)
   clear_height CoStar ceiling height vs Matterport measured room heights
   flood        FEMA National Flood Hazard Layer zone at the CoStar pin
+  occupancy    suite-named scan vs the CoStar tenancy covering that suite on the scan date
+               (empty marketing scan + active lease = conflict; tenant moved in after = fine)
+  size         CoStar internal size math: GBA vs typical floor x stories, rentable vs gross
+               (aerial footprint vs floor size lives in exterior.py, from physical fit)
 
 Usage:
   python3 playground/reconcile.py --kit ~/Downloads/costar-hackathon-kit.zip --property-id 23296
   python3 playground/reconcile.py --kit ... --scan-identity Houston   # identity check across a market
+  python3 playground/reconcile.py --kit ... --scan-occupancy Houston  # occupancy check across a market
 Add --offline to skip Matterport and FEMA network calls.
 """
 import argparse
@@ -328,9 +333,186 @@ def check_flood(prop):
                         + " Point lookup at the CoStar pin; the building footprint can cross zones.")]
 
 
-def reconcile(prop, offline=False):
+# --- Time-aware occupancy -------------------------------------------------------
+
+RECENT_MOVE_IN_DAYS = 180  # the scan can predate CoStar's attachment date by this much
+ENDING_SOON_DAYS = 365  # landlords market a suite this far ahead of a lease ending
+
+
+def suite_key(suite):
+    """'C-1A', 'C1A ', 'c 1a' -> 'C1A'."""
+    return re.sub(r"[^A-Z0-9]", "", str(suite or "").upper())
+
+
+def load_tenancies(kit_path, property_ids=None, password=None):
+    """{property_id: [tenancy]} from CoStar's location-occupancy, deduplicated, with tenant names.
+
+    A tenancy is {tenant, suites, start, end, square_feet, id}; end None = still in place.
+    Suites come from the space rows and from the tenant's company record, since CoStar
+    often fills only one of them.
+    """
+    want = set(property_ids) if property_ids is not None else None
+    rows = {}
+    with ZipFile(kit_path) as kit:
+        with kit.open("data/location-occupancy.jsonl", pwd=password) as stream:
+            for line in stream:
+                row = json.loads(line)
+                if want is None or row["propertyId"] in want:
+                    rows.setdefault(row["propertyId"], []).append(row)
+        locations = {r.get("tenantLocationId") for rs in rows.values() for r in rs} - {None}
+        companies = {}
+        with kit.open("data/company-detail.jsonl", pwd=password) as stream:
+            for line in stream:
+                company = json.loads(line)
+                if company["id"] in locations:
+                    companies[company["id"]] = company
+    out = {}
+    for pid, raw in rows.items():
+        seen, tenancies = set(), []
+        for row in raw:
+            company = companies.get(row.get("tenantLocationId")) or {}
+            spaces = row.get("spaces") or []
+            suites = {suite_key(sp.get("suite")) for sp in spaces} | {suite_key(company.get("suite"))}
+            start = (row.get("moveInDate") or row.get("fromDate") or "")[:10] or None
+            end = (row.get("toDate") or "")[:10] or None
+            sqft = sum(sp.get("squareFeetOccupied") or 0 for sp in spaces) or None
+            key = (row.get("tenantLocationId"), start, end, frozenset(suites), sqft)
+            if key in seen or not start:
+                continue
+            seen.add(key)
+            tenancies.append({"id": row["id"], "tenant": company.get("name"), "suites": suites - {""},
+                              "start": start, "end": end, "square_feet": sqft})
+        out[pid] = tenancies
+    return out
+
+
+def describe(t):
+    name = t["tenant"] or "an unnamed tenant"
+    size = f", {t['square_feet']:,.0f} sq ft" if t["square_feet"] else ""
+    return f"{name} ({t['start']} to {t['end'] or 'present'}{size})"
+
+
+def check_occupancy(prop, tenancies):
+    """For each scan that names a suite: who did CoStar have in that suite on the scan date?
+
+    Most scans market vacant space, so an active lease on the scan date is a conflict
+    (CoStar's tenant data is stale, or the scan shows someone's occupied space). Leases
+    that start after the scan or end before it are the usual false alarms and agree.
+    """
+    home = costar_address(prop)
+    out = []
+    for scan in unique_scans(prop):
+        parsed = parse_caption(scan["caption"], home["street"])
+        if not parsed["suite"]:
+            continue
+        common = dict(fact="suite_occupancy_at_scan", source="costar", captured_at=scan["captured_at"],
+                      evidence_url=tour_url(scan["model_id"]))
+        suite = parsed["suite"]
+        elsewhere = parsed["street_number"] and not number_matches(parsed["street_number"], home["street_number"])
+        if elsewhere:
+            out.append(record(**common, value=None, source_id=scan["model_id"], confidence=0.2, status="unknown",
+                              note=(f"Scan is captioned for suite {suite} at {parsed['street_number']}, not "
+                                    f"{home['display']}, so this building's tenancies were not compared.")))
+            continue
+        when = scan["captured_at"]
+        if not when:
+            out.append(record(**common, value=None, source_id=scan["model_id"], confidence=0.1, status="unknown",
+                              needs_human=True, note=f"Scan of suite {suite} has no CoStar date to compare with."))
+            continue
+        matches = [t for t in tenancies if suite_key(suite) in t["suites"]]
+        active = [t for t in matches if t["start"] <= when and (t["end"] is None or when <= t["end"])]
+        settled = [t for t in active
+                   if (date.fromisoformat(when) - date.fromisoformat(t["start"])).days > RECENT_MOVE_IN_DAYS]
+        ids = ",".join(str(t["id"]) for t in (active or matches)) or scan["model_id"]
+        ending = [t for t in settled
+                  if t["end"] and (date.fromisoformat(t["end"]) - date.fromisoformat(when)).days <= ENDING_SOON_DAYS]
+        settled = [t for t in settled if t not in ending]
+        if settled:
+            out.append(record(
+                **common, value="; ".join(t["tenant"] or "unnamed tenant" for t in settled), source_id=ids,
+                confidence=0.6, status="conflict", needs_human=True,
+                note=(f"Suite {suite} was scanned by {when} (\"{scan['caption'].strip()}\"), but CoStar lists "
+                      + "; ".join(describe(t) for t in settled) + " in that suite on that date. Marketing scans are "
+                      "usually of empty space: check the tour's photos, then ask the broker whether the tenant "
+                      "has left (CoStar's record is stale) or the scan shows the tenant's own space, e.g. a sublease "
+                      "or coworking operator.")))
+        elif ending:
+            out.append(record(
+                **common, value="; ".join(t["tenant"] or "unnamed tenant" for t in ending), source_id=ids,
+                confidence=0.5, status="unknown", needs_human=True,
+                note=(f"Suite {suite} was scanned by {when} (\"{scan['caption'].strip()}\") while CoStar lists "
+                      + "; ".join(describe(t) for t in ending) + f" in it, with the lease ending within a year. "
+                      "Landlords often market space before a tenant leaves. If the tour shows the suite empty, "
+                      "CoStar's move-out date is late; if it shows the tenant's furniture, the space isn't free "
+                      "until the lease ends.")))
+        elif active:
+            out.append(record(
+                **common, value="; ".join(t["tenant"] or "unnamed tenant" for t in active), source_id=ids,
+                confidence=0.4, status="unknown", needs_human=True,
+                note=(f"CoStar lists " + "; ".join(describe(t) for t in active) + f" in suite {suite}, moving in "
+                      f"within {RECENT_MOVE_IN_DAYS} days before the scan's CoStar date ({when}). The scan can be "
+                      "older than that date, so it may show the suite before move-in. Check the photos.")))
+        elif matches:
+            later = sorted((t for t in matches if t["start"] > when), key=lambda t: t["start"])
+            earlier = sorted((t for t in matches if t["end"] and t["end"] < when), key=lambda t: t["end"])
+            parts = []
+            if earlier:
+                parts.append(f"the previous tenant, {describe(earlier[-1])}, had left before the scan")
+            if later:
+                parts.append(f"{describe(later[0])} moved in after the scan")
+            out.append(record(
+                **common, value="vacant at scan", source_id=ids, confidence=0.7, status="agrees",
+                note=(f"No CoStar tenant in suite {suite} on the scan date ({when}): " + " and ".join(parts)
+                      + ". An empty suite in the tour is expected, not a contradiction.")))
+        else:
+            out.append(record(
+                **common, value=None, source_id=scan["model_id"], confidence=0.3, status="unknown",
+                note=f"CoStar has no tenancy recorded for suite {suite}, so occupancy at the scan date can't be checked."))
+    return out
+
+
+# --- CoStar size consistency ------------------------------------------------------
+
+SIZE_TOLERANCE = 0.2
+
+
+def check_size(prop):
+    """Do CoStar's own size fields add up? (GBA vs typical floor x stories, rentable vs gross.)"""
+    gba = prop.get("grossBuildingAreaSquareFeet")
+    typical = prop.get("grossTypicalFloorSquareFeet")
+    rba = prop.get("rentableBuildingAreaSquareFeet")
+    stories = prop.get("numStoriesAboveGrade")
+    common = dict(source="costar", source_id=prop["id"])
+    out = []
+    if gba and typical and stories:
+        implied = typical * stories
+        ratio = gba / implied
+        ok = abs(ratio - 1) <= SIZE_TOLERANCE
+        out.append(record(
+            fact="gross_area_vs_floors", value=round(ratio, 2), **common, confidence=0.7,
+            status="agrees" if ok else "conflict", needs_human=not ok,
+            note=(f"CoStar gross building area {gba:,.0f} sq ft vs typical floor {typical:,.0f} sq ft x {stories} "
+                  f"stor{'y' if stories == 1 else 'ies'} = {implied:,.0f} sq ft ({ratio:.2f}x). "
+                  + ("Consistent." if ok else "These can't all be right: one of the size, floor or story count is "
+                                              "wrong (or a mezzanine/basement is counted). Ask for a measured plan "
+                                              "before pricing per sq ft."))))
+    else:
+        out.append(record(fact="gross_area_vs_floors", value=None, **common, confidence=0.1, status="unknown",
+                          note="CoStar is missing gross area, typical floor or story count."))
+    if gba and rba and rba > gba * 1.02:
+        out.append(record(
+            fact="rentable_vs_gross_area", value=round(rba / gba, 2), **common, confidence=0.7, status="conflict",
+            needs_human=True,
+            note=f"Rentable area {rba:,.0f} sq ft is larger than gross area {gba:,.0f} sq ft, which can't be true."))
+    return out
+
+
+def reconcile(prop, offline=False, tenancies=None):
+    """All checks for one property. Pass tenancies (from load_tenancies) to add the occupancy check."""
     results = {"property_id": prop["id"], "address": costar_address(prop)["display"],
-               "records": check_identity(prop) + check_scan_dates(prop), "errors": {}}
+               "records": check_identity(prop) + check_scan_dates(prop) + check_size(prop), "errors": {}}
+    if tenancies is not None:
+        results["records"] += check_occupancy(prop, tenancies)
     rooms_by_model = {}
     if not offline:
         for scan in unique_scans(prop):
@@ -369,22 +551,45 @@ def scan_identity_market(kit_path, market, password=None):
             "captions_without_address": no_address, "examples": examples}
 
 
+def scan_occupancy_market(kit_path, market, password=None):
+    """Occupancy check for every suite-named scan in a market (offline, kit only)."""
+    market_id = MARKETS[market]
+    props = [p for p in iter_properties(kit_path, password)
+             if (p.get("primaryAddress") or {}).get("researchMarketId") == market_id and scans_of(p)]
+    tenancies = load_tenancies(kit_path, {p["id"] for p in props}, password)
+    counts = {"agrees": 0, "conflict": 0, "unknown": 0}
+    examples = []
+    for prop in props:
+        for r in check_occupancy(prop, tenancies.get(prop["id"], [])):
+            counts[r["status"]] += 1
+            if r["status"] == "conflict" and len(examples) < 15:
+                examples.append({"property_id": prop["id"], "costar": costar_address(prop)["display"],
+                                 "scan_date": r["captured_at"], "tenant": r["value"], "tour": r["evidence_url"]})
+    return {"market": market, "suite_scans_checked": sum(counts.values()), "by_status": counts,
+            "examples": examples}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--kit", type=Path, required=True)
     parser.add_argument("--property-id", type=int)
     parser.add_argument("--scan-identity", choices=sorted(MARKETS))
+    parser.add_argument("--scan-occupancy", choices=sorted(MARKETS))
     parser.add_argument("--offline", action="store_true", help="Skip Matterport and FEMA network calls.")
     parser.add_argument("--json", type=Path, help="Write results to this file.")
     args = parser.parse_args()
-    if not args.property_id and not args.scan_identity:
-        parser.error("pass --property-id or --scan-identity")
+    if not (args.property_id or args.scan_identity or args.scan_occupancy):
+        parser.error("pass --property-id, --scan-identity or --scan-occupancy")
     password = kit_password()
     try:
         if args.scan_identity:
             result = scan_identity_market(args.kit, args.scan_identity, password)
+        elif args.scan_occupancy:
+            result = scan_occupancy_market(args.kit, args.scan_occupancy, password)
         else:
-            result = reconcile(load_property(args.kit, args.property_id, password), offline=args.offline)
+            tenancies = load_tenancies(args.kit, {args.property_id}, password).get(args.property_id, [])
+            result = reconcile(load_property(args.kit, args.property_id, password), offline=args.offline,
+                               tenancies=tenancies)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
     text = json.dumps(result, indent=2)

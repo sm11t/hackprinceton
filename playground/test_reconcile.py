@@ -1,7 +1,8 @@
 """Run with python3 -m unittest discover -s playground -p 'test_*.py'."""
 import unittest
 
-from reconcile import check_clear_height, check_identity, number_matches, parse_caption, record
+from reconcile import (check_clear_height, check_identity, check_occupancy, check_size, number_matches,
+                       parse_caption, record)
 
 CONTRACT_KEYS = {"fact", "value", "source", "source_id", "captured_at", "confidence",
                  "evidence_url", "status", "needs_human", "note"}
@@ -73,6 +74,74 @@ class ClearHeight(unittest.TestCase):
         rooms = [{"label": "Warehouse", "dimensionEstimates": {"area": 593, "height": 3.0}}]
         [_, r] = check_clear_height(prop(ceiling=18.0), {"m0": rooms})
         self.assertEqual(r["status"], "conflict")  # ~9.8 ft vs 18 ft
+
+
+def tenancy(start, end=None, suite="155", tenant="Acme Drywall"):
+    return {"id": 7, "tenant": tenant, "suites": {suite}, "start": start, "end": end, "square_feet": 750}
+
+
+class Occupancy(unittest.TestCase):
+    """Scan date in prop() is 2026-03-10."""
+
+    def check(self, *tenancies, caption="Suite 155 - 1,794SF"):
+        [r] = check_occupancy(prop(captions=[caption]), list(tenancies))
+        self.assertEqual(set(r), CONTRACT_KEYS)
+        return r
+
+    def test_long_lease_covering_scan_date_is_conflict(self):
+        r = self.check(tenancy("2023-09-01", "2028-07-23"))
+        self.assertEqual((r["status"], r["needs_human"], r["value"]), ("conflict", True, "Acme Drywall"))
+
+    def test_open_ended_lease_is_conflict(self):
+        self.assertEqual(self.check(tenancy("2020-01-01"))["status"], "conflict")
+
+    def test_lease_ending_within_a_year_needs_photos_not_conflict(self):
+        r = self.check(tenancy("2023-09-01", "2026-07-23"))
+        self.assertEqual((r["status"], r["needs_human"]), ("unknown", True))
+
+    def test_move_in_after_scan_is_the_classic_false_alarm(self):
+        r = self.check(tenancy("2014-03-01", "2017-03-31"), tenancy("2026-09-23", tenant="Later Co"))
+        self.assertEqual((r["status"], r["value"]), ("agrees", "vacant at scan"))
+        self.assertIn("Later Co", r["note"])
+
+    def test_move_in_just_before_scan_date_is_unknown(self):
+        self.assertEqual(self.check(tenancy("2026-02-01"))["status"], "unknown")
+
+    def test_suite_spelling_is_normalised(self):
+        r = self.check(tenancy("2020-01-01", suite="C1A"), caption="Take a Tour of Suite C-1A")
+        self.assertEqual(r["status"], "conflict")
+
+    def test_no_recorded_tenancy_is_unknown(self):
+        self.assertEqual(self.check(tenancy("2020-01-01", suite="999"))["status"], "unknown")
+
+    def test_scan_captioned_for_another_building_is_not_compared(self):
+        r = self.check(tenancy("2020-01-01", suite="116"), caption="Suite 116 - 502 SF (9750 Tanner Road)")
+        self.assertEqual(r["status"], "unknown")
+
+    def test_scan_without_suite_is_skipped(self):
+        self.assertEqual(check_occupancy(prop(captions=["9700 Tanner Rd"]), [tenancy("2020-01-01")]), [])
+
+
+class CostarSize(unittest.TestCase):
+    def sized(self, gba, typical, stories, rba=None):
+        return {"id": 1, "grossBuildingAreaSquareFeet": gba, "grossTypicalFloorSquareFeet": typical,
+                "numStoriesAboveGrade": stories, "rentableBuildingAreaSquareFeet": rba}
+
+    def test_consistent_sizes_agree(self):
+        [r] = check_size(self.sized(137192, 34298, 4))
+        self.assertEqual(r["status"], "agrees")
+
+    def test_gross_area_that_floors_cannot_explain_is_conflict(self):
+        [r] = check_size(self.sized(24567, 18000, 1, 18000))  # 1800 Sherwood Forest St
+        self.assertEqual((r["status"], r["value"]), ("conflict", 1.36))
+
+    def test_rentable_larger_than_gross_is_conflict(self):
+        records = check_size(self.sized(10000, 10000, 1, 12000))
+        self.assertEqual([r["status"] for r in records], ["agrees", "conflict"])
+
+    def test_missing_fields_are_unknown(self):
+        [r] = check_size(self.sized(None, 10000, 1))
+        self.assertEqual(r["status"], "unknown")
 
 
 class Contract(unittest.TestCase):

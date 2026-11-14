@@ -178,7 +178,27 @@ status (agrees|conflict|unknown), needs_human, note`.
 set -a; source .env; set +a
 python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --property-id 23296
 python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --scan-identity Houston
+python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --scan-occupancy Houston
 ```
+
+**Occupancy at scan time** (from Asmit's data pilot, `attdates.py` + `hist.py`):
+for a scan that names a suite, find the CoStar tenancy covering that suite on
+the scan's `originationDate`. Suites are matched from both the space rows and
+the tenant's company record, and spellings are normalised (`C-1A` = `C1A`).
+- Lease running well past the scan → `conflict` (marketing scans are usually of
+  empty space, so CoStar's record is stale or the scan shows the tenant's own space).
+- Lease ending within a year, or move-in under 180 days before the scan date →
+  `unknown`, needs a look at the tour photos (pre-marketing is normal).
+- Tenant moved in after the scan, or left before it → `agrees` (the usual false alarm).
+- Scan captioned for another building → not compared.
+
+Houston: 356 suite-named scans: 135 agree, 33 conflict, 188 unknown (mostly no
+tenancy recorded for the suite). Takes ~50 s.
+
+**CoStar size math:** gross area vs typical floor × stories (±20%) and rentable
+> gross. E.g. 1800 Sherwood Forest St: 24,567 sq ft gross vs 18,000 sq ft × 1
+story = 1.36× → conflict. The aerial footprint vs floor-size check is in
+`exterior.py` (physical fit), not duplicated here.
 
 Checks: scan caption address vs CoStar address, scan date (CoStar
 `originationDate`, never Matterport `created`), ceiling height of the largest
