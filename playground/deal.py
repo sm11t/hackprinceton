@@ -8,14 +8,22 @@ Every number is an evidence record (see reconcile.record) taken from the CoStar 
   sold   commercial sale comps that include this property. Texas does not require sale prices
          to be disclosed, so many have none; bulk-portfolio prices are not this building's price.
 
+  market rent  output/rent-estimates.json from rent_model.py (trained on the asking rents recorded on
+         the kit's signed lease deals): what similar spaces that leased were asking, next to this space's
+         asking rent. Skipped when the
+         file has not been generated.
+
 The capital check states what each path needs up front against the buyer's capital. It never
 recommends a path: the cash-flow comparison (Nessie simulator) does that with these numbers.
 """
 import json
 from datetime import date
+from pathlib import Path
 
 from reconcile import record
 from space_fit import kit_lines
+
+RENT_ESTIMATES = Path(__file__).parent / "output" / "rent-estimates.json"
 
 SERVICE = {  # who pays operating expenses on top of the asking rent
     13: ("triple net (NNN)", "plus taxes, insurance and common-area costs"),
@@ -96,6 +104,62 @@ def lease_records(spaces):
                   + avail
                   + ("A lease is pending on this space. " if s.get("isLeasePending") else "")
                   + "Asking rent, not a signed rate.")))
+    return out
+
+
+def load_rent_estimates(path=RENT_ESTIMATES):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def market_rent_records(spaces, estimates):
+    """What similar spaces that leased were asking, next to each listed space's asking rent."""
+    if not estimates:
+        return []
+    out, tested = [], (estimates.get("evaluation") or {}).get("listings") or {}
+    for s in spaces:
+        e = (estimates.get("spaces") or {}).get(str(s.get("id")))
+        if not e:
+            continue
+        name = f"Suite {s['suite']}" if s.get("suite") else "The listed space"
+        basis = SERVICE.get(e.get("service_type"), ("lease basis not quoted",))[0]
+        span = f"${e['low']:,.2f}–${e['high']:,.2f}/sq ft/year (typical ${e['typical']:,.2f})"
+        if e["method"] == "similar_deals":
+            how = (f"the middle 80% of {e['similar_recent_deals']} similar {e['space_use']} deals ({basis}) signed in "
+                   f"this city in the last {estimates.get('recent_years', 7)} years; the trained model did no better "
+                   "than this for this kind of space")
+        else:
+            t = (tested.get("by_space_use") or {}).get(e["space_use"]) or tested
+            how = (f"a model trained on {estimates.get('trained_on_deals', 0):,} signed CoStar lease deals "
+                   f"since {estimates.get('train_since', '')}" + (
+                       f"; on buildings it never saw, its typical rent was off by a median "
+                       f"{t['model_median_error_pct']:g}% and its ranges held {t['range_coverage_pct']}% of asking rents"
+                       if t.get("model_median_error_pct") is not None else ""))
+        asking = monthly_rent(s)[1]
+        status, needs_human = "agrees", False
+        if e["low_confidence"]:
+            status, needs_human = "unknown", True
+            n = e["similar_recent_deals"]
+            verdict = ((f"Only {n} recent deals share" if n else "No recent deals share")
+                       + f" this use and lease basis ({basis}), so treat the range as rough."
+                       + ("" if asking is not None else " No asking rent is posted either."))
+        elif asking is None:
+            status, needs_human = "unknown", True
+            verdict = "No asking rent is posted; this is what to expect when you call."
+        elif e["low"] <= asking <= e["high"]:
+            verdict = f"The asking ${asking:,.2f} is within the range."
+        else:
+            status, needs_human = "conflict", True
+            side = "above" if asking > e["high"] else "below"
+            verdict = (f"The asking ${asking:,.2f} is {side} the range; ask the broker why (finish, term, "
+                       "concessions)" + (" before negotiating." if side == "above" else "."))
+        out.append(record(
+            "market_rent_range", e["typical"], "costar", f"rent-model:{s.get('id')}", estimates.get("generated"),
+            confidence=0.3 if e["low_confidence"] else 0.5 if e["method"] == "similar_deals" else 0.6,
+            status=status, needs_human=needs_human,
+            note=f"{name}: similar spaces that leased were asking {span}. {verdict} From {how}. An estimate, not an appraisal."))
     return out
 
 
@@ -227,8 +291,9 @@ def rent_for_simulation(spaces, suite=None, square_feet=None):
     return {"monthly": monthly, "source": f"CoStar asking rent, {space_name(space)}" + (f", {basis}" if basis else "")}
 
 
-def deal_facts(property_id, spaces, offers, comps, building_sf=None, capital=None, suite=None, square_feet=None):
-    lease = lease_records(spaces)
+def deal_facts(property_id, spaces, offers, comps, building_sf=None, capital=None, suite=None, square_feet=None,
+               rent_estimates=None):
+    lease = lease_records(spaces) + market_rent_records(spaces, rent_estimates)
     sale = sale_records(offers, building_sf)
     sold = sold_records(comps, property_id)
     paths = (["lease"] if spaces else []) + (["buy"] if offers else [])
@@ -243,7 +308,7 @@ def run_deal(kit_path, property_id, capital=None, password=None, suite=None, squ
     prop = load_property(kit_path, property_id, password)
     spaces, offers, comps = load_deal_data(kit_path, property_id, password)
     result = deal_facts(property_id, spaces, offers, comps, prop.get("grossBuildingAreaSquareFeet"), capital, suite,
-                        square_feet)
+                        square_feet, load_rent_estimates())
     a = prop.get("primaryAddress") or {}
     result["address"] = f"{a.get('streetNumber', '')} {a.get('streetName', '')} {a.get('streetType', '')}".strip()
     return result
