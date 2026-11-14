@@ -26,3 +26,10 @@ class CompetitorTests(unittest.TestCase):
     def test_unverified_price_dropped(self):
         c={'name':'Example Gym','address':'123 Main St Houston TX','category_excerpt':'fitness','source_id':'s','published_price':'$1/day'}
         self.assertIsNone(self.review([c])['competitors'][0]['published_price'])
+    def test_address_block_is_candidate_only_and_copies_text(self):
+        from competitors import address_block_candidates
+        s={'source_id':'page','value':{'excerpt':'Indoor pickleball\n\nExample Club — West\n\n* 123 Main St, Houston, TX 77001\n'}}
+        result=address_block_candidates([s],'indoor pickleball','Houston')
+        self.assertEqual(result[0]['name'],'Example Club — West')
+        self.assertEqual(result[0]['address'],'123 Main St, Houston, TX 77001')
+        self.assertEqual(address_block_candidates([s],'fitness studio','Houston'),[])

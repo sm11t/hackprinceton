@@ -27,3 +27,14 @@ class AdvisorMoneyTests(unittest.TestCase):
         self.assertLess(c['sensitivities']['demand_shortfall_25pct']['rows'][-1]['cash'],c['conversion']['rows'][-1]['cash'])
     def test_warehouse_allowance_explicit(self):
         self.assertEqual(advisor_cash({},'warehouse / storage','lease')['money']['planning_inputs']['build_cost'],25000)
+    def test_warehouse_allowance_not_reused_as_recreation_bid(self):
+        from advisor_money import comparison_inputs
+        self.assertEqual(comparison_inputs({'build_cost':25000},'warehouse / storage','indoor pickleball')['build_cost'],200000)
+    def test_missing_purchase_price_suppresses_cash(self):
+        r=advisor_cash({},'office / service','buy')
+        self.assertIsNone(r['money'])
+        self.assertIn('acquisition',r['costs']['totals']['base']['unknown_lines'])
+    def test_rent_override_recomputes_deposit_and_carry(self):
+        a=advisor_cash({'monthly_rent':1000},'fitness studio','lease')
+        b=advisor_cash({'monthly_rent':2000},'fitness studio','lease')
+        self.assertEqual(b['costs']['totals']['base']['cash_required']-a['costs']['totals']['base']['cash_required'],5000)

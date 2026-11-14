@@ -1,7 +1,7 @@
 """Reconcile itemized costs to the unchanged Nessie monthly simulator."""
 from approvals_timeline import build_timeline
 from cost_ledger import estimate_costs
-from money_runway import analyze_money, assumptions
+from money_runway import analyze_money, assumptions, DEFAULTS
 
 
 def plan_inputs(inputs,use):
@@ -9,6 +9,19 @@ def plan_inputs(inputs,use):
     if use=='warehouse / storage':
         result.setdefault('build_cost', result.get('baseline_build_cost',25000))
         result.setdefault('monthly_income', result.get('baseline_income',18000))
+    return result
+
+
+def comparison_inputs(inputs, selected_use, candidate):
+    result=dict(inputs)
+    if candidate != selected_use:
+        if candidate == 'warehouse / storage':
+            result['build_cost']=inputs.get('baseline_build_cost',25000)
+            result['monthly_income']=inputs.get('baseline_income',18000)
+        elif selected_use == 'warehouse / storage':
+            # A small warehouse allowance is not a bid for a recreation conversion.
+            result['build_cost']=DEFAULTS['build_cost']
+            result['monthly_income']=DEFAULTS['monthly_income']
     return result
 
 

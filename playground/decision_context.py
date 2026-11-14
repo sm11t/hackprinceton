@@ -33,6 +33,16 @@ class DecisionContext:
 
 
 def attach_context(report, inputs):
+    # Attachment provenance is retained separately; never display it as camera capture.
+    for row in report['identity']['records'] + (report.get('space') or {}).get('records', []):
+        if row['source'] == 'matterport' and row.get('captured_at'):
+            row['attachment_date'] = row['captured_at']
+            row['captured_at'] = None
+            row['note'] += ' CoStar attachment date only; actual camera capture date is unknown.'
+        if row['fact'] == 'suite_occupancy_at_scan':
+            row['status'] = 'unknown'
+            row['needs_human'] = True
+            row['note'] = 'Attachment-date tenancy comparison is a screening hypothesis, not verified occupancy at camera capture. Confirm scan date and photos. ' + row['note']
     evidence = list(report['identity']['records'])
     evidence += (report.get('space') or {}).get('records', [])
     context = DecisionContext(

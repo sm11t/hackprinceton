@@ -11,7 +11,7 @@ CATEGORIES={
 
 
 def normalized(text):
-    return ' '.join(str(text).casefold().split())
+    return ' '.join(re.sub(r'[^\w$€£]+', ' ', str(text).casefold()).split())
 
 
 def distance_miles(a,b):
@@ -32,7 +32,7 @@ def validate_competitors(candidates, sources, use, city, *, origin=None, geocode
         name,address,category=(normalized(row.get(k,'')) for k in ('name','address','category_excerpt'))
         reason=None
         if not name or not address or not category or any(x not in excerpt for x in (name,address,category)):
-            reason='Name, address or category is not copied from the cited original page.'
+            reason='Not supported by cited page: ' + ', '.join(k for k,v in (('name',name),('address',address),('category',category)) if not v or v not in excerpt)
         elif use=='fitness studio' and any(token in category for token in ('equipment','supplies','retail')):
             reason='Equipment retailer is not a fitness studio competitor.'
         elif not any(token in category for token in CATEGORIES.get(use,())):
@@ -50,7 +50,7 @@ def validate_competitors(candidates, sources, use, city, *, origin=None, geocode
         if key in seen:
             reason='Duplicate operator/location.'
         if reason:
-            rejected.append({'name':row.get('name'),'reason':reason}); continue
+            rejected.append({'name':row.get('name'),'address':row.get('address'),'category_excerpt':row.get('category_excerpt'),'source_id':row.get('source_id'),'reason':reason}); continue
         seen.add(key)
         price=row.get('published_price')
         if price and normalized(price) not in excerpt:
@@ -79,3 +79,27 @@ def census_point(address):
                     {'address':address,'benchmark':'Public_AR_Current','format':'json'})
     matches=result.get('result',{}).get('addressMatches',[])
     return matches[0]['coordinates'] if len(matches)==1 else None
+
+
+def address_block_candidates(sources, use, city):
+    """Copy explicit operator/address blocks, never infer or complete an address.
+
+    This is a candidate generator only. Independent model review and the same
+    source/category/geography validator still must accept each proposed record.
+    """
+    candidates=[]
+    for source in sources:
+        text=(source.get('value') or {}).get('excerpt','')
+        lines=[line.strip() for line in text.splitlines() if line.strip()]
+        category=next((line for line in lines if len(line)<600 and any(t in normalized(line) for t in CATEGORIES.get(use,()))),None)
+        if not category: continue
+        for index,line in enumerate(lines):
+            address=re.sub(r'^[-*]\s*','',line)
+            if not index or not re.match(r'^\d{1,6}\s',address) or not re.search(r',\s*'+re.escape(city)+r',\s*(?:TX|CA|Texas|California)\b',address,re.I):
+                continue
+            name=lines[index-1].lstrip('# ').strip()
+            if not 3<len(name)<100 or any(t in name for t in ('http','[',']','*')) or normalized(name) in {'address','contact us','contact','visit us','location','locations','call us now'}:
+                continue
+            candidates.append({'name':name,'address':address,'category_excerpt':category,
+                               'source_id':source['source_id'],'published_price':None})
+    return candidates[:8]

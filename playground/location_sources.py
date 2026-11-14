@@ -2,6 +2,7 @@
 from datetime import datetime, timezone
 import json
 import os
+import re
 from urllib.parse import urlencode, urlsplit
 from zipfile import ZipFile
 
@@ -177,22 +178,28 @@ def market_sources(city, use):
         return [record("public:web", "market-unavailable", "Market search", None,
                        note="Tavily credentials are unavailable.")]
     headers = {"Authorization": f"Bearer {key}"}
+    # Search category + market, then calculate actual proximity. The exact subject
+    # street address dominated search and returned unrelated tenants on that road.
+    area = ', '.join(city.split(',')[-2:]).strip()
+    term = {'indoor pickleball':'indoor pickleball courts', 'fitness studio':'gym fitness classes',
+            'warehouse / storage':'self storage warehouse', 'flex workspace':'coworking flex workspace',
+            'office / service':'serviced office coworking', 'retail / showroom':'retail showroom'}.get(use,use)
     try:
         search = get_json("https://api.tavily.com/search", headers=headers, body={
-            "query": f"{use} business membership classes rentals near {city} official locations address -equipment -supplies -fresha -yahoo",
+            "query": f"{term} {area} official locations address membership -equipment -supplies",
             "max_results": 8, "include_answer": False, "auto_parameters": False,
         })
         urls = list(dict.fromkeys(item["url"] for item in search["results"]
                                   if urlsplit(item["url"]).scheme == "https"
                                   and not any(domain in (urlsplit(item['url']).hostname or '')
-                                              for domain in ('yahoo.com','fresha.com','yelp.com','facebook.com','instagram.com'))))[:4]
+                                              for domain in ('yahoo.com','fresha.com','yelp.com','facebook.com','instagram.com','mapquest.com','compass.com','loopnet.com'))))[:4]
         if not urls:
             raise ValueError("No eligible search results")
         extracts = get_json("https://api.tavily.com/extract", headers=headers, body={"urls": urls})
         retrieved = datetime.now(timezone.utc).isoformat()
         records = [
             record("public:web", f"market-page-{i}", "Public operator research candidate",
-                   {"excerpt": item["raw_content"][:10000], "retrieved_at": retrieved},
+                   {"excerpt": re.sub(r"!\[[^\]]*\]\([^)]*\)", "", item["raw_content"])[:12000], "retrieved_at": retrieved},
                    item["url"], note="Confirm operator identity and exact location. Retrieval date is not publication date.")
             for i, item in enumerate(extracts["results"], 1)
             if item.get("raw_content") and item.get("url") in urls

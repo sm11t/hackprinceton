@@ -1,5 +1,7 @@
 """Join the team checks for one property and one explicitly selected suite."""
-from advisor_money import advisor_cash, plan_inputs
+from functools import lru_cache
+from pathlib import Path
+from advisor_money import advisor_cash, plan_inputs, comparison_inputs
 from approval_path import approval_path
 from cost_ledger import estimate_costs
 from alternatives import CATALOG, rank_alternatives
@@ -13,6 +15,20 @@ from reconcile import load_tenancies, reconcile_evidence
 from space_fit import gather, listed_spaces, load_property, space_fit
 
 REVIEW_USES = {name: spec["fit"] for name, spec in CATALOG.items()}
+
+
+@lru_cache(maxsize=2)
+def _tenancy_snapshot(kit, modified_at, password):
+    # The sponsor kit is immutable during a review session. Avoid decrypting and
+    # reading 74k tenancy records and all companies for every property switch.
+    return load_tenancies(kit, None, password)
+
+
+def property_tenancies(kit, property_id, password):
+    if kit is None:  # injectable test fixtures
+        return load_tenancies(kit, {property_id}, password).get(property_id, [])
+    path=Path(kit)
+    return _tenancy_snapshot(str(path), path.stat().st_mtime_ns, password).get(property_id, [])
 
 
 def space_option(space):
@@ -42,7 +58,7 @@ def project_cash(inputs, use, ownership, buyer=None):
 
 
 def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None, offline=False,
-                    buyer=None, research=None):
+                    buyer=None, research=None, replay_research=False):
     property_id = int(entry["id"])
     prop = load_property(kit, property_id, password)
     spaces = listed_spaces(kit, property_id, password)
@@ -77,7 +93,7 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
         }
 
     prop, _, vexcel, rooms, errors = gather(kit, property_id, offline, password, property_data=(prop, spaces))
-    tenancies = load_tenancies(kit, {property_id}, password).get(property_id, [])
+    tenancies = property_tenancies(kit, property_id, password)
     audit = reconcile_evidence(prop, rooms, selected_suite=unit, tenancies=tenancies)
     blocked_scans = {row["source_id"] for row in audit["records"]
                      if row["fact"] in {"scan_address", "scan_suite"} and row["status"] == "conflict"}
@@ -91,9 +107,11 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
             prop, spec['fit'], spaces=selected if listing else [], suite=unit, vexcel=vexcel,
             rooms_by_model={m: r for m, r in rooms.items() if m not in blocked_scans},
             requirements={'min_area_sf': 1} if spec['fit'] == 'custom' else None)
+    if REVIEW_USES[use]=='custom' and fit['verdict']=='supported':
+        fit['verdict']='investigate'
     # An area calculation cannot determine court layout.
     fit["records"] = [row for row in fit["records"] if row["fact"] != "pickleball_courts_by_area"]
-    if (blocked_scans or not listing) and fit["verdict"] == "supported":
+    if (blocked_scans or not listing or not listing.get("square_feet")) and fit["verdict"] == "supported":
         fit["verdict"] = "investigate"
     deal = deal_facts(property_id, deals, offers, comps, prop.get("grossBuildingAreaSquareFeet"),
                       suite=unit)
@@ -136,10 +154,10 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
     } if cash else None)
     approvals['path'] = approval_path(approvals, prop, scope_label, use, audit['records'])
     location = {"findings": [], "sources": [], "status": "offline" if offline else "unavailable"}
-    if not offline and research and cash:
+    if research and (not offline or replay_research) and cash:
         try:
             report = research(property_id, use)
-            location.update(status="complete", findings=report["findings"], sources=report["evidence"], competition=report.get("competition"))
+            location.update(status="saved" if report.get("replayed") else "complete", findings=report["findings"], sources=report["evidence"], competition=report.get("competition"))
             audit["records"].extend(row for row in report["evidence"] if row["source"] == "public:fema")
         except (OSError, RuntimeError, ValueError, KeyError):
             pass
@@ -174,8 +192,10 @@ def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
     assumptions(inputs)
     overrides = kwargs.pop("cost_overrides", None)
     report = _review_property(kit, entry, use, suite, ownership, inputs, **kwargs)
-    report['source_mode'] = 'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)'
+    report['source_mode'] = ('Saved sponsor evidence and saved public research capture; not refreshed' if kwargs.get('replay_research') else
+                             'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)')
     attach_context(report, inputs)
+    report['evidence_overview'] = evidence_overview(report['identity']['records'])
     if kwargs.get('buyer'):
         report['decision_context']['cash_budget'] = kwargs['buyer']['starting_cash']
     report['alternatives'] = rank_alternatives(report, report.pop('_prop', {}), report.pop('_fits', {}),
@@ -192,10 +212,7 @@ def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
         report['finance_status']=result['status']
         for option in report['alternatives']['all_options']:
             if option['status'] in {'blocked','excluded'}: continue
-            alternative_inputs=dict(scenario_inputs)
-            if option['use'] != use and option['use']=='warehouse / storage':
-                alternative_inputs['build_cost']=alternative_inputs.get('baseline_build_cost',25000)
-                alternative_inputs['monthly_income']=alternative_inputs.get('baseline_income',18000)
+            alternative_inputs=comparison_inputs(scenario_inputs,use,option['use'])
             modeled=result if option['use']==use else advisor_cash(alternative_inputs,option['use'],ownership,**common)
             totals=modeled['costs']['totals']['base']
             option['cash_required']=totals['cash_required']

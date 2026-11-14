@@ -18,7 +18,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
-from advisor_money import advisor_cash
+from advisor_money import advisor_cash, comparison_inputs
 from cost_ledger import estimate_costs
 from maximo import REVIEW_USES, project_cash, review_property, suite_options
 from deal import load_deal_data, rent_for_simulation, run_deal
@@ -109,6 +109,7 @@ def main():
     parser.add_argument("--kit", required=True, type=Path)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--offline", action="store_true", help="Use saved playground/output evidence and aerial; tour still requires internet")
+    parser.add_argument("--research-replay", type=Path, help="Replay one saved public research report only for its exact address and use; visibly labeled")
     parser.add_argument("--nessie-account", help="Read starting cash and recurring bills from a Nessie sandbox account")
     args = parser.parse_args()
     buyer = buyer_from_nessie(args.nessie_account) if args.nessie_account else None
@@ -214,6 +215,14 @@ def main():
         )
 
     def market_review(property_id, use):
+        if args.research_replay:
+            saved=json.loads(args.research_replay.read_text())
+            entry=location_properties[str(property_id)]
+            expected=f"{entry['address']}, {entry['city']},".casefold()
+            if not saved.get('address','').casefold().startswith(expected) or saved.get('proposed_use') != use:
+                raise RuntimeError('No saved research for this address and use')
+            saved['replayed']=True
+            return saved
         if not os.environ.get("UPSTAGE_API_KEY"):
             raise RuntimeError("Research provider is not configured")
         if not location_lock.acquire(blocking=False):
@@ -308,10 +317,7 @@ def main():
                     report['comparisons'] = {}
                     for candidate in payload.get('compare_uses', []):
                         if candidate not in REVIEW_USES: raise ValueError('Unknown comparison use.')
-                        candidate_inputs = dict(inputs)
-                        if candidate != use and candidate == 'warehouse / storage':
-                            candidate_inputs['build_cost'] = inputs.get('baseline_build_cost', 25000)
-                            candidate_inputs['monthly_income'] = inputs.get('baseline_income', 18000)
+                        candidate_inputs = comparison_inputs(inputs,use,candidate)
                         modeled = report if candidate == use else advisor_cash(candidate_inputs,candidate,ownership,buyer=buyer)
                         report['comparisons'][candidate] = {
                             'cash_required': modeled['costs']['totals']['base']['cash_required'],
@@ -330,7 +336,7 @@ def main():
                         raise ValueError("Invalid suite.")
                     report = review_property(args.kit, entry, use, suite, ownership, inputs,
                                              password=password, offline=args.offline, buyer=buyer,
-                                             research=market_review, cost_overrides=payload.get("cost_overrides"))
+                                             research=market_review, replay_research=bool(args.research_replay), cost_overrides=payload.get("cost_overrides"))
                 self.send(json.dumps(report).encode(), "application/json")
             except ValueError as error:
                 self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)

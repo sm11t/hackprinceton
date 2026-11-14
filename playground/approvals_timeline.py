@@ -188,7 +188,7 @@ def analyze_approvals(address, proposed_use, records, assumptions=None):
     # Sponsor labels remain helpful recorded context without becoming approvals.
     for row in records:
         value = row.get("value")
-        if row.get("source") == "costar" and isinstance(value, dict) and value.get("zoningDescription"):
+        if row.get("source") == "costar" and isinstance(value, dict) and str(value.get("zoningDescription") or "").strip().casefold() not in {"", "none", "null", "unknown", "n/a"}:
             finding(f"CoStar records zoning as {value['zoningDescription']}. Confirm its current meaning and applicability with the planning authority.", row["source_id"])
             break
     use = str(proposed_use).casefold()

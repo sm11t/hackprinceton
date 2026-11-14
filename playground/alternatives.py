@@ -32,13 +32,14 @@ def rank_alternatives(report, prop, fits, listing, budget, reserve):
             if identity_conflict:
                 blockers.append('Tour does not match the building or selected suite; do not use it as measured premises.')
             blockers += [spec['check'], 'Parcel/suite permission, allocated parking and utilities remain unverified.']
+        screening_state=state
         # Only a lower bound until Stage 2 ledger is available. Never claim it is total cost.
         lower = reserve + (rent or 0)
         budget_fit = 'insufficient even for reserve and one month base rent' if budget < lower else 'unknown until itemized costs'
         if eligible and state != 'excluded' and budget < lower:
             state = 'unaffordable'
             blockers.insert(0, 'Cash does not cover reserve plus one month of base rent, before construction.')
-        rows.append(dict(use=use,status=state,physical_fit=fit.get('verdict','not_run'),
+        rows.append(dict(use=use,status=state,screen_status=screening_state,physical_fit="investigate" if eligible and (spec["fit"]=="custom" or identity_conflict) else fit.get('verdict','not_run'),
                          cash_required=None,known_cash_floor=lower,budget_fit=budget_fit,
                          permission='unverified',demand_confidence='unverified',opening_delay=None,runway=None,
                          evidence_quality='scope conflict' if identity_conflict else 'partial sponsor evidence',

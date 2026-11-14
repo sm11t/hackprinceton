@@ -9,6 +9,8 @@ const query = new URLSearchParams(location.search);
 const dollars = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 let catalog = [];
 let suiteRequest = 0;
+let reportRevision = 0;
+let financialRevision = 0;
 
 function node(parent, tag, text, className) {
   const child = document.createElement(tag);
@@ -28,6 +30,7 @@ async function json(url, payload) {
 }
 
 async function updateSuites() {
+  reportRevision++;
   reportBox.replaceChildren();
   const request = ++suiteRequest;
   const id = byId("property").value;
@@ -70,7 +73,7 @@ function showRecords(parent, records) {
   const list = node(parent, "ul");
   for (const record of records) {
     const item = node(list, "li", record.note || record.fact.replaceAll("_", " "));
-    const date = record.captured_at ? ` · ${record.captured_at}` : "";
+    const date = record.captured_at ? ` · record date ${record.captured_at}` : record.attachment_date ? ` · attachment ${record.attachment_date}; capture date unknown` : " · date unknown";
     node(item, "small", ` ${record.source}${date}`);
     sourceLink(item, record.evidence_url);
   }
@@ -187,11 +190,19 @@ function showCash(parent, cash, report) {
 }
 
 async function updateFinancials(report, inputs, overrides) {
+  const revision = reportRevision;
+  const financialRequest = ++financialRevision;
   const result = await json("/api/maximo/estimate", {use: report.proposed_use, ownership: report.ownership,
-    inputs, cost_overrides: overrides, compare_uses: report.alternatives.all_options.filter(o => !["excluded", "blocked"].includes(o.status)).map(o => o.use)});
+    inputs, cost_overrides: overrides, compare_uses: report.alternatives.all_options.filter(o => !["excluded", "blocked"].includes(o.screen_status ?? o.status)).map(o => o.use)});
+  if (revision !== reportRevision || financialRequest !== financialRevision) return;
+  const priorInputs = report.money?.planning_inputs ?? report.planning_inputs;
+  const priorRentSource = report.money?.rent_source;
   report.money = report.eligibility.physical_fit_blocked ? null : result.money;
+  if (report.money) report.money.rent_source = inputs.monthly_rent === priorInputs?.monthly_rent && priorRentSource ? priorRentSource : "User-edited scenario base rent; not a new listing quote";
   report.costs = result.costs;
   report.planning_inputs = inputs;
+  byId("budget").value = inputs.starting_cash;
+  byId("reserve").value = inputs.reserve;
   report.finance_status = result.status;
   for (const option of report.alternatives.all_options) {
     const comparison = result.comparisons[option.use];
@@ -299,7 +310,7 @@ function display(report) {
   node(hero, "h3", report.alternatives.recommendation);
   node(hero, "p", report.alternatives.reversal);
   const decisive = panel(reportBox, "Three decision-changing findings");
-  const findings = report.evidence_overview.slice(0, 2);
+  const findings = report.eligibility.status !== "conditional" ? report.eligibility.records.slice(0,2).map(r => ({title:r.fact.replaceAll("_"," "),note:r.note})) : report.evidence_overview.slice(0, 2);
   if (report.costs) findings.push({title: "Budget under planning allowances", note: report.costs.totals.base.shortfall === null ? "Cost lines are incomplete." : `${dollars.format(report.costs.totals.base.shortfall)} shortfall to open and retain reserve. Costs and revenue remain unverified.`});
   else findings.push({title: "Eligibility", note: report.eligibility.reason});
   for (const finding of findings.slice(0,3)) { node(decisive, "h3", finding.title); node(decisive, "p", finding.note); }
@@ -377,7 +388,7 @@ function display(report) {
         });
         explore.remove();
         node(held, "p", "Generic planning example. These assumptions do not establish costs, rent, demand or suitability for this property.");
-        showCash(held, cash, report);
+        showCash(held, cash, {...report, costs: null, planning_inputs: null});
       } catch (error) {
         node(held, "p", error.message);
         explore.disabled = false;
@@ -388,7 +399,11 @@ function display(report) {
     node(cash, "p", "Runway under editable assumptions. Build-out costs, bookings and approval durations need independent estimates; a surplus does not establish site feasibility.");
     showCash(cash, report.money, report);
   }
-  if (!report.space) { reportBox.append(nextChecks); return; }
+  if (!report.space) {
+    reportBox.append(nextChecks);
+    const raw = node(reportBox, "details"); node(raw, "summary", "Full identity evidence"); raw.append(columns);
+    return;
+  }
   const space = panel(columns, "Space and condition");
   const fitLabel = {
     supported: "Available measurements support initial screening. Verify the layout and overhead obstructions.",
@@ -434,7 +449,8 @@ function display(report) {
     }
   }
   const area = panel(reportBox, "Location and demand");
-  if (report.location.status !== "complete") {
+  if (report.location.status === "saved") node(area, "p", "Saved public research capture from the observation dates below; not refreshed for this run.");
+  if (!["complete", "saved"].includes(report.location.status)) {
     node(area, "p", report.location.status === "offline" ? "Offline mode skipped live location research." : "Live location research was unavailable for this run.");
   }
   showClaims(area, report.location.findings, report.location.sources);
