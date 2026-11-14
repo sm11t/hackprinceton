@@ -1,0 +1,37 @@
+{
+  "_note": "Matches Vince's Tanner Rd pilot (#agent-log, Nov 14 02:24). Base rent $8,500/mo NNN and 18 ft clear height are from the public listing; every other $ amount, rate and timing is an ASSUMPTION for showing the mechanism, not a forecast.",
+  "property": {
+    "address": "9700 Tanner Rd, Houston TX (10,000 SF suite)",
+    "costar_id": 23296,
+    "suite_sqft": 10000,
+    "advertised_clear_height_ft": 18,
+    "listing_rent_monthly_nnn": 8500
+  },
+  "months": 12,
+  "min_cash_reserve": 50000,
+  "buyer": {
+    "first_name": "Demo",
+    "last_name": "Pickleball Operator",
+    "account_nickname": "Pickleball facility operating account",
+    "address": {"street_number": "9700", "street_name": "Tanner Rd", "city": "Houston", "state": "TX", "zip": "77041"},
+    "starting_cash": 320000,
+    "recurring_bills": [
+      {"payee": "Suite base rent (NNN)", "monthly": 8500},
+      {"payee": "NNN charges (taxes/insurance/CAM)", "monthly": 2000}
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "3-court indoor pickleball facility",
+      "_income_math": "3 courts x 12 h/day x 30 days x 55% paid occupancy x $35/h = $20,790/mo",
+      "upfront_cost": 0,
+      "permit_months": 0,
+      "build_months": 3,
+      "build_cost": 200000,
+      "monthly_income": 20790,
+      "ramp_months": 0,
+      "monthly_operating_cost": 5000,
+      "monthly_carry": 2000
+    }
+  ]
+}

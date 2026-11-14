@@ -1,0 +1,49 @@
+{
+  "_note": "Property facts are from the CoStar kit check (Codex, #tasks, Nov 14). Every $ amount and timing below is a PLACEHOLDER ASSUMPTION to edit, not market data.",
+  "property": {
+    "address": "9700 Tanner Rd, Houston TX",
+    "costar_id": 23296,
+    "building_sqft": 69500,
+    "year_built": 1979,
+    "loading_docks": 3,
+    "parking_spaces": 173,
+    "clear_height": "UNKNOWN (Matterport height field is 0)"
+  },
+  "months": 24,
+  "min_cash_reserve": 250000,
+  "buyer": {
+    "first_name": "Demo",
+    "last_name": "Operator",
+    "account_nickname": "Sports facility operating account",
+    "address": {"street_number": "9700", "street_name": "Tanner Rd", "city": "Houston", "state": "TX", "zip": "77041"},
+    "starting_cash": 3000000,
+    "recurring_bills": [
+      {"payee": "Acquisition loan", "monthly": 45000},
+      {"payee": "Property tax + insurance escrow", "monthly": 12000}
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "Keep as warehouse, lease to logistics tenant",
+      "upfront_cost": 150000,
+      "permit_months": 0,
+      "build_months": 1,
+      "build_cost": 50000,
+      "monthly_income": 60000,
+      "ramp_months": 0,
+      "monthly_operating_cost": 5000,
+      "monthly_carry": 0
+    },
+    {
+      "name": "Convert to indoor sports facility",
+      "upfront_cost": 150000,
+      "permit_months": 3,
+      "build_months": 6,
+      "build_cost": 1800000,
+      "monthly_income": 140000,
+      "ramp_months": 6,
+      "monthly_operating_cost": 45000,
+      "monthly_carry": 8000
+    }
+  ]
+}
