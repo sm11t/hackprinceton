@@ -55,13 +55,13 @@ def estimate_costs(inputs, *, area=None, tenure='lease', geography='Unknown', re
         line(key,v['build_cost']*share,'build','CAPEX')
     line('deposit',v['monthly_rent']*2 if tenure=='lease' else 0,'upfront','refundable deposit',
          f'Two months assumed deposit × base rent ({rent_source}); deposit terms unverified')
-    line('acquisition',v['upfront_cost'] if tenure=='buy' else 0,'upfront','acquisition')
+    line('acquisition',(v['upfront_cost'] or None) if tenure=='buy' else 0,'upfront','acquisition')
     line('insurance_legal',3000,'upfront','OPEX')
     line('preopening_marketing_payroll',5000,'upfront','OPEX')
     construction={k:sum(r['amounts'][k] or 0 for r in rows if r['phase']=='build' and r['payer']!='landlord') for k in ('low','base','high')}
     line('contingency',construction['base']*.15,'build','CAPEX')
     duration=v['permit_months']+v['build_months']+v['delay']
-    burn=(v['monthly_rent'] if tenure=='lease' else 0)+v['monthly_carry']
+    burn=(v['monthly_rent'] if tenure=='lease' else 0)+v['monthly_carry']+v['monthly_nnn']+v['monthly_insurance']+v['monthly_taxes']
     totals={}
     for case in ('low','base','high'):
         owed=[r for r in rows if r['payer']!='landlord']
@@ -75,6 +75,6 @@ def estimate_costs(inputs, *, area=None, tenure='lease', geography='Unknown', re
                           known_cash_floor=required,reserve=v['reserve'],cash_at_opening=None if unknown else v['starting_cash']-spent,
                           shortfall=None if unknown else max(0,required-v['starting_cash']),unknown_lines=unknown)
     return dict(lines=rows,totals=totals,monthly_preopening_burn=burn,opening_month=duration+1,
-                monthly_operating_burn=burn+v['monthly_operating_cost'],budget=v['starting_cash'],overrides=overrides,
+                monthly_operating_burn=burn+v['monthly_operating_cost']+v['monthly_payroll']+v['monthly_utilities']+v['monthly_maintenance'],budget=v['starting_cash'],overrides=overrides,
                 basis='Unverified editable planning allowances, not estimates or quotes. Reserve is retained cash. Landlord-paid lines excluded. Deposit is additional refundable cash, not prepaid rent. Lease rent is counted monthly only.',
                 missing=['Obtain contractor quantities, rates, geography and dated bids.', 'Confirm deposit, landlord contribution, taxes, NNN/CAM, insurance and acquisition terms.'])

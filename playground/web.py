@@ -18,6 +18,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from advisor_money import advisor_cash
 from cost_ledger import estimate_costs
 from maximo import REVIEW_USES, project_cash, review_property, suite_options
 from deal import load_deal_data, rent_for_simulation, run_deal
@@ -303,11 +304,25 @@ def main():
                 if use not in REVIEW_USES or ownership not in ("lease", "buy") or not isinstance(inputs, dict):
                     raise ValueError("Choose a supported use and lease or buy.")
                 if route.endswith('/estimate'):
-                    report = estimate_costs(inputs, tenure=ownership, overrides=payload.get('cost_overrides'))
+                    report = advisor_cash(inputs,use,ownership,overrides=payload.get('cost_overrides'),buyer=buyer)
+                    report['comparisons'] = {}
+                    for candidate in payload.get('compare_uses', []):
+                        if candidate not in REVIEW_USES: raise ValueError('Unknown comparison use.')
+                        candidate_inputs = dict(inputs)
+                        if candidate != use and candidate == 'warehouse / storage':
+                            candidate_inputs['build_cost'] = inputs.get('baseline_build_cost', 25000)
+                            candidate_inputs['monthly_income'] = inputs.get('baseline_income', 18000)
+                        modeled = report if candidate == use else advisor_cash(candidate_inputs,candidate,ownership,buyer=buyer)
+                        report['comparisons'][candidate] = {
+                            'cash_required': modeled['costs']['totals']['base']['cash_required'],
+                            'shortfall': modeled['costs']['totals']['base']['shortfall'],
+                            'reserve_gap': (modeled['money'] or {}).get('conversion',{}).get('extra_funding_needed'),
+                            'opening_delay': modeled['costs']['opening_month'],
+                            'runway': (modeled['money'] or {}).get('runway_months')}
                 elif route.endswith("/cash"):
                     if payload.get("scenario_only") is not True:
                         raise ValueError("Confirm that you want a hypothetical cash scenario.")
-                    report = project_cash(inputs, use, ownership, buyer)
+                    report = advisor_cash(inputs,use,ownership,overrides=payload.get('cost_overrides'),buyer=buyer) if payload.get('itemized') else project_cash(inputs, use, ownership, buyer)
                 else:
                     entry = location_properties[str(payload["property_id"])]
                     suite = payload.get("suite") or None

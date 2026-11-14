@@ -1,4 +1,5 @@
 """Join the team checks for one property and one explicitly selected suite."""
+from advisor_money import advisor_cash, plan_inputs
 from approval_path import approval_path
 from cost_ledger import estimate_costs
 from alternatives import CATALOG, rank_alternatives
@@ -117,12 +118,13 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
         rent_source = rent["source"]
     if property_id == 23296 and unit == "A" and ownership == "lease" and not buyer:
         # Match the pilot: $2k in assumed NNN charges plus $2k in pre-opening overhead.
-        cash_inputs.setdefault("monthly_carry", 4000)
+        cash_inputs.setdefault("monthly_carry", 2000)
+        cash_inputs.setdefault("monthly_nnn", 2000)
     cash = None
     if fit["verdict"] == "does_not_fit":
         eligibility["headline"] = "Fit check failed under the available measurements"
         eligibility["reason"] = "Review the physical fit findings before modeling this conversion."
-        eligibility["status"] = "blocked"
+        eligibility["physical_fit_blocked"] = True
     else:
         cash = project_cash(cash_inputs, use, ownership, buyer)
         cash["rent_source"] = rent_source
@@ -161,35 +163,58 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
         "identity": audit, "space": fit, "deal": deal, "approvals": approvals,
         "location": location, "money": cash, "actions": actions,
         "unavailable_sources": list(errors),
-        "tour": tour, "_fits": alternatives_fit, "_prop": prop, "_listing": listing,
+        "tour": tour, "_fits": alternatives_fit, "_prop": prop, "_listing": listing, "_cash_inputs": cash_inputs, "_rent_source": rent_source,
     }
 
 
 def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
     # Validate before providers; contract is additive to preserve existing callers.
     from money_runway import assumptions
+    inputs = plan_inputs(inputs, use)
     assumptions(inputs)
     overrides = kwargs.pop("cost_overrides", None)
     report = _review_property(kit, entry, use, suite, ownership, inputs, **kwargs)
     report['source_mode'] = 'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)'
     attach_context(report, inputs)
+    if kwargs.get('buyer'):
+        report['decision_context']['cash_budget'] = kwargs['buyer']['starting_cash']
     report['alternatives'] = rank_alternatives(report, report.pop('_prop', {}), report.pop('_fits', {}),
         report.pop('_listing', None), report['decision_context']['cash_budget'], float(inputs.get('reserve', 50000)))
-    if report['money']:
+    scenario_inputs=report.pop('_cash_inputs',dict(inputs))
+    rent_source=report.pop('_rent_source','Editable assumption')
+    if report['eligibility']['status']=='conditional':
         listing = next((r for r in report['space']['records'] if r['fact']=='listed_space_sf'), {})
-        report['costs'] = estimate_costs(report['money']['inputs'], area=listing.get('value'), tenure=ownership,
-            geography=entry['city'], rent_source=report['money']['rent_source'], overrides=overrides)
+        common=dict(area=listing.get('value'),geography=entry['city'],rent_source=rent_source,buyer=kwargs.get('buyer'))
+        result=advisor_cash(scenario_inputs,use,ownership,overrides=overrides,**common)
+        report['costs']=result['costs']
+        report['planning_inputs']=scenario_inputs
+        report['money']=None if report['eligibility'].get('physical_fit_blocked') else result['money']
+        report['finance_status']=result['status']
         for option in report['alternatives']['all_options']:
-            option['cash_required'] = report['costs']['totals']['base']['cash_required']
-            option['budget_fit'] = ('unknown: incomplete cost lines' if option['cash_required'] is None else
-                'shortfall under planning allowances' if report['costs']['totals']['base']['shortfall'] else 'within budget under unverified planning allowances')
-            if option['status']=='conditional' and report['costs']['totals']['base']['shortfall']:
+            if option['status'] in {'blocked','excluded'}: continue
+            alternative_inputs=dict(scenario_inputs)
+            if option['use'] != use and option['use']=='warehouse / storage':
+                alternative_inputs['build_cost']=alternative_inputs.get('baseline_build_cost',25000)
+                alternative_inputs['monthly_income']=alternative_inputs.get('baseline_income',18000)
+            modeled=result if option['use']==use else advisor_cash(alternative_inputs,option['use'],ownership,**common)
+            totals=modeled['costs']['totals']['base']
+            option['cash_required']=totals['cash_required']
+            option['cost_basis']='Unverified planning scenario; warehouse uses the editable baseline build allowance, other uses share the conversion allowance. Obtain separate bids.'
+            option['budget_fit']='unknown: incomplete cost lines' if totals['cash_required'] is None else ('shortfall under planning allowances' if totals['shortfall'] else 'within budget under unverified allowances')
+            option['opening_delay']=modeled['costs']['opening_month']
+            option['runway']=(modeled['money'] or {}).get('runway_months')
+            option['reserve_gap']=(modeled['money'] or {}).get('conversion',{}).get('extra_funding_needed')
+            if totals['cash_required'] is None:
+                option['status']='blocked'
+                option['key_blocker']='Unknown cost lines prevent complete budget comparison.'
+            elif totals['shortfall']:
                 option['status']='unaffordable'
-                option['key_blocker']='Planning cash required exceeds available cash; reduce scope or increase cash before proceeding.'
-        report['alternatives']['options'] = [o for o in report['alternatives']['all_options'] if o['status']=='conditional'][:3]
-        if not report['alternatives']['options']:
-            report['alternatives']['recommendation']='Do not commit: no screened option fits the current planning budget.'
-        report['alternatives']['ranking_basis']='Deterministic eligibility and physical fit first, then budget. All uses share your editable cost envelope until use-specific bids exist; requested use breaks ties. No claim that one use is cheaper without evidence.'
+                option['key_blocker']='Planning cash required exceeds available cash; reduce scope or increase cash.'
+        candidates=[o for o in report['alternatives']['all_options'] if o['status']=='conditional']
+        candidates.sort(key=lambda o:(o['reserve_gap'] or 0,o['cash_required'],o['use']!=use))
+        report['alternatives']['options']=candidates[:3]
+        report['alternatives']['recommendation']=(f"Investigate {candidates[0]['use']} first under these assumptions; confirm scope, permission and demand before committing." if candidates else 'Do not commit: no screened option fits the current planning budget.')
+        report['alternatives']['ranking_basis']='Excluded uses never rank. Remaining uses sort by simulated reserve shortfall, then planning cash to open; requested use breaks ties. This is a comparison of unverified scenarios, not proof of lower real-world costs.'
     report['demand_by_use'] = {}
     if report.get('location'):
         report['demand_by_use'][use] = report['location'].get('competition') or {'status':'demand unverified','competitors':[], 'limitation':'Research unavailable or no validated local operators.'}

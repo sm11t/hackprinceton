@@ -9,7 +9,9 @@ DEFAULTS = dict(starting_cash=320000, reserve=50000, build_cost=200000,
                 bookings=594, booking_price=35, monthly_income=20790,
                 baseline_income=18000, baseline_build_cost=25000,
                 baseline_operating_cost=5000, upfront_cost=0,
-                loan_amount=0, loan_apr=8, loan_term=60)
+                loan_amount=0, loan_apr=8, loan_term=60,
+                monthly_nnn=0, monthly_payroll=0, monthly_utilities=0,
+                monthly_insurance=0, monthly_maintenance=0, monthly_taxes=0)
 LIMITS = {key: (0, 10000000) for key in DEFAULTS}
 LIMITS.update(permit_months=(0, 36), build_months=(0, 36), delay=(0, 24),
               months=(1, 120), loan_term=(1, 360), loan_apr=(0, 50), bookings=(0, 100000))
@@ -55,13 +57,15 @@ def analyze_money(inputs=None, *, proposed_use='indoor pickleball', ownership='l
     rent = v['monthly_rent'] if ownership == 'lease' else 0
     monthly_payment = payment(v['loan_amount'], v['loan_apr'], v['loan_term'])
     income = v['bookings'] * v['booking_price'] if proposed_use in {'indoor pickleball', 'fitness studio'} else v['monthly_income']
+    carry = v['monthly_carry'] + v['monthly_nnn'] + v['monthly_insurance'] + v['monthly_taxes']
+    operating = v['monthly_operating_cost'] + v['monthly_payroll'] + v['monthly_utilities'] + v['monthly_maintenance']
     scenario = dict(name=proposed_use, upfront_cost=v['upfront_cost'],
                     permit_months=v['permit_months'], build_months=v['build_months'],
-                    build_cost=v['build_cost'], monthly_carry=v['monthly_carry'] + rent,
-                    monthly_operating_cost=v['monthly_operating_cost'], monthly_income=income)
+                    build_cost=v['build_cost'], monthly_carry=carry + rent,
+                    monthly_operating_cost=operating, monthly_income=income)
     baseline = dict(name='Current-use business baseline', upfront_cost=v['upfront_cost'],
                     build_months=1, build_cost=v['baseline_build_cost'],
-                    monthly_carry=v['monthly_carry'] + rent,
+                    monthly_carry=carry + rent,
                     monthly_operating_cost=v['baseline_operating_cost'], monthly_income=v['baseline_income'])
 
     def project(s, delay=0, financing=False):
@@ -94,7 +98,7 @@ def analyze_money(inputs=None, *, proposed_use='indoor pickleball', ownership='l
             else: hi = mid
         max_cost = max(0, math.floor(lo))
     possible = [d for d in range(25) if v['permit_months']+v['build_months']+d+1 <= v['months'] and feasible(v['build_cost'], d)]
-    operating_break_even = fixed + rent + v['monthly_carry'] + v['monthly_operating_cost']
+    operating_break_even = fixed + rent + carry + operating
     boundaries = {'break_even_monthly_revenue': round(operating_break_even, 2),
                   'break_even_monthly_bookings': math.ceil(operating_break_even / v['booking_price']) if v['booking_price'] else None,
                   'max_build_cost': max_cost, 'max_delay_months': max(possible) if possible else None,

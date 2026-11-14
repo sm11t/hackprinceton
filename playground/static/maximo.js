@@ -103,8 +103,11 @@ function showCash(parent, cash, report) {
     ["build_cost", "Build-out cost ($)"], ["bookings", "Paid bookings / month"], ["booking_price", "Price per booking ($)"],
     ["permit_months", "Approval allowance (months)"], ["build_months", "Build-out (months)"], ["delay", "Extra opening delay (months)"],
     ["monthly_rent", "Base rent / month ($)"], ["monthly_carry", "Other holding costs / month ($)"],
-    ["monthly_operating_cost", "Conversion operations / month ($)"], ["baseline_income", "Current-use revenue / month ($)"],
-    ["upfront_cost", "Upfront deal cash ($)"],
+    ["monthly_operating_cost", "Other operations / month ($)"], ["monthly_nnn", "NNN / CAM / month ($)"],
+    ["monthly_payroll", "Payroll / month ($)"], ["monthly_utilities", "Utilities / month ($)"],
+    ["monthly_insurance", "Insurance / month ($)"], ["monthly_maintenance", "Maintenance / month ($)"],
+    ["monthly_taxes", "Property taxes / month ($)"], ["monthly_income", "Non-booking revenue / month ($)"], ["baseline_income", "Current-use revenue / month ($)"],
+    ["upfront_cost", "Acquisition cash for purchase ($)"], ["loan_amount", "Hypothetical loan ($)"], ["loan_apr", "Loan APR (%)"], ["loan_term", "Loan term (months)"],
   ];
   function renderCash(data) {
     summary.replaceChildren();
@@ -113,11 +116,22 @@ function showCash(parent, cash, report) {
     if (report.ownership === "buy" && !data.inputs.upfront_cost) {
       node(summary, "p", "Add acquisition cash before using this purchase scenario.");
     }
+    node(summary, "p", "Primary curve and option ranking are unfinanced. Any loan below is a separate hypothetical sensitivity.");
+    if (data.financing.result) node(summary, "p", `Hypothetical financing: ${money(data.financing.monthly_payment)} monthly payment; ${money(data.financing.result.lowest_cash)} lowest cash after proceeds and payments. No loan offer or transaction.`);
     node(summary, "p", `Month ${data.timeline.opening_month} opening · ${money(c.lowest_cash)} low point in month ${c.lowest_month}.`);
     node(summary, "p", c.first_month_below_reserve === null
       ? "The conversion stays at or above reserve in this scenario."
       : `The conversion crosses reserve in month ${c.first_month_below_reserve}. It needs ${money(c.extra_funding_needed)} more cash to maintain reserve.`);
     node(summary, "p", `With three more months of delay: ${money(data.stress.extra_funding_needed)} reserve gap. Operating break-even: ${data.boundaries.break_even_monthly_bookings ?? "unavailable"} bookings per month.`);
+    if (data.cash_at_opening !== undefined) {
+      node(summary, "p", `${money(data.cash_at_opening)} immediately before opening · First negative cash month: ${data.runway_months ?? "none within horizon"}.`);
+      node(summary, "p", data.revenue_basis);
+      const sensitivity = node(summary, "details");
+      node(sensitivity, "summary", "Low/base/high and downside sensitivities");
+      for (const [name, series] of Object.entries({...data.cost_cases, ...data.sensitivities})) {
+        node(sensitivity, "p", `${name.replaceAll("_", " ")}: ${money(series.lowest_cash)} lowest cash · ${money(series.extra_funding_needed)} reserve gap.`);
+      }
+    }
     node(summary, "p", `${data.buyer_source}. ${money(data.bank_monthly_bills)} per month in bank bills included. Count each rent or holding expense once.`);
     const openingCosts = node(summary, "details");
     node(openingCosts, "summary", "Where cash goes before opening");
@@ -142,7 +156,11 @@ function showCash(parent, cash, report) {
     input.min = "0";
     input.step = name.endsWith("months") || name === "delay" ? "1" : "any";
     input.required = true;
-    input.value = cash.inputs[name];
+    input.value = (cash.planning_inputs ?? cash.inputs)[name];
+    if (name === "build_cost" && Object.keys(report.costs?.overrides ?? {}).length) {
+      input.disabled = true;
+      input.title = "Individual cost overrides control the total; edit the itemized ledger.";
+    }
     if (name === "starting_cash" && cash.buyer_source.startsWith("Nessie")) {
       input.value = cash.starting_cash;
       input.disabled = true;
@@ -156,8 +174,9 @@ function showCash(parent, cash, report) {
     run.disabled = true;
     message.textContent = "";
     try {
-      const inputs = { ...cash.inputs, ...Object.fromEntries([...new FormData(controls)].map(([k, v]) => [k, Number(v)])) };
-      renderCash(await json("/api/maximo/cash", { inputs, use: report.proposed_use, ownership: report.ownership, scenario_only: true }));
+      const inputs = { ...(cash.planning_inputs ?? cash.inputs), ...Object.fromEntries([...new FormData(controls)].map(([k, v]) => [k, Number(v)])) };
+      if (report.costs) await updateFinancials(report, inputs, report.costs.overrides);
+      else renderCash(await json("/api/maximo/cash", { inputs, use: report.proposed_use, ownership: report.ownership, scenario_only: true }));
       message.textContent = "Cash curve and modeled opening updated.";
     } catch (error) {
       message.textContent = error.message;
@@ -165,6 +184,28 @@ function showCash(parent, cash, report) {
       run.disabled = false;
     }
   });
+}
+
+async function updateFinancials(report, inputs, overrides) {
+  const result = await json("/api/maximo/estimate", {use: report.proposed_use, ownership: report.ownership,
+    inputs, cost_overrides: overrides, compare_uses: report.alternatives.all_options.filter(o => !["excluded", "blocked"].includes(o.status)).map(o => o.use)});
+  report.money = report.eligibility.physical_fit_blocked ? null : result.money;
+  report.costs = result.costs;
+  report.planning_inputs = inputs;
+  report.finance_status = result.status;
+  for (const option of report.alternatives.all_options) {
+    const comparison = result.comparisons[option.use];
+    if (!comparison) continue;
+    Object.assign(option, comparison);
+    option.status = comparison.cash_required === null ? "blocked" : comparison.shortfall ? "unaffordable" : "conditional";
+    option.budget_fit = comparison.cash_required === null ? "unknown cost lines" : comparison.shortfall ? "shortfall under planning allowances" : "within budget under unverified allowances";
+    option.key_blocker = option.status === "conditional" ? option.blockers[0] : "Budget or cost information prevents commitment.";
+  }
+  report.alternatives.options = report.alternatives.all_options.filter(o => o.status === "conditional")
+    .sort((a,b) => (a.reserve_gap ?? 0)-(b.reserve_gap ?? 0) || a.cash_required-b.cash_required).slice(0,3);
+  report.alternatives.recommendation = report.alternatives.options.length ? `Investigate ${report.alternatives.options[0].use} first under these assumptions; confirm scope, permission and demand.` : "Do not commit: no screened option fits the current planning budget.";
+  reportBox.replaceChildren(); display(report);
+  statusLine.textContent = "Recommendation, ledger, cash and opening assumptions recalculated. No new external research performed.";
 }
 
 function showCosts(parent, report) {
@@ -208,10 +249,8 @@ function showCosts(parent, report) {
       (overrides[id] ??= {})[key] = key === "payer" ? value : value === "" ? null : Number(value);
     }
     try {
-      const updated = await json("/api/maximo/estimate", {use: report.proposed_use, ownership: report.ownership,
-        inputs: report.money.inputs, cost_overrides: overrides});
-      totalText(updated); report.costs = updated;
-      message.textContent = "Cost ledger updated. These remain unverified planning allowances.";
+      await updateFinancials(report, report.planning_inputs ?? report.money.planning_inputs, overrides);
+      message.textContent = "Cost ledger and cash updated. These remain unverified planning allowances.";
     } catch(error) { message.textContent = error.message; }
     finally { run.disabled = false; }
   });
@@ -259,6 +298,11 @@ function display(report) {
   node(hero, "p", report.source_mode);
   node(hero, "h3", report.alternatives.recommendation);
   node(hero, "p", report.alternatives.reversal);
+  const decisive = panel(reportBox, "Three decision-changing findings");
+  const findings = report.evidence_overview.slice(0, 2);
+  if (report.costs) findings.push({title: "Budget under planning allowances", note: report.costs.totals.base.shortfall === null ? "Cost lines are incomplete." : `${dollars.format(report.costs.totals.base.shortfall)} shortfall to open and retain reserve. Costs and revenue remain unverified.`});
+  else findings.push({title: "Eligibility", note: report.eligibility.reason});
+  for (const finding of findings.slice(0,3)) { node(decisive, "h3", finding.title); node(decisive, "p", finding.note); }
   const alternativePanel = panel(reportBox, "Alternatives within your budget");
   node(alternativePanel, "p", report.alternatives.ranking_basis);
   for (const option of report.alternatives.options) {
@@ -266,12 +310,19 @@ function display(report) {
     node(card, "h3", option.use);
     node(card, "p", `${option.status} · Budget: ${option.budget_fit} · Physical fit: ${option.physical_fit}`);
     node(card, "p", `Key blocker: ${option.key_blocker}`);
+    node(card, "p", `Cash to open incl. reserve: ${option.cash_required === null ? "unknown" : dollars.format(option.cash_required)} · Modeled opening month: ${option.opening_delay ?? "unknown"} · Reserve gap: ${option.reserve_gap == null ? "unknown" : dollars.format(option.reserve_gap)}.`);
+    node(card, "p", option.cost_basis ?? "Unverified planning scenario");
+    node(card, "p", `Permission: ${option.permission} · Demand: ${option.demand_confidence} · Evidence: ${option.evidence_quality}`);
     node(card, "p", `Next: ${option.next_check}`);
+    const model = node(card, "button", "Model this use", "secondary");
+    model.addEventListener("click", () => { byId("use").value = option.use; form.requestSubmit(); });
   }
   const excluded = node(alternativePanel, "details");
   node(excluded, "summary", "All screened uses and exclusions");
   for (const option of report.alternatives.all_options) node(excluded, "p", `${option.use}: ${option.status}. ${option.key_blocker}`);
-  const list = node(hero, "ol");
+  const nextChecks = document.createElement("section");
+  nextChecks.className = "panel"; node(nextChecks, "h2", "Verify next");
+  const list = node(nextChecks, "ol");
   for (const action of report.actions) {
     const item = node(list, "li");
     node(item, "strong", `${action.title} · ${action.owner}`);
@@ -316,7 +367,7 @@ function display(report) {
   if (report.costs) showCosts(reportBox, report);
   if (!report.money) {
     const held = panel(reportBox, "Cash modeling paused");
-    node(held, "p", "Verify that the space is available and suitable before using cash estimates for this address.");
+    node(held, "p", report.finance_status === "incomplete_costs" ? "Complete missing cost lines in the ledger before projecting cash." : "Verify that the space is available and suitable before using cash estimates for this address.");
     const explore = node(held, "button", "Open a hypothetical cash scenario", "secondary");
     explore.addEventListener("click", async () => {
       explore.disabled = true;
@@ -337,7 +388,7 @@ function display(report) {
     node(cash, "p", "Runway under editable assumptions. Build-out costs, bookings and approval durations need independent estimates; a surplus does not establish site feasibility.");
     showCash(cash, report.money, report);
   }
-  if (!report.space) return;
+  if (!report.space) { reportBox.append(nextChecks); return; }
   const space = panel(columns, "Space and condition");
   const fitLabel = {
     supported: "Available measurements support initial screening. Verify the layout and overhead obstructions.",
@@ -366,7 +417,7 @@ function display(report) {
   const history = node(deal, "details");
   node(history, "summary", "All listing records and sale history");
   showRecords(history, report.deal.records);
-  const approvals = panel(columns, "Approvals and timeline");
+  const approvals = panel(reportBox, "Approvals critical path");
   node(approvals, "p", report.approvals.summary);
   showClaims(approvals, report.approvals.findings, report.approvals.evidence);
   if (report.approvals.path) {
@@ -405,15 +456,15 @@ function display(report) {
     }
   }
   node(area, "p", "Paid demand at this site still needs a trial or direct customer evidence. ACS and FEMA are context, not willingness to pay.");
+  reportBox.append(nextChecks);
+  const raw = node(reportBox, "details"); node(raw, "summary", "Space, listing and full evidence"); raw.append(columns);
 }
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const suite = byId("suite").value;
   const inputs = {starting_cash: Number(byId("budget").value), reserve: Number(byId("reserve").value)};
-  for (const [parameter, field] of [["capital", "starting_cash"], ["fitout", "build_cost"], ["reserve", "reserve"]]) {
-    if (query.has(parameter) && Number.isFinite(Number(query.get(parameter)))) inputs[field] = Number(query.get(parameter));
-  }
+  if (query.has("fitout") && Number.isFinite(Number(query.get("fitout")))) inputs.build_cost = Number(query.get("fitout"));
   const controls = [...form.elements];
   controls.forEach((control) => { control.disabled = true; });
   reportBox.replaceChildren();
@@ -436,6 +487,8 @@ byId("filter").addEventListener("input", () => updateProperties(byId("property")
 byId("property").addEventListener("change", updateSuites);
 json("/api/location/properties").then((rows) => {
   catalog = rows;
+  if (query.has("capital")) byId("budget").value = query.get("capital");
+  if (query.has("reserve")) byId("reserve").value = query.get("reserve");
   const id = query.get("property") ?? "23296";
   const initial = catalog.find((row) => row.id === id);
   if (initial) byId("city").value = initial.city;
