@@ -9,12 +9,20 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
+from tempfile import TemporaryDirectory
+from threading import Lock
 from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
 from probe import aerial_image, load_property, matterport_model
-from pilot import ROOT, comparison, evidence
+from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from advisor_money import advisor_cash, comparison_inputs
+from cost_ledger import estimate_costs
+from maximo import REVIEW_USES, project_cash, review_property, suite_options
+from deal import load_deal_data, rent_for_simulation, run_deal
+from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
 def words(value):
@@ -101,19 +109,50 @@ def main():
     parser.add_argument("--kit", required=True, type=Path)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--offline", action="store_true", help="Use saved playground/output evidence and aerial; tour still requires internet")
+    parser.add_argument("--research-replay", type=Path, help="Replay one saved public research report only for its exact address and use; visibly labeled")
     parser.add_argument("--nessie-account", help="Read starting cash and recurring bills from a Nessie sandbox account")
     args = parser.parse_args()
     buyer = buyer_from_nessie(args.nessie_account) if args.nessie_account else None
     password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+    location_properties = {}
+    location_lock = Lock()
     with ZipFile(args.kit) as kit, kit.open("commercial-properties.csv", pwd=password) as stream:
         properties = {}
         for row in csv.DictReader(io.TextIOWrapper(stream, encoding="utf-8-sig")):
             if row["City"].casefold() == "houston":
                 properties.setdefault(row["PropertyId"], row)
+            city = {"houston": "Houston", "los angeles": "Los Angeles"}.get(row["City"].strip().casefold())
+            if city and row["PropertyId"].isdigit() and row["Address"].strip():
+                location_properties.setdefault(row["PropertyId"], {
+                    "id": row["PropertyId"], "address": row["Address"], "city": city,
+                })
 
     @lru_cache(maxsize=64)
     def property_data(property_id):
         return load_property(args.kit, int(property_id), password, require_model=False)
+
+    @lru_cache(maxsize=128)
+    def fit_for(property_id, use, suite, requirements=(), label=""):
+        return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password,
+                             dict(requirements), label or None)
+
+    @lru_cache(maxsize=128)
+    def deal_for(property_id, capital, suite, square_feet):
+        return run_deal(args.kit, property_id, capital, password, suite or None, square_feet)
+
+    @lru_cache(maxsize=1)
+    def pilot_rent():
+        """The kit's asking rent for the pilot scenario's space; None keeps the scenario's assumed rent."""
+        scenario = CONFIG["property"]
+        try:
+            spaces, _, _ = load_deal_data(args.kit, scenario["costar_id"], password)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            return None
+        return rent_for_simulation(spaces, square_feet=scenario.get("suite_sqft"))
+
+    @lru_cache(maxsize=64)
+    def rank_for(property_id, suite):
+        return space_fit_rank(args.kit, property_id, suite or None, args.offline, password)
 
     @lru_cache(maxsize=32)
     def image_for(property_id):
@@ -175,6 +214,34 @@ def main():
             + aerial + '</section><section><h3>Matterport rooms</h3>' + interior + '</section></div>'
         )
 
+    def market_review(property_id, use):
+        if args.research_replay:
+            saved=json.loads(args.research_replay.read_text())
+            entry=location_properties[str(property_id)]
+            expected=f"{entry['address']}, {entry['city']},".casefold()
+            if not saved.get('address','').casefold().startswith(expected) or saved.get('proposed_use') != use:
+                raise RuntimeError('No saved research for this address and use')
+            saved['replayed']=True
+            return saved
+        if not os.environ.get("UPSTAGE_API_KEY"):
+            raise RuntimeError("Research provider is not configured")
+        if not location_lock.acquire(blocking=False):
+            raise RuntimeError("Research already running")
+        try:
+            with TemporaryDirectory(prefix="reuse-location-") as directory:
+                output = Path(directory) / "report.json"
+                try:
+                    subprocess.run(
+                        ["uv", "run", str(ROOT / "location_run.py"), "--kit", str(args.kit.resolve()),
+                         "--property-id", str(property_id), "--use", use, "--output", str(output)],
+                        check=True, timeout=120, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                except subprocess.SubprocessError as error:
+                    raise RuntimeError("Research provider did not finish") from error
+                return json.loads(output.read_text())
+        finally:
+            location_lock.release()
+
     class Handler(BaseHTTPRequestHandler):
         def send(self, body, content_type, status=200):
             self.send_response(status)
@@ -184,7 +251,108 @@ def main():
             self.end_headers()
             self.wfile.write(body)
 
+        def location_run(self):
+            def respond(body, status=200):
+                self.send(json.dumps(body).encode(), "application/json", status)
+
+            if self.headers.get_content_type() != "application/json":
+                respond({"error": "Send an application/json request."}, 415)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 1024:
+                    raise ValueError()
+                payload = json.loads(self.rfile.read(length))
+                property_id = payload["property_id"]
+                use = payload["use"]
+                if property_id not in location_properties or use not in ("indoor pickleball", "fitness studio"):
+                    raise ValueError()
+            except (KeyError, TypeError, ValueError, UnicodeError):
+                respond({"error": "Choose a property and use from the demo."}, 400)
+                return
+            if not os.environ.get("UPSTAGE_API_KEY"):
+                respond({"error": "Set UPSTAGE_API_KEY in the server environment to run agents."}, 503)
+                return
+            if not location_lock.acquire(blocking=False):
+                respond({"error": "A review is already running. Try again when it finishes."}, 409)
+                return
+            try:
+                with TemporaryDirectory(prefix="reuse-location-") as directory:
+                    output = Path(directory) / "report.json"
+                    subprocess.run(
+                        ["uv", "run", str(ROOT / "location_run.py"), "--kit", str(args.kit.resolve()),
+                         "--property-id", property_id, "--use", use, "--output", str(output)],
+                        check=True, timeout=240, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                    report = json.loads(output.read_text())
+                respond({key: report[key] for key in
+                         ("address", "proposed_use", "demand_verified", "findings", "unknowns", "validation_issues")}
+                        | {"sources": [{key: source.get(key) for key in
+                                       ("source_id", "fact", "evidence_url", "captured_at", "note")}
+                                       for source in report["evidence"]]})
+            except subprocess.TimeoutExpired:
+                respond({"error": "The review timed out. Try again."}, 504)
+            except FileNotFoundError:
+                respond({"error": "The review runner is unavailable. Install uv on the server."}, 503)
+            except (subprocess.CalledProcessError, OSError, ValueError, KeyError):
+                respond({"error": "The review could not finish. Check the server keys and provider availability."}, 502)
+            finally:
+                location_lock.release()
+
+        def maximo_request(self, route):
+            if self.headers.get_content_type() != "application/json":
+                self.send(b'{"error":"Expected JSON."}', "application/json", 415)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 8192:
+                    raise ValueError("Invalid request size.")
+                payload = json.loads(self.rfile.read(length))
+                use, ownership = payload["use"], payload["ownership"]
+                inputs = payload.get("inputs", {})
+                if use not in REVIEW_USES or ownership not in ("lease", "buy") or not isinstance(inputs, dict):
+                    raise ValueError("Choose a supported use and lease or buy.")
+                if route.endswith('/estimate'):
+                    report = advisor_cash(inputs,use,ownership,overrides=payload.get('cost_overrides'),buyer=buyer)
+                    report['comparisons'] = {}
+                    for candidate in payload.get('compare_uses', []):
+                        if candidate not in REVIEW_USES: raise ValueError('Unknown comparison use.')
+                        candidate_inputs = comparison_inputs(inputs,use,candidate)
+                        modeled = report if candidate == use else advisor_cash(candidate_inputs,candidate,ownership,buyer=buyer)
+                        report['comparisons'][candidate] = {
+                            'cash_required': modeled['costs']['totals']['base']['cash_required'],
+                            'shortfall': modeled['costs']['totals']['base']['shortfall'],
+                            'reserve_gap': (modeled['money'] or {}).get('conversion',{}).get('extra_funding_needed'),
+                            'opening_delay': modeled['costs']['opening_month'],
+                            'runway': (modeled['money'] or {}).get('runway_months')}
+                elif route.endswith("/cash"):
+                    if payload.get("scenario_only") is not True:
+                        raise ValueError("Confirm that you want a hypothetical cash scenario.")
+                    report = advisor_cash(inputs,use,ownership,overrides=payload.get('cost_overrides'),buyer=buyer) if payload.get('itemized') else project_cash(inputs, use, ownership, buyer)
+                else:
+                    entry = location_properties[str(payload["property_id"])]
+                    suite = payload.get("suite") or None
+                    if suite is not None and not isinstance(suite, str):
+                        raise ValueError("Invalid suite.")
+                    report = review_property(args.kit, entry, use, suite, ownership, inputs,
+                                             password=password, offline=args.offline, buyer=buyer,
+                                             research=market_review, replay_research=bool(args.research_replay), cost_overrides=payload.get("cost_overrides"))
+                self.send(json.dumps(report).encode(), "application/json")
+            except ValueError as error:
+                self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+            except (TypeError, KeyError, AttributeError):
+                self.send(b'{"error":"Choose a property and review inputs from the workspace."}', "application/json", 400)
+            except (OSError, RuntimeError):
+                self.send(b'{"error":"Property review unavailable. Check local kit and provider settings."}', "application/json", 502)
+
         def do_POST(self):
+            route = urlsplit(self.path).path
+            if route in ("/api/maximo/run", "/api/maximo/cash", "/api/maximo/estimate"):
+                self.maximo_request(route)
+                return
+            if urlsplit(self.path).path == "/api/location/run":
+                self.location_run()
+                return
             if urlsplit(self.path).path != "/api/pilot/simulate":
                 self.send(b"Not found", "text/plain", 404)
                 return
@@ -195,7 +363,7 @@ def main():
                 inputs = json.loads(self.rfile.read(length))
                 if not isinstance(inputs, dict):
                     raise ValueError("Expected an assumptions object")
-                body = comparison(inputs, buyer)
+                body = comparison(inputs, buyer, pilot_rent())
                 self.send(json.dumps(body).encode(), "application/json")
             except (ValueError, TypeError, OverflowError) as error:
                 self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
@@ -207,10 +375,49 @@ def main():
                 filename = "pilot.html" if route.path == "/pilot" else "index.html"
                 self.send((ROOT / "static" / filename).read_bytes(), "text/html; charset=utf-8")
                 return
-            assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
-                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript"}
+            if route.path == "/maximo":
+                self.send((ROOT / "static/maximo.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            if route.path == "/api/maximo/suites":
+                try:
+                    entry = location_properties[params.get("id", [""])[0]]
+                    suites = suite_options(args.kit, int(entry["id"]), password)
+                    self.send(json.dumps(suites).encode(), "application/json")
+                except KeyError:
+                    self.send(b'{"error":"Unknown property."}', "application/json", 404)
+                except (OSError, RuntimeError, ValueError):
+                    self.send(b'{"error":"Suite lookup unavailable."}', "application/json", 502)
+                return
+            if route.path == "/location-demo":
+                self.send((ROOT / "static/location-demo.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            if route.path == "/api/location/properties":
+                rows = sorted(location_properties.values(), key=lambda row: (row["city"], row["address"]))
+                self.send(json.dumps(rows).encode(), "application/json")
+                return
+            assets = {"/static/location-demo.js": "text/javascript","/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
+                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript", "/static/space-fit.js": "text/javascript", "/static/maximo.js": "text/javascript",
+                      "/static/maximo.css": "text/css"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
+                return
+            if route.path == "/api/location/tanner":
+                try:
+                    path = ROOT / "output" / "location-tanner.json"
+                    report = json.loads(path.read_text())
+                    if report.get("property_id") != 23296 or report.get("proposed_use") != "indoor pickleball":
+                        raise ValueError("Report belongs to another scenario")
+                    # Return only accepted claims, gaps, and evidence references.
+                    body = {key: report[key] for key in ("findings", "unknowns", "validation_issues")}
+                    body["sources"] = [
+                        {key: item.get(key) for key in
+                         ("source_id", "fact", "evidence_url", "captured_at", "note")}
+                        for item in report["evidence"]
+                    ]
+                    self.send(json.dumps(body).encode(), "application/json")
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.send(b'{"error":"No saved Location & Demand review for this scenario."}',
+                              "application/json", 404)
                 return
             if route.path == "/api/pilot/evidence":
                 try:
@@ -227,10 +434,48 @@ def main():
                 except (KeyError, OSError, RuntimeError, ValueError) as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
                 return
+            if route.path == "/api/deal":
+                try:
+                    number = lambda name: float(params[name][0]) if params.get(name, [""])[0] else None  # noqa: E731
+                    capital, square_feet = number("capital"), number("square_feet")
+                    if capital is not None and not 0 <= capital <= 1e10:
+                        raise ValueError("capital must be between 0 and 10,000,000,000")
+                    body = deal_for(int(params.get("property_id", [""])[0]), capital,
+                                    params.get("suite", [""])[0], square_feet)
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit/rank":
+                try:
+                    body = rank_for(int(params.get("property_id", [""])[0]), params.get("suite", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit":
+                try:
+                    property_id = int(params.get("property_id", [""])[0])
+                    use = params.get("use", [""])[0]
+                    if use not in USES:
+                        raise ValueError(f"use must be one of {', '.join(USES)}")
+                    requirements = tuple(sorted((k, v[0]) for k, v in params.items() if k in REQUIREMENTS))
+                    body = fit_for(property_id, use, params.get("suite", [""])[0], requirements,
+                                   params.get("label", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
             query = params.get("q", [""])[0].strip()
             property_id = params.get("id", [""])[0]
             model = params.get("model", [""])[0]
-            if route.path == "/aerial" and property_id in properties:
+            if route.path == "/aerial" and property_id in location_properties:
                 try:
                     self.send(image_for(property_id), "image/jpeg")
                 except (KeyError, OSError, RuntimeError, ValueError):
