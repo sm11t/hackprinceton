@@ -1,0 +1,948 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Helix · CoStar & Tavily AI Advisor</title>
+  <style>
+    :root {
+      --bg-page: #f8fafc;
+      --bg-card: #ffffff;
+      --border-color: #e2e8f0;
+      --border-subtle: #f1f5f9;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --user-bg: #2563eb;
+      --user-text: #ffffff;
+      --bot-bg: #ffffff;
+      --bot-border: #e2e8f0;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --costar-color: #0369a1;
+      --costar-bg: #f0f9ff;
+      --costar-border: #bae6fd;
+      --danger: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-page);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Top Navigation / Header */
+    header {
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header-left h1 {
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .badges {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11.5px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 999px;
+    }
+
+    .badge-solar {
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+
+    .badge-costar {
+      background: var(--costar-bg);
+      color: var(--costar-color);
+      border: 1px solid var(--costar-border);
+    }
+
+    .badge-tavily {
+      background: #eff6ff;
+      color: #1e40af;
+      border: 1px solid #bfdbfe;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      background: #10b981;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .clear-btn {
+      background: transparent;
+      border: 1px solid var(--border-color);
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .clear-btn:hover {
+      background: #f1f5f9;
+      color: var(--danger);
+      border-color: #fca5a5;
+    }
+
+    /* Chat Area */
+    #chat-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      max-width: 860px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .empty-state {
+      margin: auto;
+      text-align: center;
+      color: var(--text-muted);
+      max-width: 480px;
+      padding: 32px 16px;
+    }
+
+    .empty-icon {
+      font-size: 34px;
+      margin-bottom: 12px;
+    }
+
+    .empty-state h2 {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text-main);
+      margin-bottom: 8px;
+    }
+
+    .empty-state p {
+      font-size: 14.5px;
+      line-height: 1.55;
+    }
+
+    .sample-prompts {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 22px;
+      text-align: left;
+    }
+
+    .sample-chip {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 13.5px;
+      color: var(--text-main);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .sample-chip:hover {
+      border-color: var(--accent);
+      background: #f0f7ff;
+      color: var(--accent);
+    }
+
+    /* Message Rows */
+    .message-row {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      animation: fadeIn 0.18s ease forwards;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .message-row.user {
+      align-items: flex-end;
+    }
+
+    .message-row.assistant {
+      align-items: flex-start;
+    }
+
+    .meta-label {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .message-bubble {
+      max-width: 86%;
+      padding: 14px 18px;
+      border-radius: 12px;
+      font-size: 14.5px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .user .message-bubble {
+      background: var(--user-bg);
+      color: var(--user-text);
+      border-bottom-right-radius: 3px;
+      box-shadow: 0 1px 2px rgba(37, 99, 235, 0.2);
+      white-space: pre-wrap;
+    }
+
+    .assistant .message-bubble {
+      background: var(--bot-bg);
+      color: var(--text-main);
+      border: 1px solid var(--bot-border);
+      border-bottom-left-radius: 3px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+
+    /* Markdown Styling in Assistant Bubble */
+    .assistant .message-bubble p {
+      margin-bottom: 10px;
+    }
+    .assistant .message-bubble p:last-child {
+      margin-bottom: 0;
+    }
+    .assistant .message-bubble ul, .assistant .message-bubble ol {
+      margin-left: 22px;
+      margin-bottom: 10px;
+    }
+    .assistant .message-bubble li {
+      margin-bottom: 4px;
+    }
+    .assistant .message-bubble code {
+      background: #f1f5f9;
+      padding: 2px 5px;
+      border-radius: 4px;
+      font-size: 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .assistant .message-bubble pre {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      padding: 10px;
+      border-radius: 6px;
+      overflow-x: auto;
+      margin: 8px 0;
+      font-size: 13px;
+    }
+    .assistant .message-bubble a {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+    .assistant .message-bubble table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 13.5px;
+    }
+    .assistant .message-bubble th, .assistant .message-bubble td {
+      border: 1px solid #e2e8f0;
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .assistant .message-bubble th {
+      background: #f8fafc;
+      font-weight: 600;
+    }
+
+    /* Enhanced Tool Call Cards */
+    .tools-container {
+      max-width: 88%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .tool-chip {
+      background: #ffffff;
+      border: 1px solid var(--border-color);
+      border-radius: 9px;
+      font-size: 13px;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .tool-chip:hover {
+      border-color: #cbd5e1;
+    }
+
+    .tool-chip summary {
+      cursor: pointer;
+      padding: 9px 13px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+      background: #f8fafc;
+      list-style: none;
+    }
+
+    .tool-chip summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .tool-summary-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tool-icon {
+      font-size: 14px;
+    }
+
+    .tool-name {
+      font-weight: 600;
+      color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+    }
+
+    .status-badge {
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .status-badge.success {
+      background: #dcfce7;
+      color: #15803d;
+      border: 1px solid #bbf7d0;
+    }
+
+    .status-badge.error {
+      background: #fee2e2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
+    }
+
+    .tool-summary-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-muted);
+      font-size: 11.5px;
+    }
+
+    .tool-duration {
+      font-family: ui-monospace, monospace;
+      color: #64748b;
+    }
+
+    .tool-chevron {
+      transition: transform 0.2s ease;
+      font-size: 10px;
+      color: #94a3b8;
+    }
+
+    .tool-chip[open] .tool-chevron {
+      transform: rotate(180deg);
+    }
+
+    .tool-body {
+      padding: 12px 14px;
+      border-top: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      background: #ffffff;
+    }
+
+    .tool-section {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .tool-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 5px;
+    }
+
+    .tool-section-label {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #64748b;
+    }
+
+    .copy-btn {
+      background: transparent;
+      border: 1px solid #cbd5e1;
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-size: 11px;
+      color: #475569;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .copy-btn:hover {
+      background: #f1f5f9;
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+
+    .tool-pre {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 9px 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+      color: #1e293b;
+      max-height: 240px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .tool-footer {
+      font-size: 11.5px;
+      color: #64748b;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding-top: 4px;
+      border-top: 1px dashed #e2e8f0;
+    }
+
+    /* Typing Indicator */
+    .typing-indicator {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 16px;
+      background: var(--bot-bg);
+      border: 1px solid var(--bot-border);
+      border-radius: 12px;
+      border-bottom-left-radius: 3px;
+      width: fit-content;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+    }
+
+    .typing-text {
+      font-size: 12.5px;
+      color: var(--text-muted);
+      margin-right: 4px;
+    }
+
+    .typing-dot {
+      width: 6px;
+      height: 6px;
+      background: var(--text-muted);
+      border-radius: 50%;
+      animation: pulse 1.2s infinite ease-in-out;
+      opacity: 0.6;
+    }
+
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(0.8); opacity: 0.4; }
+      50% { transform: scale(1.2); opacity: 1; }
+    }
+
+    /* Input Footer */
+    footer {
+      background: var(--bg-card);
+      border-top: 1px solid var(--border-color);
+      padding: 14px 20px 18px;
+    }
+
+    .input-wrapper {
+      max-width: 860px;
+      margin: 0 auto;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      background: #f8fafc;
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 8px 12px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+
+    .input-wrapper:focus-within {
+      background: #ffffff;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+    }
+
+    textarea {
+      flex: 1;
+      border: none;
+      background: transparent;
+      resize: none;
+      outline: none;
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.4;
+      max-height: 180px;
+      min-height: 24px;
+      color: var(--text-main);
+    }
+
+    textarea::placeholder {
+      color: #94a3b8;
+    }
+
+    .send-btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.15s ease, transform 0.1s ease;
+    }
+
+    .send-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+
+    .send-btn:active:not(:disabled) {
+      transform: scale(0.96);
+    }
+
+    .send-btn:disabled {
+      background: #cbd5e1;
+      cursor: not-allowed;
+    }
+
+    .send-btn svg {
+      width: 17px;
+      height: 17px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="header-left">
+      <h1>Project Helix</h1>
+      <div class="badges">
+        <span class="badge badge-solar">
+          <span class="status-dot"></span>
+          <span id="model-name">solar-mini4</span>
+        </span>
+        <span class="badge badge-costar" id="costar-badge">
+          <span>🏢 CoStar CRE Kit</span>
+        </span>
+        <span class="badge badge-tavily" id="tavily-badge">
+          <span>🔍 Tavily Live</span>
+        </span>
+      </div>
+    </div>
+    <button class="clear-btn" id="clear-btn">Clear Chat</button>
+  </header>
+
+  <div id="chat-container">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-icon">🏢</div>
+      <h2>CoStar + Solar Mini + Tavily</h2>
+      <p>Ask in natural language to search Houston properties, check available suites, verified asking rents, lease bases, building sizes, tenants, or sales comps.</p>
+      
+      <div class="sample-prompts">
+        <div class="sample-chip" onclick="askSample(this)">Screen Houston for available spaces with at least 10,000 SF under $18/SF/year.</div>
+        <div class="sample-chip" onclick="askSample(this)">Look up 9800 Centre Pky: what are the advertised suites and asking rents?</div>
+        <div class="sample-chip" onclick="askSample(this)">What kind of building is 9700 Tanner Rd, and what is its size and zoning?</div>
+        <div class="sample-chip" onclick="askSample(this)">Who are the recorded tenants and occupants at 9800 Centre Pky?</div>
+        <div class="sample-chip" onclick="askSample(this)">Search for apartment communities in Houston and their rent ranges.</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="input-wrapper">
+      <textarea id="prompt-input" rows="1" placeholder="Ask about CoStar properties, suites, rents, or search the web..."></textarea>
+      <button class="send-btn" id="send-btn" disabled aria-label="Send">
+        <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
+    </div>
+  </footer>
+
+  <script>
+    const chatContainer = document.getElementById('chat-container');
+    const emptyState = document.getElementById('empty-state');
+    const promptInput = document.getElementById('prompt-input');
+    const sendBtn = document.getElementById('send-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const modelNameEl = document.getElementById('model-name');
+    const costarBadge = document.getElementById('costar-badge');
+    const tavilyBadge = document.getElementById('tavily-badge');
+
+    const conversation = [];
+    let isSending = false;
+
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data.model) modelNameEl.textContent = data.model;
+        if (!data.has_costar) {
+          costarBadge.style.opacity = '0.5';
+          costarBadge.textContent = 'CoStar Disconnected';
+        }
+        if (!data.has_tavily) {
+          tavilyBadge.style.opacity = '0.5';
+          tavilyBadge.textContent = 'Tavily Offline';
+        }
+      })
+      .catch(() => {});
+
+    function scrollToBottom() {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    function autoResizeInput() {
+      promptInput.style.height = 'auto';
+      promptInput.style.height = Math.min(promptInput.scrollHeight, 180) + 'px';
+      sendBtn.disabled = !promptInput.value.trim() || isSending;
+    }
+
+    promptInput.addEventListener('input', autoResizeInput);
+
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        if (!sendBtn.disabled) {
+          sendMessage();
+        }
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      conversation.length = 0;
+      chatContainer.innerHTML = '';
+      chatContainer.appendChild(emptyState);
+      promptInput.value = '';
+      autoResizeInput();
+      promptInput.focus();
+    });
+
+    function askSample(el) {
+      promptInput.value = el.textContent.trim();
+      autoResizeInput();
+      sendMessage();
+    }
+
+    function formatText(text) {
+      if (!text) return '';
+      let escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
+      // Tables
+      if (escaped.includes('|') && escaped.includes('\n')) {
+        const tableLines = escaped.split('\n');
+        let inTable = false;
+        let tableHtml = '';
+        let newLines = [];
+
+        for (let l of tableLines) {
+          let trimmed = l.trim();
+          if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+            if (!inTable) {
+              inTable = true;
+              tableHtml = '<table>';
+            }
+            if (trimmed.includes('---')) continue; // Skip header divider
+            const cells = trimmed.split('|').slice(1, -1);
+            tableHtml += '<tr>' + cells.map(c => `<td>${c.trim()}</td>`).join('') + '</tr>';
+          } else {
+            if (inTable) {
+              tableHtml += '</table>';
+              newLines.push(tableHtml);
+              inTable = false;
+            }
+            newLines.push(l);
+          }
+        }
+        if (inTable) {
+          tableHtml += '</table>';
+          newLines.push(tableHtml);
+        }
+        escaped = newLines.join('\n');
+      }
+
+      // Bold: **text**
+      escaped = escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      // Inline code: `code`
+      escaped = escaped.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Markdown links: [title](url)
+      escaped = escaped.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+      const lines = escaped.split('\n');
+      let html = '';
+      let inList = false;
+
+      for (let line of lines) {
+        let trimmed = line.trim();
+        if (trimmed.startsWith('<table>')) {
+          html += trimmed;
+          continue;
+        }
+        if (trimmed.startsWith('* ') || trimmed.startsWith('- ')) {
+          if (!inList) { html += '<ul>'; inList = true; }
+          html += `<li>${trimmed.substring(2)}</li>`;
+        } else if (/^\d+\.\s/.test(trimmed)) {
+          if (!inList) { html += '<ol>'; inList = true; }
+          html += `<li>${trimmed.replace(/^\d+\.\s/, '')}</li>`;
+        } else {
+          if (inList) { html += '</ul>'; inList = false; }
+          if (trimmed === '') {
+            html += '<br>';
+          } else {
+            html += `<p>${line}</p>`;
+          }
+        }
+      }
+      if (inList) html += '</ul>';
+      return html;
+    }
+
+    function escapeHtml(str) {
+      if (typeof str !== 'string') str = JSON.stringify(str);
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function copyToolOutput(btn) {
+      const pre = btn.closest('.tool-section').querySelector('.tool-pre');
+      if (pre) {
+        navigator.clipboard.writeText(pre.textContent).then(() => {
+          const orig = btn.textContent;
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = orig, 1500);
+        });
+      }
+    }
+
+    function appendMessage(role, text, toolCalls = []) {
+      if (emptyState.parentNode) {
+        emptyState.remove();
+      }
+
+      const row = document.createElement('div');
+      row.className = `message-row ${role}`;
+
+      const meta = document.createElement('div');
+      meta.className = 'meta-label';
+      meta.textContent = role === 'user' ? 'You' : (modelNameEl.textContent || 'Solar Mini');
+      row.appendChild(meta);
+
+      // Render executed tools if any
+      if (toolCalls && toolCalls.length > 0) {
+        const toolsBox = document.createElement('div');
+        toolsBox.className = 'tools-container';
+
+        toolCalls.forEach(tc => {
+          const chip = document.createElement('details');
+          chip.className = 'tool-chip';
+
+          const isCostar = tc.tool.startsWith('costar_');
+          const icon = isCostar ? '🏢' : '🔍';
+          const isSuccess = tc.status !== 'error' && (!tc.output || !tc.output.error);
+          const duration = tc.duration_ms ? `${tc.duration_ms} ms` : 'captured';
+
+          const summary = document.createElement('summary');
+          summary.innerHTML = `
+            <div class="tool-summary-left">
+              <span class="tool-icon">${icon}</span>
+              <span class="tool-name">${escapeHtml(tc.tool)}</span>
+              <span class="status-badge ${isSuccess ? 'success' : 'error'}">${isSuccess ? 'Success' : 'Error'}</span>
+            </div>
+            <div class="tool-summary-right">
+              <span class="tool-duration">⏱ ${duration}</span>
+              <span class="tool-chevron">▼</span>
+            </div>
+          `;
+          chip.appendChild(summary);
+
+          const body = document.createElement('div');
+          body.className = 'tool-body';
+
+          // Section 1: INPUT
+          const inputSec = document.createElement('div');
+          inputSec.className = 'tool-section';
+          inputSec.innerHTML = `
+            <div class="tool-section-header">
+              <span class="tool-section-label">INPUT</span>
+            </div>
+            <pre class="tool-pre">${escapeHtml(JSON.stringify(tc.args || {}, null, 2))}</pre>
+          `;
+          body.appendChild(inputSec);
+
+          // Section 2: RAW TOOL RESPONSE
+          const outputSec = document.createElement('div');
+          outputSec.className = 'tool-section';
+          const outputJson = JSON.stringify(tc.output || {}, null, 2);
+          outputSec.innerHTML = `
+            <div class="tool-section-header">
+              <span class="tool-section-label">RAW TOOL RESPONSE</span>
+              <button class="copy-btn" onclick="copyToolOutput(this)">Copy JSON</button>
+            </div>
+            <pre class="tool-pre">${escapeHtml(outputJson)}</pre>
+          `;
+          body.appendChild(outputSec);
+
+          // Section 3: Footer
+          const footer = document.createElement('div');
+          footer.className = 'tool-footer';
+          footer.innerHTML = `<span>⏱ <strong>Duration:</strong> ${duration}</span> • <span>Direct backend execution capture</span>`;
+          body.appendChild(footer);
+
+          chip.appendChild(body);
+          toolsBox.appendChild(chip);
+        });
+
+        row.appendChild(toolsBox);
+      }
+
+      const bubble = document.createElement('div');
+      bubble.className = 'message-bubble';
+      if (role === 'assistant') {
+        bubble.innerHTML = formatText(text);
+      } else {
+        bubble.textContent = text;
+      }
+
+      row.appendChild(bubble);
+      chatContainer.appendChild(row);
+      scrollToBottom();
+      return bubble;
+    }
+
+    function showTypingIndicator() {
+      const row = document.createElement('div');
+      row.className = 'message-row assistant';
+      row.id = 'typing-indicator-row';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta-label';
+      meta.textContent = modelNameEl.textContent || 'Solar Mini';
+
+      const ind = document.createElement('div');
+      ind.className = 'typing-indicator';
+      ind.innerHTML = '<span class="typing-text">Accessing CoStar & Reasoning</span><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+
+      row.appendChild(meta);
+      row.appendChild(ind);
+      chatContainer.appendChild(row);
+      scrollToBottom();
+    }
+
+    function removeTypingIndicator() {
+      const ind = document.getElementById('typing-indicator-row');
+      if (ind) ind.remove();
+    }
+
+    async function sendMessage() {
+      const text = promptInput.value.trim();
+      if (!text || isSending) return;
+
+      isSending = true;
+      sendBtn.disabled = true;
+      promptInput.value = '';
+      autoResizeInput();
+
+      appendMessage('user', text);
+      conversation.push({ role: 'user', content: text });
+
+      showTypingIndicator();
+
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: conversation })
+        });
+
+        const data = await response.json();
+        removeTypingIndicator();
+
+        if (response.ok && data.reply) {
+          appendMessage('assistant', data.reply, data.tool_calls);
+          conversation.push({ role: 'assistant', content: data.reply });
+        } else {
+          appendMessage('assistant', '⚠️ Error: ' + (data.error || 'Failed to get response.'));
+        }
+      } catch (err) {
+        removeTypingIndicator();
+        appendMessage('assistant', '⚠️ Network error: Could not reach the local server.');
+      } finally {
+        isSending = false;
+        autoResizeInput();
+        promptInput.focus();
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    promptInput.focus();
+  </script>
+</body>
+</html>
