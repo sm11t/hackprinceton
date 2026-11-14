@@ -18,6 +18,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from cost_ledger import estimate_costs
 from maximo import REVIEW_USES, project_cash, review_property, suite_options
 from deal import load_deal_data, rent_for_simulation, run_deal
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
@@ -301,7 +302,9 @@ def main():
                 inputs = payload.get("inputs", {})
                 if use not in REVIEW_USES or ownership not in ("lease", "buy") or not isinstance(inputs, dict):
                     raise ValueError("Choose a supported use and lease or buy.")
-                if route.endswith("/cash"):
+                if route.endswith('/estimate'):
+                    report = estimate_costs(inputs, tenure=ownership, overrides=payload.get('cost_overrides'))
+                elif route.endswith("/cash"):
                     if payload.get("scenario_only") is not True:
                         raise ValueError("Confirm that you want a hypothetical cash scenario.")
                     report = project_cash(inputs, use, ownership, buyer)
@@ -312,7 +315,7 @@ def main():
                         raise ValueError("Invalid suite.")
                     report = review_property(args.kit, entry, use, suite, ownership, inputs,
                                              password=password, offline=args.offline, buyer=buyer,
-                                             research=market_review)
+                                             research=market_review, cost_overrides=payload.get("cost_overrides"))
                 self.send(json.dumps(report).encode(), "application/json")
             except ValueError as error:
                 self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
@@ -323,7 +326,7 @@ def main():
 
         def do_POST(self):
             route = urlsplit(self.path).path
-            if route in ("/api/maximo/run", "/api/maximo/cash"):
+            if route in ("/api/maximo/run", "/api/maximo/cash", "/api/maximo/estimate"):
                 self.maximo_request(route)
                 return
             if urlsplit(self.path).path == "/api/location/run":

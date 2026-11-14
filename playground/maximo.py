@@ -1,4 +1,5 @@
 """Join the team checks for one property and one explicitly selected suite."""
+from cost_ledger import estimate_costs
 from alternatives import CATALOG, rank_alternatives
 from decision_context import attach_context
 from approvals_timeline import analyze_approvals, build_timeline
@@ -166,9 +167,25 @@ def review_property(kit, entry, use, suite, ownership, inputs, **kwargs):
     # Validate before providers; contract is additive to preserve existing callers.
     from money_runway import assumptions
     assumptions(inputs)
+    overrides = kwargs.pop("cost_overrides", None)
     report = _review_property(kit, entry, use, suite, ownership, inputs, **kwargs)
     report['source_mode'] = 'Saved sponsor evidence; live research disabled' if kwargs.get('offline') else 'Sponsor kit and provider research (may be partial)'
     attach_context(report, inputs)
     report['alternatives'] = rank_alternatives(report, report.pop('_prop', {}), report.pop('_fits', {}),
         report.pop('_listing', None), report['decision_context']['cash_budget'], float(inputs.get('reserve', 50000)))
+    if report['money']:
+        listing = next((r for r in report['space']['records'] if r['fact']=='listed_space_sf'), {})
+        report['costs'] = estimate_costs(report['money']['inputs'], area=listing.get('value'), tenure=ownership,
+            geography=entry['city'], rent_source=report['money']['rent_source'], overrides=overrides)
+        for option in report['alternatives']['all_options']:
+            option['cash_required'] = report['costs']['totals']['base']['cash_required']
+            option['budget_fit'] = ('unknown: incomplete cost lines' if option['cash_required'] is None else
+                'shortfall under planning allowances' if report['costs']['totals']['base']['shortfall'] else 'within budget under unverified planning allowances')
+            if option['status']=='conditional' and report['costs']['totals']['base']['shortfall']:
+                option['status']='unaffordable'
+                option['key_blocker']='Planning cash required exceeds available cash; reduce scope or increase cash before proceeding.'
+        report['alternatives']['options'] = [o for o in report['alternatives']['all_options'] if o['status']=='conditional'][:3]
+        if not report['alternatives']['options']:
+            report['alternatives']['recommendation']='Do not commit: no screened option fits the current planning budget.'
+        report['alternatives']['ranking_basis']='Deterministic eligibility and physical fit first, then budget. All uses share your editable cost envelope until use-specific bids exist; requested use breaks ties. No claim that one use is cheaper without evidence.'
     return report

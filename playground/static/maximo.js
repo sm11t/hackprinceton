@@ -167,6 +167,56 @@ function showCash(parent, cash, report) {
   });
 }
 
+function showCosts(parent, report) {
+  const ledger = report.costs;
+  const section = panel(parent, "Itemized cash to open");
+  node(section, "p", ledger.basis);
+  const totals = node(section, "div");
+  function totalText(data) {
+    totals.replaceChildren();
+    for (const key of ["low", "base", "high"]) {
+      const t = data.totals[key];
+      node(totals, "p", `${key.toUpperCase()}: ${t.cash_required === null ? "Incomplete costs" : dollars.format(t.cash_required) + " including reserve"} · Shortfall: ${t.shortfall === null ? "unknown" : dollars.format(t.shortfall)}`);
+    }
+    node(totals, "p", `Monthly preopening burn: ${dollars.format(data.monthly_preopening_burn)}. Monthly operating outflow: ${dollars.format(data.monthly_operating_burn)} before revenue. Verify NNN/CAM and missing operating items.`);
+  }
+  totalText(ledger);
+  const controls = node(section, "form", undefined, "ledger-form");
+  const details = node(controls, "details");
+  node(details, "summary", "Edit low / base / high allowances and responsibility");
+  for (const line of ledger.lines) {
+    const row = node(details, "fieldset");
+    node(row, "legend", `${line.label} · ${line.classification}`);
+    node(row, "small", `${line.quantity} ${line.unit} · ${line.source} · ${line.geography} · No verified quote date`);
+    for (const key of ["low", "base", "high"]) {
+      const input = node(node(row, "label", `${line.label} ${key} ($)`), "input");
+      input.name = `${line.id}:${key}`; input.type = "number"; input.min = "0"; input.step = "any";
+      input.value = line.amounts[key] ?? "";
+    }
+    const payer = node(node(row, "label", `${line.label} paid by`), "select");
+    payer.name = `${line.id}:payer`;
+    for (const name of ["tenant", "buyer", "landlord"]) payer.add(new Option(name, name));
+    payer.value = line.payer;
+  }
+  const run = node(controls, "button", "Recalculate itemized costs", "secondary");
+  const message = node(section, "p", "");
+  controls.addEventListener("submit", async (event) => {
+    event.preventDefault(); run.disabled = true;
+    const overrides = {};
+    for (const [name, value] of new FormData(controls)) {
+      const [id, key] = name.split(":");
+      (overrides[id] ??= {})[key] = key === "payer" ? value : value === "" ? null : Number(value);
+    }
+    try {
+      const updated = await json("/api/maximo/estimate", {use: report.proposed_use, ownership: report.ownership,
+        inputs: report.money.inputs, cost_overrides: overrides});
+      totalText(updated); report.costs = updated;
+      message.textContent = "Cost ledger updated. These remain unverified planning allowances.";
+    } catch(error) { message.textContent = error.message; }
+    finally { run.disabled = false; }
+  });
+}
+
 function drawCash(parent, cash) {
   const lines = [
     [cash.baseline, "#55768a", "Current use"],
@@ -263,6 +313,7 @@ function display(report) {
     node(group, "summary", `${fact.replaceAll("_", " ")} (${rows.length})`);
     showRecords(group, rows);
   }
+  if (report.costs) showCosts(reportBox, report);
   if (!report.money) {
     const held = panel(reportBox, "Cash modeling paused");
     node(held, "p", "Verify that the space is available and suitable before using cash estimates for this address.");
