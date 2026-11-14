@@ -9,12 +9,12 @@ uses Python 3.10+ and the standard library.
 1. Check out the playground branch. From a fresh checkout:
 
    ```sh
-   git clone --branch feature/playground https://github.com/sm11t/hackprinceton.git
+   git clone --branch feature/pilot https://github.com/sm11t/hackprinceton.git
    cd hackprinceton
    ```
 
    If you already have the repo, run `git fetch origin` and
-   `git switch feature/playground` from its root.
+   `git switch feature/pilot` from its root.
 
 2. Download `costar-hackathon-kit.zip` from the team's private Slack
    `#env-keys` channel and leave it zipped. The examples assume it is in
@@ -78,3 +78,54 @@ its own API key.
 
 - [Sponsor quickstart](https://beta-app.matterport.com/2026-princeton-hackathon/quickstart)
 - [Matterport API](https://developers.matterport.com/api/)
+
+## Tanner Road redevelopment pilot (`feature/pilot`)
+
+The root URL now opens the Tanner Road workspace. The existing address search
+is available at `/search` (and existing `/?q=...` links still work).
+
+The pilot compares **two tenant operations in the advertised 10,000 SF suite**.
+It uses `nessie_pilot.simulate` directly, preserving Jayant's simulator and its
+CLI. The tenant pickleball scenario supplies starting cash, recurring bills,
+build duration and operating costs. The warehouse baseline adds explicit demo
+assumptions: $25,000 fit-out over one month, $18,000 monthly business revenue,
+$5,000 monthly operating costs and $2,000 monthly carry. It is not a comparison
+between landlord rental income and tenant business income. The chart extends
+the tenant scenario to 24 months and includes starting cash at month 0.
+
+- Edit pickleball build-out, paid bookings, additional delay, reserve and warehouse
+  revenue to recalculate. Reset restores the demo assumptions.
+- Three courts is an **unverified hypothesis**, not a capacity estimate. The
+  advertised suite is not matched to the scan named 9750 Tanner Rd. Building
+  area, scanned warehouse room area and advertised suite area remain separate.
+- An 18 ft advertised height and $8,500 NNN base rent are carried forward from
+  `scenarios/tanner_pickleball_tenant.json`; the current listing is not reverified.
+- CoStar comes from the local kit. Matterport and Vexcel are live by default.
+  Provider failures have explicit unavailable states; the simulator stays usable.
+- To read an existing Nessie sandbox balance and recurring bills, add
+  `--nessie-account ACCOUNT_ID` with `NESSIE_API_KEY` set. These are read once at
+  startup; no bank records are created. Without this flag, the UI identifies
+  scenario cash and bills as simulated.
+
+For a reliable local evidence replay, run `probe.py` once while connected, then:
+
+```sh
+python3 playground/web.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --offline
+```
+
+`--offline` reads saved Matterport evidence and Vexcel imagery from the ignored
+`playground/output/` directory. It still requires the CoStar kit, labels evidence
+as a saved capture, and does **not** make the external Matterport tour offline.
+Missing saved imagery/measurements display unavailable states. Never commit the
+sponsor kit, generated captures or credentials.
+
+Validation:
+
+```sh
+python3 -m unittest discover -s playground -p 'test_*.py'
+node --check playground/static/pilot.js
+```
+
+Demo path: open `/` → inspect aerial/tour → compare the three evidence scopes →
+change opening delay from 0 to 3 → observe the $5,000 reserve gap in month 6 →
+review the suite identity and dimension check before estimating court count.

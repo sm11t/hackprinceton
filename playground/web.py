@@ -5,6 +5,7 @@ from functools import lru_cache
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -12,6 +13,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
 from probe import aerial_image, load_property, matterport_model
+from pilot import ROOT, comparison, evidence
+from nessie_pilot import buyer_from_nessie
 
 
 def words(value):
@@ -97,7 +100,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kit", required=True, type=Path)
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--offline", action="store_true", help="Use saved playground/output evidence and aerial; tour still requires internet")
+    parser.add_argument("--nessie-account", help="Read starting cash and recurring bills from a Nessie sandbox account")
     args = parser.parse_args()
+    buyer = buyer_from_nessie(args.nessie_account) if args.nessie_account else None
     password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
     with ZipFile(args.kit) as kit, kit.open("commercial-properties.csv", pwd=password) as stream:
         properties = {}
@@ -111,11 +117,21 @@ def main():
 
     @lru_cache(maxsize=32)
     def image_for(property_id):
+        if args.offline:
+            return (ROOT / "output" / f"{property_id}-aerial.jpg").read_bytes()
         prop, _ = property_data(property_id)
         address = prop["primaryAddress"]
         return aerial_image(address["latitude"], address["longitude"])
 
-    rooms_for = lru_cache(maxsize=64)(matterport_model)
+    @lru_cache(maxsize=64)
+    def rooms_for(model_id):
+        if args.offline:
+            for path in (ROOT / "output").glob("*-evidence.json"):
+                model = json.loads(path.read_text()).get("matterport") or {}
+                if model.get("id") == model_id:
+                    return model
+            raise RuntimeError("No saved evidence for this scan. Run probe.py first.")
+        return matterport_model(model_id)
 
     def detail(property_id, query, requested_model):
         row = properties[property_id]
@@ -139,7 +155,7 @@ def main():
             )
             try:
                 rooms = room_table(rooms_for(scan))
-            except (KeyError, RuntimeError, ValueError) as error:
+            except (KeyError, OSError, RuntimeError, ValueError) as error:
                 rooms = f"<p>{value(error)}</p>"
             tour_url = escape("https://my.matterport.com/show/?" + urlencode({"m": scan}), quote=True)
             interior = (
@@ -152,7 +168,7 @@ def main():
         try:
             image_for(property_id)
             aerial = f'<img src="/aerial?id={property_id}" alt="Vexcel aerial of {value(row["Address"])}">'
-        except (KeyError, RuntimeError, ValueError) as error:
+        except (KeyError, OSError, RuntimeError, ValueError) as error:
             aerial = f"<p>{value(error)}</p>"
         return (
             content + '<div class="grid"><section><h3>Vexcel aerial</h3>'
@@ -168,9 +184,47 @@ def main():
             self.end_headers()
             self.wfile.write(body)
 
+        def do_POST(self):
+            if urlsplit(self.path).path != "/api/pilot/simulate":
+                self.send(b"Not found", "text/plain", 404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 8192:
+                    raise ValueError("Invalid request size")
+                inputs = json.loads(self.rfile.read(length))
+                if not isinstance(inputs, dict):
+                    raise ValueError("Expected an assumptions object")
+                body = comparison(inputs, buyer)
+                self.send(json.dumps(body).encode(), "application/json")
+            except (ValueError, TypeError, OverflowError) as error:
+                self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+
         def do_GET(self):
             route = urlsplit(self.path)
             params = parse_qs(route.query)
+            if route.path in ("/", "/pilot") and not route.query:
+                self.send((ROOT / "static/pilot.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            assets = {"/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript"}
+            if route.path in assets:
+                self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
+                return
+            if route.path == "/api/pilot/evidence":
+                try:
+                    prop, matches = property_data("23296")
+                    models = list(dict.fromkeys(m["MatterportModelId"] for m in matches if m["MatterportModelId"]))
+                    model, error = None, None
+                    try:
+                        model = rooms_for(models[0]) if models else None
+                    except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                        error = str(exc)
+                    body = evidence(prop, models, model, error,
+                                    "Saved local capture · not refreshed" if args.offline else "CoStar kit + live Matterport")
+                    self.send(json.dumps(body).encode(), "application/json")
+                except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
             query = params.get("q", [""])[0].strip()
             property_id = params.get("id", [""])[0]
             model = params.get("model", [""])[0]
@@ -180,7 +234,7 @@ def main():
                 except (KeyError, OSError, RuntimeError, ValueError):
                     self.send(b"Aerial image unavailable.", "text/plain", 502)
                 return
-            if route.path != "/":
+            if route.path not in ("/", "/search"):
                 self.send(b"Not found", "text/plain", 404)
                 return
 
