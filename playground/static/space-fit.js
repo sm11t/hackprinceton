@@ -29,9 +29,14 @@
     measured_clear_height_ft: "Measured clear height", pickleball_courts_by_area: "Courts by area",
     pickleball_clear_height: "Clear height for play", pickleball_roof_upper_bound: "Roof leaves room?",
     daycare_capacity_by_indoor_area: "Children by indoor area", daycare_outdoor_space_needed_sf: "Outdoor play area needed",
+    req_min_clear_height_ft: "Clear height you need", req_min_area_sf: "Minimum space you need",
+    req_max_area_sf: "Maximum space you want", req_min_docks: "Loading docks you need",
+    req_min_drive_in_bays: "Drive-in doors you need", req_min_parking_spaces: "Parking you need",
+    req_min_amps: "Power you need", req_min_floor_load_psf: "Floor load you need",
+    req_three_phase: "Three-phase power", req_sprinklers: "Sprinklers",
   };
   const unit = (fact) =>
-    fact.endsWith("_sf") ? " sq ft" : fact.endsWith("_ft") || fact.endsWith("clear_height") || fact.endsWith("upper_bound")
+    fact === "req_min_amps" ? " A" : fact.endsWith("_sf") ? " sq ft" : fact.endsWith("_ft") || fact.endsWith("clear_height") || fact.endsWith("upper_bound")
       ? " ft" : fact.endsWith("_psf") ? " psf" : "";
   const show = (r) => {
     if (r.value === null || r.value === undefined) return "—";
@@ -75,6 +80,77 @@
       .join("")}${errors.length ? `<p class="small muted">Provider gaps: ${esc(errors.join(", "))}</p>` : ""}`;
   }
 
+  const REQ_FIELDS = [
+    ["label", "Your business", "text", "e.g. Climbing gym"],
+    ["min_clear_height_ft", "Min clear height (ft)", "number", "20"],
+    ["min_area_sf", "Min space (sq ft)", "number", "6000"],
+    ["max_area_sf", "Max space (sq ft)", "number", ""],
+    ["min_docks", "Min loading docks", "number", ""],
+    ["min_parking_spaces", "Min parking spaces", "number", ""],
+    ["three_phase", "Three-phase power", "checkbox", ""],
+    ["sprinklers", "Sprinklers", "checkbox", ""],
+  ];
+
+  function rankView(d) {
+    return `<h4 class="lf-group">What else fits this space?</h4><ul class="lf-rank">${d.uses
+      .map((u) => {
+        const [, tone] = VERDICT[u.verdict] || ["", "amber"];
+        return `<li><span class="lf-verdict lf-${tone}">${esc(u.verdict.replace(/_/g, " "))}</span><div><strong>${esc(u.use_label)}</strong><p>${esc(u.reason)}</p></div></li>`;
+      })
+      .join("")}</ul>`;
+  }
+
+  function reqForm(el) {
+    return `<details class="lf-more lf-req"><summary class="lf-group">Check your own requirements</summary><form class="lf-form">${REQ_FIELDS.map(
+      ([k, label, type, ph]) =>
+        type === "checkbox"
+          ? `<label class="lf-check"><input type="checkbox" name="${k}"> ${esc(label)}</label>`
+          : `<label>${esc(label)}<input name="${k}" type="${type}" min="0" placeholder="${esc(ph)}"></label>`,
+    ).join("")}<button class="secondary" type="submit">Check this space</button></form><div class="lf-req-out"></div></details>`;
+  }
+
+  async function runRequirements(form, el) {
+    const out = form.parentElement.querySelector(".lf-req-out");
+    const q = new URLSearchParams({ property_id: el.dataset.property, use: "custom" });
+    new FormData(form).forEach((v, k) => {
+      if (v !== "" && v !== null) q.set(k, k === "three_phase" || k === "sprinklers" ? "yes" : v);
+    });
+    if ([...q.keys()].filter((k) => !["property_id", "use", "label"].includes(k)).length === 0) {
+      out.innerHTML = `<p class="small muted">Add at least one requirement.</p>`;
+      return;
+    }
+    out.innerHTML = `<p class="small muted">Checking…</p>`;
+    try {
+      const d = await fetch(`/api/space-fit?${q}`).then((r) => r.json());
+      if (d.error) throw new Error(d.error);
+      const reqs = d.records.filter((r) => r.fact.startsWith("req_"));
+      const [title, tone] = VERDICT[d.verdict] || ["", "amber"];
+      out.innerHTML = `<div class="lf-top"><h3>${esc(d.use_label)} · ${esc(title)}</h3><span class="lf-verdict lf-${tone}">${esc(d.verdict.replace(/_/g, " "))}</span></div><ul class="lf-list">${reqs.map(row).join("")}</ul>`;
+    } catch (err) {
+      out.innerHTML = `<p class="small muted">Could not check: ${esc(err.message)}</p>`;
+    }
+  }
+
+  async function loadExtras(el) {
+    const slot = el.querySelector(".lf-extras");
+    if (!slot) return;
+    slot.innerHTML = reqForm(el);
+    slot.querySelector(".lf-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      runRequirements(e.target, el);
+    });
+    const key = `rank:${el.dataset.property}`;
+    if (!cache.has(key))
+      cache.set(key, fetch(`/api/space-fit/rank?property_id=${encodeURIComponent(el.dataset.property)}`).then((r) => r.json()));
+    try {
+      const d = await cache.get(key);
+      if (d.error) throw new Error(d.error);
+      if (slot.isConnected) slot.insertAdjacentHTML("afterbegin", rankView(d));
+    } catch (err) {
+      cache.delete(key);
+    }
+  }
+
   async function load(el) {
     const key = `${el.dataset.property}:${el.dataset.use}`;
     if (el.dataset.loaded === key) return;
@@ -86,7 +162,10 @@
     try {
       const d = await cache.get(key);
       if (d.error) throw new Error(d.error);
-      if (el.isConnected) el.innerHTML = view(d);
+      if (el.isConnected) {
+        el.innerHTML = view(d) + `<div class="lf-extras"></div>`;
+        loadExtras(el);
+      }
     } catch (err) {
       cache.delete(key);
       el.dataset.loaded = "";

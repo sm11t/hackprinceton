@@ -1149,3 +1149,12 @@ p {
 .lf-conflict .lf-dot { background: #b0413a; }
 .lf-checks li { padding: 5px 0; font-size: 13px; }
 .lf-more summary { cursor: pointer; }
+.lf-rank { list-style: none; margin: 0; padding: 0; }
+.lf-rank li { display: grid; grid-template-columns: 120px 1fr; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); align-items: start; }
+.lf-rank p { margin: 2px 0 0; font-size: 13px; }
+.lf-rank .lf-verdict { text-align: center; }
+.lf-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; margin: 8px 0; }
+.lf-form label { display: flex; flex-direction: column; font-size: 12px; gap: 4px; }
+.lf-form input[type=text], .lf-form input[type=number] { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 3px; }
+.lf-form .lf-check { flex-direction: row; align-items: center; gap: 6px; }
+.lf-form button { align-self: end; }
