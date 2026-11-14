@@ -17,6 +17,8 @@ Sources used here:
 Usage:
   python3 playground/space_fit.py --kit ~/Downloads/costar-hackathon-kit.zip --property-id 23296 --use pickleball
   python3 playground/space_fit.py --kit <unzipped kit dir> --property-id 23296 --use daycare --offline
+  python3 playground/space_fit.py --kit ... --property-id 13890701 --use custom --label "Climbing gym" \
+      --require min_clear_height_ft=20 --require min_area_sf=6000 --require three_phase=yes
 """
 import argparse
 import io
@@ -100,6 +102,13 @@ USES = {
             "Licensing inspection and landlord consent for a childcare use",
         ],
     },
+    "custom": {
+        "label": "Your own requirements",
+        "checks": [
+            "Anything you did not list: plumbing, HVAC, restrooms, accessibility",
+            "Deed restrictions, change-of-use permit and landlord consent for your business",
+        ],
+    },
     "workshop": {
         "label": "Workshop & classes",
         "checks": [
@@ -160,6 +169,45 @@ def listed_spaces(kit_path, property_id, password=None):
     return out
 
 
+# --- Typed requirements ------------------------------------------------------------
+# What a user can ask for in their own words ("20 ft clear, 6,000 sq ft, 2 docks, 3-phase").
+# Each is checked against the same evidence as the built-in uses. key: (label, kind, unit)
+
+REQUIREMENTS = {
+    "min_clear_height_ft": ("Clear height of at least", "number", "ft"),
+    "min_area_sf": ("Space of at least", "number", "sq ft"),
+    "max_area_sf": ("Space of at most", "number", "sq ft"),
+    "min_docks": ("Loading docks, at least", "number", ""),
+    "min_drive_in_bays": ("Drive-in doors, at least", "number", ""),
+    "min_parking_spaces": ("Parking spaces, at least", "number", ""),
+    "min_amps": ("Electrical service of at least", "number", "A"),
+    "min_floor_load_psf": ("Floor load of at least", "number", "psf"),
+    "three_phase": ("Three-phase power", "flag", ""),
+    "sprinklers": ("Sprinklers", "flag", ""),
+}
+TRUE_WORDS = {"1", "true", "yes", "y", "on"}
+
+
+def parse_requirements(raw):
+    """Turn {key: str|number|bool} (query string, CLI or JSON) into validated requirements."""
+    out = {}
+    for key, value in (raw or {}).items():
+        if key not in REQUIREMENTS:
+            raise ValueError(f"Unknown requirement {key!r}; choose from {', '.join(REQUIREMENTS)}")
+        kind = REQUIREMENTS[key][1]
+        if kind == "flag":
+            out[key] = value if isinstance(value, bool) else str(value).strip().lower() in TRUE_WORDS
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} must be a number") from None
+        if not math.isfinite(number) or number < 0 or number > 10_000_000:
+            raise ValueError(f"{key} must be between 0 and 10,000,000")
+        out[key] = number
+    return out
+
+
 # --- CoStar building facts -----------------------------------------------------------
 
 
@@ -168,6 +216,20 @@ def subtype_block(prop):
         if prop.get(key):
             return key, prop[key]
     return None, {}
+
+
+def building_numbers(prop):
+    """The CoStar values typed requirements are checked against (None = not recorded)."""
+    _, sub = subtype_block(prop)
+    electric = sub.get("electric") or {}
+    docks = (sub.get("numExternalLoadingDocks") or 0) + (sub.get("numInternalLoadingDocks") or 0)
+    parking = sum((p.get("totalSpaces") or 0) for p in prop.get("parking") or [])
+    return {
+        "docks": docks or None, "drive_in_bays": (sub.get("driveInBays") or {}).get("numDriveInBays"),
+        "parking_spaces": parking or None, "amps": electric.get("ampsHigh") or electric.get("ampsLow"),
+        "phases": electric.get("numElectricCurrentPhases"), "sprinklers": prop.get("hasSprinklers"),
+        "floor_load_psf": (sub.get("structural") or {}).get("floorLoadPoundsPerSquareFoot"),
+    }
 
 
 def costar_facts(prop):
@@ -296,6 +358,65 @@ def evaluate_use(use_id, area, ceiling_ft, ceiling_source, roof_ft=None):
     return out
 
 
+def check_requirements(reqs, area, ceiling_ft, ceiling_source, roof_ft, nums, building_id=None):
+    """One evidence record per typed requirement. Missing data is 'unknown', never a pass or a fail."""
+    area_label, area_sf, area_src, area_id = area
+    out = []
+
+    def judge(key, value, ok, source, source_id, note, confidence=0.6):
+        label, _, unit = REQUIREMENTS[key]
+        want = reqs[key]
+        wanted = "required" if REQUIREMENTS[key][1] == "flag" else f"{want:,.0f}{(' ' + unit) if unit else ''}"
+        status = "unknown" if ok is None else ("agrees" if ok else "conflict")
+        out.append(record(f"req_{key}", value, source, source_id, confidence=confidence if ok is not None else 0.1,
+                          status=status, needs_human=status != "agrees",
+                          note=f"You asked for: {label.lower()} {wanted}. " + note))
+
+    if "min_area_sf" in reqs or "max_area_sf" in reqs:
+        for key in ("min_area_sf", "max_area_sf"):
+            if key not in reqs:
+                continue
+            if not area_sf:
+                judge(key, None, None, "costar", None, "No area is recorded for this space.")
+            else:
+                ok = area_sf >= reqs[key] if key == "min_area_sf" else area_sf <= reqs[key]
+                judge(key, area_sf, ok, area_src, area_id, f"Judged on {area_label}: {area_sf:,.0f} sq ft (advertised "
+                      "or recorded size; usable area is smaller).")
+    if "min_clear_height_ft" in reqs:
+        need = reqs["min_clear_height_ft"]
+        if roof_ft and roof_ft < need:
+            judge("min_clear_height_ft", roof_ft, False, "vexcel", None,
+                  f"The roof is only {roof_ft:g} ft above ground, so no space inside can reach {need:g} ft.")
+        elif ceiling_ft is not None:
+            judge("min_clear_height_ft", ceiling_ft, ceiling_ft >= need, ceiling_source, None,
+                  f"{'Measured' if ceiling_source == 'matterport' else 'Recorded'} clear height is {ceiling_ft:g} ft; "
+                  "lights, beams and sprinklers lower the usable height.")
+        else:
+            judge("min_clear_height_ft", None, None, "costar", None,
+                  "Clear height is neither recorded nor measured" + (
+                      f"; the roof at {roof_ft:g} ft leaves room for it" if roof_ft else "") + ". Ask for a measurement.")
+    counts = {"min_docks": ("docks", "loading docks"), "min_drive_in_bays": ("drive_in_bays", "drive-in doors"),
+              "min_parking_spaces": ("parking_spaces", "parking spaces"), "min_amps": ("amps", "amps"),
+              "min_floor_load_psf": ("floor_load_psf", "psf floor load")}
+    for key, (field, words) in counts.items():
+        if key not in reqs:
+            continue
+        have = nums.get(field)
+        shared = " for the whole building, shared with other tenants" if field in ("docks", "parking_spaces") else ""
+        judge(key, have, None if have is None else have >= reqs[key], "costar", building_id,
+              f"CoStar records {have:g} {words}{shared}." if have is not None else f"CoStar records no {words}.")
+    if reqs.get("three_phase"):
+        phases = nums.get("phases")
+        judge("three_phase", f"{phases}-phase" if phases else None, None if not phases else phases >= 3, "costar",
+              building_id, f"CoStar records {phases}-phase service." if phases else "CoStar records no phase count.")
+    if reqs.get("sprinklers"):
+        has = nums.get("sprinklers")
+        judge("sprinklers", has, has, "costar", building_id,
+              "CoStar sprinkler flag; coverage of the specific space needs verification." if has is not None
+              else "CoStar does not record whether the building has sprinklers.")
+    return out
+
+
 def verdict(fit_records):
     """Summarise the use-specific judgements (not general building facts or checklist items):
     a hard conflict rules the use out, an unknown means 'investigate', otherwise the data supports it.
@@ -310,13 +431,20 @@ def verdict(fit_records):
     return "supported"
 
 
-def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model=None):
+def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model=None, requirements=None,
+              label=None):
     """Fit report for one property and proposed use.
+
+    requirements: typed requirements (see REQUIREMENTS / parse_requirements), checked on top of the use's own
+    checks; use_id "custom" means only these. label: the user's own name for the business (custom use).
 
     vexcel: a Vexcel property/extract response for the CoStar pin (see exterior.fetch_property), or None.
     rooms_by_model: {matterport model id: rooms} for the property's scans (see interior.fetch_rooms), or None."""
     if use_id not in USES:
         raise ValueError(f"Unknown use {use_id!r}; choose one of {', '.join(USES)}")
+    requirements = parse_requirements(requirements)
+    if use_id == "custom" and not requirements:
+        raise ValueError("A custom use needs at least one requirement")
     spaces = spaces or []
     # Suite choice: the one asked for; else a listed space that has a same-address scan (evidence inside);
     # else the largest listed space.
@@ -353,15 +481,18 @@ def space_fit(prop, use_id, spaces=None, suite=None, vexcel=None, rooms_by_model
     if measured:  # a scan of the chosen suite measured its main space: prefer that over the recorded value
         ceiling_ft, ceiling_source = measured[0], "matterport"
     fit = evaluate_use(use_id, area, ceiling_ft, ceiling_source, roof_height_ft(ext))
+    fit = check_requirements(requirements, area, ceiling_ft, ceiling_source, roof_height_ft(ext),
+                             building_numbers(prop), prop["id"]) + fit
     return {
         "property_id": prop["id"], "address": costar_address(prop)["display"], "use": use_id,
-        "use_label": USES[use_id]["label"], "suite": (chosen or {}).get("suite"),
+        "use_label": (label or "").strip()[:80] or USES[use_id]["label"], "suite": (chosen or {}).get("suite"),
+        "requirements": requirements,
         "area_basis": area[0], "verdict": verdict(fit), "records": records + fit, "errors": {},
         "sources": SOURCES,
     }
 
 
-def run(kit_path, property_id, use_id, suite=None, offline=False, password=None):
+def run(kit_path, property_id, use_id, suite=None, offline=False, password=None, requirements=None, label=None):
     """Load the property from the kit, gather Vexcel and Matterport evidence (cached), and judge fit.
     Provider errors are reported in result["errors"], never fatal."""
     prop = load_property(kit_path, property_id, password)
@@ -377,7 +508,7 @@ def run(kit_path, property_id, use_id, suite=None, offline=False, password=None)
             rooms_by_model[scan["model_id"]] = fetch_rooms(scan["model_id"], offline)
         except Exception as error:  # provider errors are reported, never fatal
             errors[f"matterport:{scan['model_id']}"] = str(error)
-    result = space_fit(prop, use_id, spaces, suite, vexcel, rooms_by_model)
+    result = space_fit(prop, use_id, spaces, suite, vexcel, rooms_by_model, requirements, label)
     result["errors"].update(errors)
     return result
 
@@ -389,9 +520,16 @@ def main():
     parser.add_argument("--use", choices=sorted(USES), required=True)
     parser.add_argument("--suite", help="Evaluate this listed suite (default: a scanned listed space, else the largest)")
     parser.add_argument("--offline", action="store_true", help="Skip network calls; use cached provider responses.")
+    parser.add_argument("--require", action="append", default=[], metavar="KEY=VALUE",
+                        help=f"Typed requirement, repeatable. Keys: {', '.join(REQUIREMENTS)}")
+    parser.add_argument("--label", help="Your name for the business, e.g. 'Climbing gym' (with --use custom)")
     args = parser.parse_args()
     try:
-        result = run(args.kit, args.property_id, args.use, args.suite, args.offline, kit_password())
+        reqs = dict(item.split("=", 1) for item in args.require)
+    except ValueError:
+        parser.error("--require takes KEY=VALUE")
+    try:
+        result = run(args.kit, args.property_id, args.use, args.suite, args.offline, kit_password(), reqs, args.label)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
     print(json.dumps(result, indent=2))

@@ -15,7 +15,7 @@ from zipfile import ZipFile
 from probe import aerial_image, load_property, matterport_model
 from pilot import ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
-from space_fit import USES, run as space_fit_run
+from space_fit import REQUIREMENTS, USES, run as space_fit_run
 
 
 def words(value):
@@ -116,9 +116,10 @@ def main():
     def property_data(property_id):
         return load_property(args.kit, int(property_id), password, require_model=False)
 
-    @lru_cache(maxsize=64)
-    def fit_for(property_id, use, suite):
-        return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password)
+    @lru_cache(maxsize=128)
+    def fit_for(property_id, use, suite, requirements=(), label=""):
+        return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password,
+                             dict(requirements), label or None)
 
     @lru_cache(maxsize=32)
     def image_for(property_id):
@@ -239,7 +240,9 @@ def main():
                     use = params.get("use", [""])[0]
                     if use not in USES:
                         raise ValueError(f"use must be one of {', '.join(USES)}")
-                    body = fit_for(property_id, use, params.get("suite", [""])[0])
+                    requirements = tuple(sorted((k, v[0]) for k, v in params.items() if k in REQUIREMENTS))
+                    body = fit_for(property_id, use, params.get("suite", [""])[0], requirements,
+                                   params.get("label", [""])[0])
                     self.send(json.dumps(body).encode(), "application/json")
                 except ValueError as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)

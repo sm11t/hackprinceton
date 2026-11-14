@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from space_fit import USES, evaluate_use, listed_spaces, load_property, space_fit, verdict
+from space_fit import USES, evaluate_use, listed_spaces, load_property, parse_requirements, space_fit, verdict
 
 CONTRACT_KEYS = {"fact", "value", "source", "source_id", "captured_at", "confidence",
                  "evidence_url", "status", "needs_human", "note"}
@@ -35,7 +35,8 @@ def fact(result, name):
 class Contract(unittest.TestCase):
     def test_every_record_keeps_the_shared_shape(self):
         for use in USES:
-            for r in space_fit(flex(), use, SUITE_A)["records"]:
+            reqs = {"min_area_sf": 1000, "three_phase": True} if use == "custom" else None
+            for r in space_fit(flex(), use, SUITE_A, requirements=reqs)["records"]:
                 self.assertEqual(set(r), CONTRACT_KEYS, (use, r["fact"]))
                 self.assertIn(r["status"], {"agrees", "conflict", "unknown"})
 
@@ -96,6 +97,45 @@ class GeneralFacts(unittest.TestCase):
     def test_unknown_use_is_rejected(self):
         with self.assertRaises(ValueError):
             space_fit(flex(), "casino", SUITE_A)
+
+
+class TypedRequirements(unittest.TestCase):
+    def test_parsing_accepts_query_strings_and_rejects_unknown_keys(self):
+        self.assertEqual(parse_requirements({"min_area_sf": "6000", "three_phase": "yes"}),
+                         {"min_area_sf": 6000.0, "three_phase": True})
+        for bad in ({"ceiling": "3"}, {"min_area_sf": "big"}, {"min_docks": "-1"}, {"min_amps": "nan"}):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_requirements(bad)
+
+    def test_custom_use_needs_a_requirement(self):
+        with self.assertRaises(ValueError):
+            space_fit(flex(), "custom", SUITE_A)
+
+    def test_custom_use_supported_when_every_requirement_is_met(self):
+        result = space_fit(flex(), "custom", SUITE_A, requirements={
+            "min_clear_height_ft": 16, "min_area_sf": 6000, "min_docks": 2, "three_phase": True, "sprinklers": True},
+            label="Climbing gym")
+        self.assertEqual(result["use_label"], "Climbing gym")
+        self.assertEqual(result["verdict"], "supported")
+        self.assertEqual({r["status"] for r in result["records"] if r["fact"].startswith("req_")}, {"agrees"})
+
+    def test_unmet_requirement_rules_the_space_out(self):
+        result = space_fit(flex(), "custom", SUITE_A, requirements={"min_area_sf": 12000})
+        self.assertEqual(fact(result, "req_min_area_sf")["status"], "conflict")
+        self.assertEqual(result["verdict"], "does_not_fit")
+
+    def test_missing_data_is_unknown_not_a_fail(self):
+        prop = flex(ceiling=None)
+        prop["propertyFlex"]["electric"] = {}
+        result = space_fit(prop, "custom", SUITE_A, requirements={"min_clear_height_ft": 20, "three_phase": True})
+        self.assertEqual(fact(result, "req_min_clear_height_ft")["status"], "unknown")
+        self.assertEqual(fact(result, "req_three_phase")["status"], "unknown")
+        self.assertEqual(result["verdict"], "investigate")
+
+    def test_requirements_add_to_a_built_in_use(self):
+        result = space_fit(flex(), "pickleball", SUITE_A, requirements={"min_area_sf": 12000})
+        self.assertEqual(result["verdict"], "does_not_fit")  # courts fit, but the user's own minimum does not
+        self.assertEqual(fact(result, "pickleball_courts_by_area")["status"], "agrees")
 
 
 class KitFolder(unittest.TestCase):
