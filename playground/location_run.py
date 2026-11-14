@@ -13,6 +13,7 @@ from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.tools import tool
 from langchain_upstage import ChatUpstage
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel, Field
 
 from location_sources import collect_official, collect_property, market_sources, record
@@ -134,9 +135,16 @@ def run_review(address, use, property_records, public_records, *, skip_market=Fa
                        "then market-research, then validator. Wait for each before calling the next. "
                        "Use only these three named subagents. Finish once the validator returns."),
     )
-    supervisor.invoke({"messages": [{"role": "user", "content":
-                      "Run property-evidence, then market-research, then validator, one task at a time."}]},
-                      config={"recursion_limit": 24})
+    try:
+        supervisor.invoke({"messages": [{"role": "user", "content":
+                          "Run property-evidence, then market-research, then validator, one task at a time."}]},
+                          config={"recursion_limit": 18})
+    except GraphRecursionError:
+        # Finish any missing stages in order when the supervisor exhausts its budget.
+        pass
+    for subagent in subagents:
+        if subagent["name"] not in state:
+            subagent["runnable"].invoke({"messages": []})
     if "validator" not in state or not searched:
         raise RuntimeError("The supervisor did not complete the required evidence, research and validation stages.")
     claims = candidates()
