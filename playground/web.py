@@ -16,8 +16,10 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from zipfile import ZipFile
 
 from probe import aerial_image, load_property, matterport_model
-from pilot import ROOT, comparison, evidence
+from pilot import CONFIG, ROOT, comparison, evidence
 from nessie_pilot import buyer_from_nessie
+from deal import load_deal_data, rent_for_simulation, run_deal
+from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
 def words(value):
@@ -124,6 +126,29 @@ def main():
     @lru_cache(maxsize=64)
     def property_data(property_id):
         return load_property(args.kit, int(property_id), password, require_model=False)
+
+    @lru_cache(maxsize=128)
+    def fit_for(property_id, use, suite, requirements=(), label=""):
+        return space_fit_run(args.kit, property_id, use, suite or None, args.offline, password,
+                             dict(requirements), label or None)
+
+    @lru_cache(maxsize=128)
+    def deal_for(property_id, capital, suite, square_feet):
+        return run_deal(args.kit, property_id, capital, password, suite or None, square_feet)
+
+    @lru_cache(maxsize=1)
+    def pilot_rent():
+        """The kit's asking rent for the pilot scenario's space; None keeps the scenario's assumed rent."""
+        scenario = CONFIG["property"]
+        try:
+            spaces, _, _ = load_deal_data(args.kit, scenario["costar_id"], password)
+        except (KeyError, OSError, RuntimeError, ValueError):
+            return None
+        return rent_for_simulation(spaces, square_feet=scenario.get("suite_sqft"))
+
+    @lru_cache(maxsize=64)
+    def rank_for(property_id, suite):
+        return space_fit_rank(args.kit, property_id, suite or None, args.offline, password)
 
     @lru_cache(maxsize=32)
     def image_for(property_id):
@@ -256,7 +281,7 @@ def main():
                 inputs = json.loads(self.rfile.read(length))
                 if not isinstance(inputs, dict):
                     raise ValueError("Expected an assumptions object")
-                body = comparison(inputs, buyer)
+                body = comparison(inputs, buyer, pilot_rent())
                 self.send(json.dumps(body).encode(), "application/json")
             except (ValueError, TypeError, OverflowError) as error:
                 self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
@@ -276,7 +301,7 @@ def main():
                 self.send(json.dumps(rows).encode(), "application/json")
                 return
             assets = {"/static/location-demo.js": "text/javascript","/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
-                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript"}
+                      "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript", "/static/space-fit.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
@@ -311,6 +336,44 @@ def main():
                                     "Saved local capture · not refreshed" if args.offline else "CoStar kit + live Matterport")
                     self.send(json.dumps(body).encode(), "application/json")
                 except (KeyError, OSError, RuntimeError, ValueError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/deal":
+                try:
+                    number = lambda name: float(params[name][0]) if params.get(name, [""])[0] else None  # noqa: E731
+                    capital, square_feet = number("capital"), number("square_feet")
+                    if capital is not None and not 0 <= capital <= 1e10:
+                        raise ValueError("capital must be between 0 and 10,000,000,000")
+                    body = deal_for(int(params.get("property_id", [""])[0]), capital,
+                                    params.get("suite", [""])[0], square_feet)
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit/rank":
+                try:
+                    body = rank_for(int(params.get("property_id", [""])[0]), params.get("suite", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/space-fit":
+                try:
+                    property_id = int(params.get("property_id", [""])[0])
+                    use = params.get("use", [""])[0]
+                    if use not in USES:
+                        raise ValueError(f"use must be one of {', '.join(USES)}")
+                    requirements = tuple(sorted((k, v[0]) for k, v in params.items() if k in REQUIREMENTS))
+                    body = fit_for(property_id, use, params.get("suite", [""])[0], requirements,
+                                   params.get("label", [""])[0])
+                    self.send(json.dumps(body).encode(), "application/json")
+                except ValueError as exc:
+                    self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 400)
+                except (KeyError, OSError, RuntimeError) as exc:
                     self.send(json.dumps({"error": str(exc)}).encode(), "application/json", 502)
                 return
             query = params.get("q", [""])[0].strip()
