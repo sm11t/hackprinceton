@@ -216,6 +216,10 @@ class Because(unittest.TestCase):
             self.assertTrue(all(0 <= i < len(out["evidence"]) for i in row["evidence"]))
             self.assertEqual(set(row["source"]), {"name", "url", "retrieved_at", "confidence"})
         deciding = {r["effect"] for r in out["because"] if r["decides"]}
+        texts = [r["text"] for r in out["because"]]
+        self.assertEqual(len(texts), len(set(texts)), "a reason is listed twice")
+        self.assertEqual(sum(r["effect"] == "blocks" and r["decides"] for r in out["because"]), len(out["blockers"]))
+        self.assertEqual(sum(r["effect"] == "check" and r["decides"] for r in out["because"]), len(out["conditions"]))
         for text in out["blockers"]:
             self.assertTrue(any(r["effect"] == "blocks" and text[:40] in r["text"] for r in out["because"]), text)
         for text in out["conditions"]:
@@ -239,6 +243,10 @@ class Because(unittest.TestCase):
         self.assertEqual(poor["verdict"], "NO-GO")
         self.assertIn("blocks", self.check_shape(poor))
         self.assertEqual(poor["because"][0]["effect"], "blocks")  # blocks sort first
+        self.check_shape(self.run_review(demand="weak"))
+        self.check_shape(self.run_review(fit_status="no"))
+        self.check_shape(self.run_review(fit_status="check"))
+        self.check_shape(self.run_review(budget=290000))  # stretch: affordable only in the low case
         mixed = self.run_review(demand="mixed")
         self.assertIn("check", self.check_shape(mixed))
         self.assertNotIn("blocks", self.check_shape(mixed))

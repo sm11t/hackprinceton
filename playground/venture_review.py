@@ -146,8 +146,9 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
         for u in fit["unknowns"]:
             add("check", "building", u, "building fit", size, typical, fit_refs, decides=True)
     else:
-        add("blocks", "building", "The space can't host it: " + "; ".join(fit["reasons"]), "building fit", size,
-            typical, fit_refs, decides=True)
+        text = next((b for b in blockers if b.startswith("The space can't host it")),
+                    "The space can't host it: " + "; ".join(fit["reasons"]))
+        add("blocks", "building", text, "building fit", size, typical, fit_refs, decides=True)
 
     afford = cost.get("affordability", "unknown")
     req, total = cost.get("required") or {}, cost.get("cash_to_open") or {}
@@ -160,11 +161,11 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
             + (f" (about {months:g} months of rent to spare with zero revenue)" if months else ""),
             "cash to open + reserve (base)", money_text(req.get("base")), rule, money_refs, decides=True)
     elif afford == "stretch":
-        add("check", "money", f"Only affordable in the low-cost case: low {money_text(req.get('low'))}, base "
-            f"{money_text(req.get('base'))}", "cash to open + reserve (base)", money_text(req.get("base")), rule,
+        add("check", "money", f"Only affordable in the low-cost case: base case needs {money_text(req.get('base'))}"
+            f" (low case {money_text(req.get('low'))})", "cash to open + reserve (base)", money_text(req.get("base")), rule,
             money_refs, decides=True)
     elif afford == "over":
-        add("blocks", "money", f"Cash to open plus reserve, {money_text(req.get('low'))} even in the low case, "
+        add("blocks", "money", f"Cash to open plus reserve ({money_text(req.get('low'))} even in the low case) "
             f"exceeds the {money_text(budget)} budget", "cash to open + reserve (low)", money_text(req.get("low")),
             rule.replace("cash to open", "low-case cash to open"), money_refs, decides=True)
     elif afford == "rent_unknown":
@@ -204,7 +205,8 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
         add("supports", "coordinator", decision["headline"], "neighborhood verdict", score, verdict_rule, voted,
             decides=True)
     elif demand == "weak":
-        add("blocks", "coordinator", decision["headline"], "neighborhood verdict", score, verdict_rule, voted,
+        add("blocks", "coordinator", next((b for b in blockers if b.startswith("The neighborhood does not")),
+                                          decision["headline"]), "neighborhood verdict", score, verdict_rule, voted,
             decides=True)
     else:
         add("check", "coordinator", f"Neighborhood demand is {demand}: "
@@ -248,8 +250,8 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
         add("supports", "permits", "Inside City of Houston limits (Census boundary): Houston's permit path applies",
             "jurisdiction", where.get("place") or "Houston", j_rule, j_refs)
     elif where.get("code") == "harris_unincorporated":
-        add("check", "permits", "Unincorporated Harris County: City of Houston permits don't apply; Harris County "
-            "does", "jurisdiction", "unincorporated " + (where.get("county") or "Harris County"), j_rule, j_refs,
+        add("check", "permits", "Outside Houston city limits (unincorporated Harris County): City of Houston permits "
+            "don't apply; Harris County does", "jurisdiction", "unincorporated " + (where.get("county") or "Harris County"), j_rule, j_refs,
             decides=True)
     elif where.get("place"):
         add("check", "permits", f"Inside {where['place']}, which has its own permitting office", "jurisdiction",
