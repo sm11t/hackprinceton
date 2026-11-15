@@ -1,0 +1,858 @@
+{
+  "sample": "3 indoor panorama faces, 1024x1024 each, one CoStar-matched Matterport model",
+  "method_limitations": [
+    "Single reviewer approximate boxes; exploratory, not statistically reliable.",
+    "Per-face greedy same-class IoU>=0.50 matching; no adjudication or confidence calibration.",
+    "Classes outside the visible manual labels are counted as false positives.",
+    "Panorama face views are not independent properties; no exterior imagery was available."
+  ],
+  "manual_labels": {
+    "skybox_face_1.jpg": [
+      [
+        "door",
+        [
+          0.315,
+          0.322,
+          0.462,
+          0.699
+        ]
+      ],
+      [
+        "door",
+        [
+          0.523,
+          0.333,
+          0.741,
+          0.682
+        ]
+      ],
+      [
+        "electrical",
+        [
+          0.833,
+          0.459,
+          0.912,
+          0.556
+        ]
+      ],
+      [
+        "light",
+        [
+          0.9,
+          0.04,
+          0.995,
+          0.14
+        ]
+      ]
+    ],
+    "skybox_face_2.jpg": [
+      [
+        "door",
+        [
+          0.38,
+          0.456,
+          0.51,
+          0.612
+        ]
+      ],
+      [
+        "partition",
+        [
+          0.375,
+          0.35,
+          0.8,
+          0.6
+        ]
+      ],
+      [
+        "circulation",
+        [
+          0.3,
+          0.39,
+          0.38,
+          0.61
+        ]
+      ],
+      [
+        "electrical",
+        [
+          0.01,
+          0.46,
+          0.06,
+          0.54
+        ]
+      ],
+      [
+        "light",
+        [
+          0.0,
+          0.06,
+          0.34,
+          0.15
+        ]
+      ],
+      [
+        "light",
+        [
+          0.39,
+          0.11,
+          0.75,
+          0.22
+        ]
+      ],
+      [
+        "light",
+        [
+          0.39,
+          0.28,
+          0.68,
+          0.33
+        ]
+      ]
+    ],
+    "skybox_face_3.jpg": [
+      [
+        "door",
+        [
+          0.69,
+          0.395,
+          0.775,
+          0.635
+        ]
+      ],
+      [
+        "door",
+        [
+          0.76,
+          0.35,
+          0.98,
+          0.7
+        ]
+      ],
+      [
+        "electrical",
+        [
+          0.24,
+          0.6,
+          0.65,
+          0.635
+        ]
+      ],
+      [
+        "light",
+        [
+          0.04,
+          0.04,
+          0.42,
+          0.17
+        ]
+      ],
+      [
+        "light",
+        [
+          0.88,
+          0.05,
+          1.0,
+          0.145
+        ]
+      ]
+    ]
+  },
+  "configuration_a_results": [
+    {
+      "image": "skybox_face_1.jpg",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "http_status": 200,
+      "latency_ms": 2251,
+      "usage": {
+        "prompt_tokens": 814,
+        "completion_tokens": 535,
+        "total_tokens": 1349,
+        "cost": 0.00031017,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00031017,
+          "upstream_inference_prompt_cost": 8.547e-05,
+          "upstream_inference_completions_cost": 0.0002247
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.00031017,
+      "finish_reason": "stop",
+      "json_observations_parsed": 11,
+      "visible_valid_boxes": 8,
+      "manual_box_match_iou_0_5": {
+        "tp": 4,
+        "fp": 4,
+        "fn": 0,
+        "precision": 0.5,
+        "recall": 1.0
+      },
+      "overlay": "overlay_deepseek-v4.1-flash-1017_skybox_face_1.jpg",
+      "observations": [
+        {
+          "feature": "open doorway to corridor",
+          "evidence": "Open doorway with dark frame leading into a lit hallway with carpet and ceiling lights.",
+          "bbox_xyxy_normalized": [
+            0.315,
+            0.322,
+            0.462,
+            0.699
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "double wood door",
+          "evidence": "Closed double wood-grain door with dark frame and silver lever handle.",
+          "bbox_xyxy_normalized": [
+            0.523,
+            0.333,
+            0.741,
+            0.682
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "wall-mounted electrical panel",
+          "evidence": "Gray panel labeled 'AUTOMATROL' mounted on wall with conduits above and below.",
+          "bbox_xyxy_normalized": [
+            0.833,
+            0.459,
+            0.912,
+            0.556
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "conduit runs",
+          "evidence": "Vertical conduits above electrical panel and horizontal conduit runs along lower wall.",
+          "bbox_xyxy_normalized": [
+            0.828,
+            0.291,
+            0.995,
+            0.671
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "wall-mounted light switches",
+          "evidence": "Small white switch plates on wall near doorway and electrical panel.",
+          "bbox_xyxy_normalized": [
+            0.475,
+            0.476,
+            0.492,
+            0.536
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "wall-mounted thermostat/control",
+          "evidence": "White rectangular device mounted on left wall.",
+          "bbox_xyxy_normalized": [
+            0.198,
+            0.448,
+            0.222,
+            0.47
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "exit sign",
+          "evidence": "Red exit sign with arrow mounted on wall between doorway and double door.",
+          "bbox_xyxy_normalized": [
+            0.499,
+            0.401,
+            0.516,
+            0.448
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "ceiling light fixtures",
+          "evidence": "Linear fluorescent light fixtures visible on ceiling.",
+          "bbox_xyxy_normalized": [
+            0.9,
+            0.04,
+            0.995,
+            0.14
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "sprinkler fixtures",
+          "evidence": "No sprinkler heads or fixtures directly visible in this view.",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        },
+        {
+          "feature": "partitions",
+          "evidence": "No freestanding partitions visible; only fixed walls and door frames.",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        },
+        {
+          "feature": "circulation obstructions",
+          "evidence": "Floor area in foreground appears clear; no obstructions visible in the open circulation path.",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        }
+      ]
+    },
+    {
+      "image": "skybox_face_1.jpg",
+      "model": "qwen/qwen3.8-flash",
+      "http_status": 200,
+      "latency_ms": 8463,
+      "usage": {
+        "prompt_tokens": 1194,
+        "completion_tokens": 513,
+        "total_tokens": 1707,
+        "cost": 0.00042021,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00042021,
+          "upstream_inference_prompt_cost": 0.0001791,
+          "upstream_inference_completions_cost": 0.00024111
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.00042021,
+      "finish_reason": "stop",
+      "json_observations_parsed": 5,
+      "visible_valid_boxes": 5,
+      "manual_box_match_iou_0_5": {
+        "tp": 3,
+        "fp": 2,
+        "fn": 1,
+        "precision": 0.6,
+        "recall": 0.75
+      },
+      "overlay": "overlay_qwen3.8-flash_skybox_face_1.jpg",
+      "observations": [
+        {
+          "feature": "Open doorway",
+          "evidence": "An open doorway with a dark frame is visible on the left side of the wall, leading into a hallway.",
+          "bbox_xyxy_normalized": [
+            0.315,
+            0.32,
+            0.46,
+            0.7
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Double doors",
+          "evidence": "A set of closed double doors with a wood-grain finish and dark frames is located to the right of the open doorway.",
+          "bbox_xyxy_normalized": [
+            0.525,
+            0.335,
+            0.74,
+            0.685
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Electrical panel",
+          "evidence": "A grey electrical panel box is mounted on the wall on the far right, with conduit running above and below it.",
+          "bbox_xyxy_normalized": [
+            0.835,
+            0.455,
+            0.91,
+            0.565
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Light fixtures",
+          "evidence": "Two fluorescent light fixtures are visible on the ceiling; one in the upper center and another partially visible in the upper right corner.",
+          "bbox_xyxy_normalized": [
+            0.37,
+            0.0,
+            0.4,
+            0.035
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Wall-mounted devices",
+          "evidence": "Multiple small devices, including what appear to be thermostats, switches, and an access control reader, are mounted on the walls.",
+          "bbox_xyxy_normalized": [
+            0.195,
+            0.45,
+            0.22,
+            0.47
+          ],
+          "status": "visible"
+        }
+      ]
+    },
+    {
+      "image": "skybox_face_2.jpg",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "http_status": 200,
+      "latency_ms": 3165,
+      "usage": {
+        "prompt_tokens": 814,
+        "completion_tokens": 398,
+        "total_tokens": 1212,
+        "cost": 0.000295176,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.000295176,
+          "upstream_inference_prompt_cost": 0.000119658,
+          "upstream_inference_completions_cost": 0.000175518
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.000295176,
+      "finish_reason": "stop",
+      "json_observations_parsed": 7,
+      "visible_valid_boxes": 6,
+      "manual_box_match_iou_0_5": {
+        "tp": 4,
+        "fp": 2,
+        "fn": 3,
+        "precision": 0.6666666666666666,
+        "recall": 0.5714285714285714
+      },
+      "overlay": "overlay_deepseek-v4.1-flash-1017_skybox_face_2.jpg",
+      "observations": [
+        {
+          "feature": "access door",
+          "evidence": "Large open doorway beneath the mezzanine, framed by white trim, leading into a darker room with wood-paneled walls.",
+          "bbox_xyxy_normalized": [
+            0.386,
+            0.456,
+            0.5,
+            0.603
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "partition",
+          "evidence": "A raised mezzanine structure with a white railing and solid lower wall divides the rear portion of the space.",
+          "bbox_xyxy_normalized": [
+            0.375,
+            0.35,
+            0.8,
+            0.6
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "circulation obstruction",
+          "evidence": "A wooden staircase with white railings ascends from the floor to the mezzanine level, partially blocking the path near the doorway.",
+          "bbox_xyxy_normalized": [
+            0.3,
+            0.39,
+            0.375,
+            0.605
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "sprinkler fixture",
+          "evidence": "Small pendant sprinkler heads are visible hanging from the dark ceiling structure.",
+          "bbox_xyxy_normalized": null,
+          "status": "uncertain"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "A gray electrical panel box is mounted on the left wall with conduit running down to a lower junction box.",
+          "bbox_xyxy_normalized": [
+            0.01,
+            0.46,
+            0.06,
+            0.54
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "A wall-mounted electrical box with multiple outlets is located on the mezzanine's lower wall.",
+          "bbox_xyxy_normalized": [
+            0.585,
+            0.505,
+            0.64,
+            0.53
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "A small white electrical outlet is visible near the baseboard on the right wall.",
+          "bbox_xyxy_normalized": [
+            0.905,
+            0.6,
+            0.92,
+            0.615
+          ],
+          "status": "visible"
+        }
+      ]
+    },
+    {
+      "image": "skybox_face_2.jpg",
+      "model": "qwen/qwen3.8-flash",
+      "http_status": 200,
+      "latency_ms": 7579,
+      "usage": {
+        "prompt_tokens": 1194,
+        "completion_tokens": 470,
+        "total_tokens": 1664,
+        "cost": 0.0004,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.0004,
+          "upstream_inference_prompt_cost": 0.0001791,
+          "upstream_inference_completions_cost": 0.0002209
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.0004,
+      "finish_reason": "stop",
+      "json_observations_parsed": 5,
+      "visible_valid_boxes": 5,
+      "manual_box_match_iou_0_5": {
+        "tp": 3,
+        "fp": 2,
+        "fn": 4,
+        "precision": 0.6,
+        "recall": 0.42857142857142855
+      },
+      "overlay": "overlay_qwen3.8-flash_skybox_face_2.jpg",
+      "observations": [
+        {
+          "feature": "Door",
+          "evidence": "Open double doors located in the center partition wall, leading to a darker interior space.",
+          "bbox_xyxy_normalized": [
+            0.38,
+            0.45,
+            0.51,
+            0.61
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Partition",
+          "evidence": "A beige half-wall structure separating the main floor from an elevated mezzanine level and stairwell.",
+          "bbox_xyxy_normalized": [
+            0.37,
+            0.42,
+            0.79,
+            0.59
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Circulation obstruction",
+          "evidence": "A metal staircase positioned against the left side of the central partition, occupying floor space.",
+          "bbox_xyxy_normalized": [
+            0.3,
+            0.39,
+            0.38,
+            0.61
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Sprinkler fixture",
+          "evidence": "A vertical pipe assembly with a head visible near the ceiling on the right side of the central partition.",
+          "bbox_xyxy_normalized": [
+            0.72,
+            0.28,
+            0.74,
+            0.46
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "Electrical fixture",
+          "evidence": "Multiple suspended fluorescent tube lights mounted on the dark industrial ceiling.",
+          "bbox_xyxy_normalized": [
+            0.0,
+            0.06,
+            0.33,
+            0.14
+          ],
+          "status": "visible"
+        }
+      ]
+    },
+    {
+      "image": "skybox_face_3.jpg",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "http_status": 200,
+      "latency_ms": 1944,
+      "usage": {
+        "prompt_tokens": 814,
+        "completion_tokens": 331,
+        "total_tokens": 1145,
+        "cost": 0.000277629,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.000277629,
+          "upstream_inference_prompt_cost": 8.4656e-05,
+          "upstream_inference_completions_cost": 0.000192973
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.000277629,
+      "finish_reason": "stop",
+      "json_observations_parsed": 7,
+      "visible_valid_boxes": 5,
+      "manual_box_match_iou_0_5": {
+        "tp": 2,
+        "fp": 3,
+        "fn": 3,
+        "precision": 0.4,
+        "recall": 0.4
+      },
+      "overlay": "overlay_deepseek-v4.1-flash-1017_skybox_face_3.jpg",
+      "observations": [
+        {
+          "feature": "access door",
+          "evidence": "White hinged door with knob, open, on the right side of the wall.",
+          "bbox_xyxy_normalized": [
+            0.69,
+            0.395,
+            0.775,
+            0.635
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "access door",
+          "evidence": "Second white door panel visible at the far right edge, partially open.",
+          "bbox_xyxy_normalized": [
+            0.92,
+            0.33,
+            0.975,
+            0.74
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "partition",
+          "evidence": "Wall section separating the main room from the adjacent space visible through the doorway.",
+          "bbox_xyxy_normalized": [
+            0.76,
+            0.2,
+            0.93,
+            0.64
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "circulation obstruction",
+          "evidence": "No objects blocking the floor path or doorway are visible.",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        },
+        {
+          "feature": "sprinkler fixture",
+          "evidence": "No sprinkler heads or piping are visible on the ceiling or walls.",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "Wall-mounted electrical outlets and switches along the lower wall.",
+          "bbox_xyxy_normalized": [
+            0.24,
+            0.6,
+            0.65,
+            0.625
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "Fluorescent light fixtures suspended from the ceiling.",
+          "bbox_xyxy_normalized": [
+            0.04,
+            0.04,
+            0.42,
+            0.17
+          ],
+          "status": "visible"
+        }
+      ]
+    },
+    {
+      "image": "skybox_face_3.jpg",
+      "model": "qwen/qwen3.8-flash",
+      "http_status": 200,
+      "latency_ms": 7448,
+      "usage": {
+        "prompt_tokens": 1194,
+        "completion_tokens": 417,
+        "total_tokens": 1611,
+        "cost": 0.00037509,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00037509,
+          "upstream_inference_prompt_cost": 0.0001791,
+          "upstream_inference_completions_cost": 0.00019599
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "provider_reported_cost_usd": 0.00037509,
+      "finish_reason": "stop",
+      "json_observations_parsed": 5,
+      "visible_valid_boxes": 4,
+      "manual_box_match_iou_0_5": {
+        "tp": 1,
+        "fp": 3,
+        "fn": 4,
+        "precision": 0.25,
+        "recall": 0.2
+      },
+      "overlay": "overlay_qwen3.8-flash_skybox_face_3.jpg",
+      "observations": [
+        {
+          "feature": "door",
+          "evidence": "white paneled door in open position on the right side of the room",
+          "bbox_xyxy_normalized": [
+            0.69,
+            0.395,
+            0.77,
+            0.64
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "partition",
+          "evidence": "vertical white frame or panel edge standing independently on the floor at the far right",
+          "bbox_xyxy_normalized": [
+            0.925,
+            0.32,
+            0.975,
+            0.745
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "linear fluorescent light fixture suspended from ceiling on the left",
+          "bbox_xyxy_normalized": [
+            0.045,
+            0.08,
+            0.425,
+            0.17
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "electrical fixture",
+          "evidence": "linear fluorescent light fixture suspended from ceiling on the right",
+          "bbox_xyxy_normalized": [
+            0.88,
+            0.05,
+            1.0,
+            0.145
+          ],
+          "status": "visible"
+        },
+        {
+          "feature": "sprinkler fixture",
+          "evidence": "no sprinkler heads visible in exposed ceiling area",
+          "bbox_xyxy_normalized": null,
+          "status": "not_visible"
+        }
+      ]
+    }
+  ],
+  "per_model_summary": {
+    "deepseek/deepseek-v4.1-flash-1017": {
+      "calls": 3,
+      "mean_latency_ms": 2453,
+      "total_cost_usd_reported": 0.000882975,
+      "mean_cost_usd": 0.000294325,
+      "manual_box_match_iou_0_5": {
+        "tp": 10,
+        "fp": 9,
+        "fn": 6,
+        "precision": 0.5263157894736842,
+        "recall": 0.625
+      }
+    },
+    "qwen/qwen3.8-flash": {
+      "calls": 3,
+      "mean_latency_ms": 7830,
+      "total_cost_usd_reported": 0.0011953,
+      "mean_cost_usd": 0.00039843333333333333,
+      "manual_box_match_iou_0_5": {
+        "tp": 7,
+        "fp": 7,
+        "fn": 9,
+        "precision": 0.5,
+        "recall": 0.4375
+      }
+    }
+  },
+  "configuration_b": {
+    "status": "not_run",
+    "reason": "No Perceptron credential; no fabricated localizations."
+  }
+}

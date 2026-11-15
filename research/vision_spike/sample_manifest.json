@@ -1,0 +1,98 @@
+{
+  "source_provider": "Matterport Model API",
+  "attribution": "Matterport public model; model creator attribution was not returned by this API query.",
+  "model_id": "NDMWnz1H9uV",
+  "model_name": "15603 W Hardy Rd",
+  "model_visibility": "public",
+  "model_state": "active",
+  "model_created": "2026-11-10T00:13:47Z",
+  "model_created_interpretation": "Model API creation timestamp; not asserted to be the camera capture date.",
+  "model_modified": "2026-11-12T03:21:49Z",
+  "property_id_costar": 236138,
+  "selected_location_id": "paup35hdhemsueprdyas7xtub",
+  "position": {
+    "x": 9.630573272705078,
+    "y": 20.006385803222656,
+    "z": 0.020450927317142487
+  },
+  "position_coordinate_system": "Matterport local model coordinates; source API does not specify CRS in this response.",
+  "floor": {
+    "id": "tsmq1wak12rhgn0mawksxcwcd",
+    "label": "Floor 1"
+  },
+  "room": {
+    "id": "613htqkzf66zz7hf7n8kzszed"
+  },
+  "panorama_id": "paup35hdhemsueprdyas7xtub",
+  "skybox_id": "paup35hdhemsueprdyas7xtub",
+  "skybox_resolution": "high (documented 1024px face tier)",
+  "skybox_format": "skybox",
+  "skybox_status": "available",
+  "retrieved_at": "2026-11-15T03:58:30.323641+00:00",
+  "capture_timestamp": null,
+  "coordinate_reference_system": null,
+  "permission_basis": "Model API query confirms active, public model; no access/share settings were changed.",
+  "faces": [
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 0,
+      "filename": "skybox_face_0.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 76104,
+      "sha256": "c646b188ee84cb14b94a16284d70bea843e1dee2eec4f6db504c1280c4f25de7"
+    },
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 1,
+      "filename": "skybox_face_1.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 163675,
+      "sha256": "bca9dfb8bc8c174ec1de2321821ec1abfe18829fc23da67f527f467bb418d614"
+    },
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 2,
+      "filename": "skybox_face_2.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 173037,
+      "sha256": "d1b8539f144a83c75b16fbd134c99ad6f78e41c076611eac366478ea10540793"
+    },
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 3,
+      "filename": "skybox_face_3.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 141184,
+      "sha256": "0365eb10adf0196bea281ba4a2de687ea469a35ffe820c9935b28acf9722a85d"
+    },
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 4,
+      "filename": "skybox_face_4.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 135820,
+      "sha256": "9244dd5e7a9c869418ab66e2ebd7dc78d7007245dc6c34020416982e16f01d44"
+    },
+    {
+      "image_id": "paup35hdhemsueprdyas7xtub",
+      "child_face_index": 5,
+      "filename": "skybox_face_5.jpg",
+      "width_px": 1024,
+      "height_px": 1024,
+      "content_type": "image/jpeg",
+      "bytes": 305551,
+      "sha256": "f4052887c503e16af1e9571694cb595c59799f3f88f1de7ddd2782415252ffd4"
+    }
+  ],
+  "imagery_files_committed": false
+}
