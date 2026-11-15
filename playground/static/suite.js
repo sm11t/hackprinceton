@@ -92,9 +92,9 @@
     const url = thumb("prop:" + (GROUPS.includes(group) ? group : "other"), { size: 112 });
     return url ? `<img src="${url}" alt="">` : `<span>${esc((group || "?")[0])}</span>`;
   }
-  function agentImg(name) {
-    const url = thumb("agent:" + name, { size: 88 });
-    return url ? `<img src="${url}" alt="">` : `<span class="fallback">${esc(name.slice(0, 2).toUpperCase())}</span>`;
+  function agentImg(name, px) {
+    const url = thumb("agent:" + name, { size: 88 }), dim = px ? ` style="width:${px}px;height:${px}px"` : "";
+    return url ? `<img src="${url}" alt=""${dim}>` : `<span class="fallback"${dim}>${esc(name.slice(0, 2).toUpperCase())}</span>`;
   }
   const ICONS = {
     plus: '<path d="M12 5v14M5 12h14"/>',
@@ -665,6 +665,121 @@
       <div class="narr"></div>
     </div>`;
   }
+  // ---------- "Why this verdict", the readable agent run, sources and the signal legend ----------
+  // Everything here renders what the review returned (because[], trace[], evidence[]); no verdict logic in JS.
+  const EFFECTS = [["blocks", "Blocks", "red"], ["check", "Needs a check", "amber"], ["supports", "Supports", "green"], ["unknown", "Unknown", "grey"]];
+  const day = (d) => (d ? String(d).slice(0, 10) : "");
+  function srcChip(s) {
+    if (!s || !s.name) return "";
+    const meta = [day(s.retrieved_at), s.confidence != null ? `conf ${s.confidence}` : ""].filter(Boolean).join(" · ");
+    const inner = `<span class="sn">${esc(s.name)}</span>${meta ? `<span class="sm">${esc(meta)}</span>` : ""}`;
+    return s.url ? `<a class="srcchip" href="${esc(s.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="Open the source">${inner}${ic("ext", 11)}</a>`
+      : `<span class="srcchip" title="Source">${inner}</span>`;
+  }
+  function whyHtml(r) {
+    const rows = (r.because || []).map((x, i) => ({ ...x, i }));
+    if (!rows.length) return "";
+    const counts = EFFECTS.map(([e]) => rows.filter((x) => x.effect === e).length);
+    // Wider columns where there are more reasons; empty columns stay narrow but visible ("None").
+    const widths = counts.map((n) => `minmax(0, ${n ? Math.min(n, 6) / 2 + 0.5 : 0.5}fr)`).join(" ");
+    const cols = EFFECTS.map(([e, name, c]) => {
+      const list = rows.filter((x) => x.effect === e);
+      return `<div class="why-col"><div class="why-h"><span class="dot ${c}"></span>${name}<span class="n">${list.length}</span></div>
+        <div class="why-list">${list.length ? list.map((x) => `<div class="why-row ${c}" role="button" tabindex="0" data-agent="${esc(x.agent)}" data-i="${x.i}" title="Open the ${esc(x.agent)} agent in the run">
+          <div class="why-t">${esc(tidy(x.text))}</div>
+          ${x.signal && x.signal.name && x.signal.value ? `<div class="why-sig"><span class="sk">${esc(x.signal.name)}</span> <b>${esc(x.signal.value)}</b>${x.signal.rule ? `<div class="rule">Rule: ${esc(x.signal.rule)}</div>` : ""}</div>` : ""}
+          <div class="why-meta"><span class="wa">${esc(x.agent)} agent</span>${x.decides ? `<span class="dec" title="The verdict rule used this row">decides</span>` : `<span class="inf" title="Context: shown, but the verdict rule did not use it directly">informs</span>`}${srcChip(x.source)}</div>
+        </div>`).join("") : `<div class="why-none">None</div>`}</div></div>`;
+    }).join("");
+    return `<div class="panel why" id="why"><div class="ph">Why this verdict<span class="aside">${rows.length} reasons · click one to open its agent · <button class="link-btn" data-legend>How to read the signals</button></span></div>
+      <div class="why-grid" style="--cols:${widths}">${cols}</div></div>`;
+  }
+  const FSTATUS = { agrees: ["green", "confirmed"], conflict: ["amber", "conflict"], unknown: ["grey", "unknown"] };
+  function fmtVal(v) {
+    if (v == null) return "unknown";
+    if (Array.isArray(v)) return v.length ? v.map(fmtVal).join(", ") : "none";
+    if (typeof v === "object") return Object.entries(v).slice(0, 6).map(([k, x]) => `${k.replace(/_/g, " ")}: ${typeof x === "object" && x ? JSON.stringify(x) : fmtVal(x)}`).join(" · ");
+    if (typeof v === "number") return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString("en-US") : String(v);
+    return String(v);
+  }
+  const factName = (f, key) => String(f || "").replace(key + ".", "").replace(/^compliance\./, "").replace(/[._]/g, " ");
+  function arrow(sig) {
+    if (!sig) return "";
+    const s = sig.stance, [c, a, w] = s > 0 ? ["green", "↑", "supports"] : s < 0 ? ["amber", "↓", "against"] : s === 0 ? ["grey", "–", "neutral"] : ["grey", "?", "unknown"];
+    return `<div class="sigline"><span class="arrow ${c}">${a}</span><span><b>${esc(sig.name)}</b> ${esc(w)}${sig.value != null ? ` · value ${esc(fmtVal(sig.value))}` : ""}${sig.validated === false && sig.name === "lookalike" ? " · not validated, does not vote" : ""}<br><span class="muted small">${esc(sig.reason || "")}</span></span></div>`;
+  }
+  function stepHtml(t, r, highlight) {
+    const inputs = Object.entries(t.inputs || {}).filter(([, v]) => v != null && v !== "");
+    const hl = new Set((highlight || []).map((i) => { const e = (r.evidence || [])[i]; return e ? e.fact + "|" + JSON.stringify(e.value) : ""; }));
+    const rows = (t.findings || []).map((f) => {
+      const [c, word] = FSTATUS[f.status] || FSTATUS.unknown;
+      const s = { name: f.source ? String(f.source).replace(/^public:/, "") : "", url: f.evidence_url, retrieved_at: f.captured_at, confidence: f.confidence };
+      return `<tr class="${hl.has(f.fact + "|" + JSON.stringify(f.value)) ? "hl" : ""}"><td><span class="dot ${c}" title="${word}"></span></td>
+        <td><b>${esc(factName(f.fact, r.business))}</b>${f.needs_human ? `<span class="human">person must verify</span>` : ""}<div class="fv">${esc(tidy(fmtVal(f.value)))}</div>${f.note ? `<div class="fn">${esc(f.note)}</div>` : ""}${s.name || s.url ? `<div class="fs">${srcChip(s)}</div>` : ""}</td></tr>`;
+    }).join("");
+    const srcs = (t.sources || []).map((x) => srcChip({ name: x.name, url: x.url, retrieved_at: x.retrieved_at })).join("");
+    return `<div class="step-head">${agentImg(t.agent, 22)}<div><b class="cap1">${esc(t.agent)}</b> <span class="faint small">${esc(t.computed_by === "llm" ? "LLM" : "code")}${t.ms != null ? ` · ${t.ms} ms` : ""}${t.confidence != null ? ` · confidence ${t.confidence}` : ""}</span>
+        <div class="q">${esc(t.role || "")}</div></div></div>
+      ${t.summary ? `<div class="step-sum">${esc(t.summary)}</div>` : ""}
+      ${arrow(t.signal)}
+      ${inputs.length ? `<div class="kv"><span class="k">Inputs</span>${inputs.map(([k, v]) => `<span class="pillk">${esc(k.replace(/_/g, " "))}: ${esc(tidy(fmtVal(v)))}</span>`).join("")}</div>` : ""}
+      ${rows ? `<table class="findings"><tbody>${rows}</tbody></table>` : `<div class="faint small">No findings recorded by this step.</div>`}
+      ${srcs ? `<div class="kv"><span class="k">Sources</span>${srcs}</div>` : ""}
+      ${t.handoff ? `<div class="kv"><span class="k">Hands off</span><span class="small">${esc(t.handoff)}</span></div>` : ""}`;
+  }
+  function sourcesHtml(r) {
+    const seen = new Map();
+    const add = (name, url, when, agent) => {
+      if (!name) return; const k = (name + "|" + (url || "")).toLowerCase();
+      const cur = seen.get(k) || { name, url, when: "", agents: new Set() };
+      if (when && (!cur.when || day(when) > cur.when)) cur.when = day(when);
+      cur.agents.add(agent); seen.set(k, cur);
+    };
+    (r.trace || []).forEach((t) => (t.sources || []).forEach((x) => add(x.name, x.url, x.retrieved_at, t.agent)));
+    (r.trace || []).forEach((t) => (t.findings || []).forEach((f) => { if (f.evidence_url && /^public:/.test(f.source || "")) add(String(f.source).replace(/^public:/, ""), f.evidence_url, f.captured_at, t.agent); }));
+    const list = [...seen.values()];
+    return `<details class="pillar" data-p="sources"><summary><span class="ptitle">Sources</span>${chip("grey", `${list.length} touched`)}<span class="pline">Every source this review used, with retrieval dates</span></summary>
+      <div class="pillar-body"><table class="findings srcs"><tbody>${list.map((x) => `<tr><td><b>${esc(x.name)}</b><div class="fn">${[...x.agents].map(esc).join(", ")} agent${x.agents.size > 1 ? "s" : ""}</div></td><td class="small muted">${x.when ? "retrieved " + esc(x.when) : "cached kit / benchmark"}</td><td>${x.url ? ext(x.url, "Open") : ""}</td></tr>`).join("")}</tbody></table>
+      <div class="muted small">Everything is read from local caches during the demo; nothing is fetched live.</div></div></details>`;
+  }
+  let guideCache = null;
+  async function openLegend() {
+    let dlg = document.getElementById("legend");
+    if (!dlg) {
+      dlg = document.createElement("dialog"); dlg.id = "legend"; dlg.className = "legend";
+      document.body.appendChild(dlg);
+      dlg.addEventListener("click", (e) => { if (e.target === dlg || e.target.closest("[data-close]")) dlg.close(); });
+    }
+    dlg.innerHTML = `<div class="legend-in"><div class="loading"><span class="spinner"></span>Loading the signal guide…</div></div>`;
+    if (!dlg.open) dlg.showModal();
+    try {
+      const g = guideCache || (guideCache = await api("/api/signal-guide"));
+      const look = (g.lookalike_accuracy || []).filter((x) => x.auc != null);
+      const rent = g.rent_accuracy;
+      dlg.innerHTML = `<div class="legend-in">
+        <div class="legend-top"><h2>How to read the signals</h2><button class="btn ghost small" data-close>Close</button></div>
+        <div class="chips" style="margin:6px 0 12px">${EFFECTS.map(([, n, c]) => chip(c, n)).join("")}</div>
+        <ul class="plain">${(g.principles || []).map((x) => li("grey", "·", esc(x))).join("")}</ul>
+        <div class="ph" style="margin-top:14px">Verdict rule</div>
+        <dl class="vrule">${Object.entries(g.verdict || {}).map(([k, v]) => `<div><dt>${verdictBadgeSmall(k)}</dt><dd>${esc(v)}</dd></div>`).join("")}</dl>
+        <div class="ph" style="margin-top:14px">Signals<span class="aside">thresholds read from the code</span></div>
+        <div class="sig-grid">${(g.signals || []).map((x) => `<div class="sig well"><div class="sig-h"><b>${esc(x.name)}</b><span class="faint small">${esc(x.agent)} agent · ${esc(x.pillar)}</span></div>
+          <div class="small muted">${esc(x.measures)}</div>
+          <div class="sig-r"><span class="arrow green">↑</span><span>${esc(x.supports)}</span></div>
+          <div class="sig-r"><span class="arrow amber">↓</span><span>${esc(x.against)}</span></div>
+          <div class="sig-r"><span class="arrow grey">?</span><span>${esc(x.unknown)}</span></div>
+          <div class="small"><span class="faint">Source:</span> ${esc(x.source)}</div>
+          <div class="small"><span class="faint">How accurate:</span> ${esc(x.accuracy)}</div></div>`).join("")}</div>
+        ${look.length ? `<div class="ph" style="margin-top:14px">Lookalike accuracy by business<span class="aside">spatial hold-out AUC · 0.5 = chance · votes at ≥ ${g.thresholds.validated_auc}</span></div>
+          <table class="findings acc"><tbody>${look.map((x) => `<tr><td>${esc(x.label)}</td><td class="num">${x.auc.toFixed(2)}</td><td><div class="bar"><span style="width:${Math.max(0, (x.auc - 0.5) / 0.5 * 100)}%"></span></div></td><td class="small ${x.votes ? "" : "faint"}">${esc(x.note)}</td></tr>`).join("")}</tbody></table>` : ""}
+        ${rent ? `<div class="ph" style="margin-top:14px">Rent model vs recent comps<span class="aside">median error on ${num(rent.held_out)} held-out signed deals · trained on ${num(rent.deals_trained)}</span></div>
+          <table class="findings acc"><thead><tr><th>Space use</th><th>Model</th><th>Comps</th><th>Range holds</th></tr></thead><tbody>${rent.by_use.map((x) => `<tr><td>${esc(x.use)} <span class="faint small">n=${x.n}</span></td><td class="num">${x.model_error_pct}%</td><td>${x.comps_error_pct}%</td><td>${x.range_coverage_pct ?? "—"}%${x.model_wins ? "" : ` <span class="faint small">comps better here</span>`}</td></tr>`).join("")}</tbody></table>` : ""}
+      </div>`;
+    } catch (e) { dlg.innerHTML = `<div class="legend-in"><div class="error">Signal guide unavailable: ${esc(e.message)}</div><button class="btn ghost small" data-close>Close</button></div>`; }
+  }
+  document.addEventListener("click", (e) => { if (e.target.closest("[data-legend]")) { e.preventDefault(); openLegend(); } });
+  function verdictBadgeSmall(v) { return chip(VERDICT_CHIP[v] || "grey", VLABEL[v] || v); }
+
   function figures(r) {
     const m = r.pillars.money, rent = m.rent || {}, req = m.required || {}, months = m.months_of_rent_after_opening;
     const dem = look(DEMAND, r.pillars.demand.verdict)[1];
@@ -680,7 +795,7 @@
     const P = r.pillars, m = P.money, sp = P.space, d = P.demand, i = inputs();
     const ind = (state.industries || []).find((x) => x.key === r.business) || {};
     const fit = look(FIT, sp.status), aff = look(AFFORD, m.affordability), dem = look(DEMAND, d.verdict);
-    const recs = P.records || [], permits = P.permits || [];
+    const recs = P.records || [], permits = P.permits || [], jur = r.jurisdiction || {};
     const conflicts = recs.filter((x) => x.status !== "unknown");
     const rent = m.rent || {};
     const dw = m.delay_what_if || {};
@@ -718,9 +833,9 @@
         </ul></div></details>
       <details class="pillar" data-p="records"><summary><span class="ptitle">Records</span>${conflicts.length ? chip("amber", `${conflicts.length} to check`) : recs.length ? chip("grey", `${recs.length} unconfirmed`) : chip("green", "No conflicts")}<span class="pline">${recs.length ? esc(recs[0].note.split(".")[0]) : "CoStar's record and the linked scans agree on what we could check"}</span></summary>
         <div class="pillar-body"><ul class="plain">${recs.length ? recs.map((x) => li(x.status === "unknown" ? "grey" : "amber", x.status === "unknown" ? "?" : "!", `<b>${esc(x.fact.replace(/_/g, " "))}</b>: ${esc(Array.isArray(x.value) ? x.value.join(", ") : typeof x.value === "object" ? JSON.stringify(x.value) : x.value)}<br><span class="muted small">${esc(x.note)}</span>${x.evidence_url ? " " + ext(x.evidence_url, "Open") : ""}${src(x.source)}`)).join("") : li("green", "✓", "No disagreements between CoStar and the linked tours")}</ul></div></details>
-      <details class="pillar" data-p="permits"><summary><span class="ptitle">Permits</span>${chip("amber", `${permits.length} to verify`)}<span class="pline">City change-of-use path + business licenses. None counted as cleared.</span></summary>
+      <details class="pillar" data-p="permits"><summary><span class="ptitle">Permits</span><span class="chips">${jur.code === "houston" ? chip("green", "City of Houston") : jur.code === "harris_unincorporated" ? chip("amber", "Harris County") : jur.place ? chip("amber", jur.place) : chip("grey", "Jurisdiction unknown")}${chip("amber", `${permits.length} to verify`)}</span><span class="pline">${jur.code === "harris_unincorporated" ? "City of Houston permits don't apply; Harris County does." : `${esc((r.permit_authority || {}).name || "City")} change-of-use path + business licenses.`} None counted as cleared.</span></summary>
         <div class="pillar-body"><ul class="plain permits">${permits.map((x) => `<li><span class="mk amber">!</span><span><b>${esc(x.title)}</b> · <span class="muted">${esc(x.authority)}</span><br><span class="small">${esc(x.detail)}</span></span>${x.url ? ext(x.url, "Official page") : ""}</li>`).join("")}</ul>
-          <div class="muted small">Assumes City of Houston rules. Some "Houston" addresses are in unincorporated Harris County; confirm the jurisdiction for this pin. No timelines are claimed.</div></div></details>
+          <div class="muted small">${jur.verified ? `Jurisdiction from the pin, not the postal city: ${esc(jur.note || "")}${src("Census geocoder")} ${ext(jur.evidence_url, "Boundary lookup")}` : jur.place ? esc(jur.note || "") : `Jurisdiction not verified (${esc(jur.note || "not looked up")}): City of Houston rules are shown as an assumption.`} No timelines are claimed; nothing here is an approval.</div></div></details>
       <details class="pillar" data-p="neighborhood"><summary><span class="ptitle">Neighborhood</span>${chip(dem[0], dem[1])}<span class="pline">${esc(d.headline || "")}</span></summary>
         <div class="pillar-body">${d.insight ? `<div><b>${esc(d.insight)}</b></div>` : ""}
           <ul class="plain">${(d.reasons || []).map((x) => { const [c, mk] = stanceMark(x.stance); return li(c, mk, `${esc(x.reason)} <span class="muted small">(${esc(x.signal)})</span>`); }).join("")}${(d.unknown || []).map((x) => li("grey", "?", esc(typeof x === "string" ? x : x.reason || JSON.stringify(x)))).join("")}</ul>
@@ -750,21 +865,31 @@
       const box = el.querySelector("#review"), k = state.tab, p = list.find((x) => pairKey(x) === k), r = state.reviews[k];
       if (state.reviewErr[k]) { box.innerHTML = `<div class="error">${esc(state.reviewErr[k])}</div>`; return; }
       if (!r) { box.innerHTML = `<div class="loading"><span class="spinner"></span>Agents are reviewing ${esc(p.label)} at ${esc(p.address)}…</div>`; return; }
-      box.innerHTML = `<div class="inv"><div class="inv-main" id="vc" style="opacity:0">${verdictCard(r, p)}${pillarsHtml(r, p)}</div><aside class="inv-side">${figures(r)}${mission(r)}</aside></div>`;
+      box.innerHTML = `<div class="inv"><div class="inv-main" id="vc" style="opacity:0">${verdictCard(r, p)}${whyHtml(r)}${pillarsHtml(r, p)}${sourcesHtml(r)}</div><aside class="inv-side">${figures(r)}${mission(r)}</aside></div>`;
       const steps = [...box.querySelectorAll(".mstep")];
       const reveal = () => { const vc = box.querySelector("#vc"); if (vc) vc.style.opacity = 1; };
       if (animate) { steps.forEach((s, j) => later(() => s.classList.add("lit"), 80 + j * 110)); later(reveal, 80 + steps.length * 110); }
       else { steps.forEach((s) => s.classList.add("lit")); reveal(); }
-      steps.forEach((s) => s.onclick = () => {
+      const openStep = (s, highlight, force) => {
         const t = r.trace[+s.dataset.k], det = box.querySelector("#trace-detail");
         const open = s.classList.contains("active");
         steps.forEach((x) => x.classList.remove("active"));
-        if (open) { det.innerHTML = ""; return; }
+        if (open && !force) { det.innerHTML = ""; return; }
         s.classList.add("active");
-        det.innerHTML = `<b style="text-transform:capitalize">${esc(t.agent)}</b> · <span class="muted">${esc(t.role)}</span>
-          <div style="margin-top:6px">${esc(t.summary || "")}</div>
-          <div class="faint small" style="margin-top:6px">Computed by ${esc(t.computed_by)}${t.confidence != null ? ` · confidence ${t.confidence}` : ""}${t.ms != null ? ` · ${t.ms} ms` : ""} · hands off: ${esc(t.handoff || "")}</div>
-          ${(t.findings || []).length ? `<details style="margin-top:6px"><summary class="link-btn">Findings (${t.findings.length})</summary><pre>${esc(JSON.stringify(t.findings, null, 1).slice(0, 4000))}</pre></details>` : ""}`;
+        det.innerHTML = stepHtml(t, r, highlight);
+      };
+      steps.forEach((s) => s.onclick = () => openStep(s));
+      box.querySelectorAll(".why-row").forEach((row) => {
+        const go = () => {
+          const s = steps.find((x) => r.trace[+x.dataset.k].agent === row.dataset.agent);
+          if (!s) { toast(`The ${row.dataset.agent} step is not in this run`); return; }
+          const why = (r.because || [])[+row.dataset.i] || {};
+          openStep(s, why.evidence || [], true);
+          box.querySelectorAll(".why-row").forEach((x) => x.classList.toggle("on", x === row));
+          const det = box.querySelector("#trace-detail");
+          (det.querySelector("tr.hl") || s).scrollIntoView({ behavior: "smooth", block: "center" });
+        };
+        row.onclick = go; row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
       });
       const space = box.querySelector(".space3d");
       box.querySelector('details[data-p="space"]').addEventListener("toggle", function onT(ev) {
