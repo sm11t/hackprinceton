@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent / "output" / "ventures"
-KINDS = {"budget": "I have a budget", "idea": "I have an idea", "space": "I have a space"}
+KINDS = {"budget": "I have a budget", "idea": "I know what to open", "space": "I have a space",
+         "both": "I know what and where"}
 STAGES = ["budget", "scan", "opportunities", "shortlist", "investigate", "decide", "plan"]
 STATUSES = ["exploring", "shortlisted", "investigating", "verifying", "ready", "paused", "dropped"]
 FIELDS = {"name", "stage", "status", "inputs", "shortlist", "chosen", "checklist", "notes", "summary"}

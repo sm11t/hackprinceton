@@ -179,8 +179,32 @@ def promising(demand):
     return demand["verdict"] == "supported" or (demand["verdict"] == "mixed" and demand["score"] > 0)
 
 
-def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), include=None, top=8):
-    """Every listed space x every business through the gates; returns the funnel, directions and best pairs."""
+def jurisdiction_cached(lat, lon):
+    """Which authority permits this point, from the jurisdiction cache only (never a network call in a scan)."""
+    try:
+        from jurisdiction import fetch_census, resolve_jurisdiction
+    except ImportError:
+        return {"code": None, "verified": False, "place": None}
+
+    def cached(la, lo):
+        import os
+        old = os.environ.get("JURISDICTION_OFFLINE")
+        os.environ["JURISDICTION_OFFLINE"] = "1"
+        try:
+            return fetch_census(la, lo)
+        finally:
+            if old is None:
+                os.environ.pop("JURISDICTION_OFFLINE", None)
+            else:
+                os.environ["JURISDICTION_OFFLINE"] = old
+    return resolve_jurisdiction(lat, lon, fetch=cached)
+
+
+def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), include=None, top=8, property_ids=None):
+    """Every listed space x every business through the gates; returns the funnel, directions and best pairs.
+
+    include limits the businesses (I know what I want to open); property_ids limits the buildings (I have a space).
+    The last gate is the compliance preflight from the jurisdiction cache: who permits each surviving building."""
     from venture_costs import cash_to_open, rent_for
     started = time.perf_counter()
     market, index = load_index(kit)
@@ -190,12 +214,18 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
     funnel = {"spaces": 0, "combinations": 0, "building_can_host": 0, "affordable": 0, "neighborhood_support": 0,
               "cost_not_estimated": 0, "rent_not_listed": 0}
     pairs, unpriced = [], {}
+    where, tally = {}, {"houston": 0, "harris_unincorporated": 0, "other_city": 0, "unverified": 0}
+    fate = {}  # business -> (furthest gate 0-3, reason), filled only when scanning chosen buildings
+    reach = {}  # building -> furthest gate any business x space there passed (0 none, 1 building, 2 cash, 3 neighborhood)
     for pid, b in market.items():
         if center and radius_mi and nb.miles(center[0], center[1], b["lat"], b["lon"]) > radius_mi:
+            continue
+        if property_ids and pid not in property_ids:
             continue
         row = index.get(pid)
         if not row:
             continue
+        reach[pid] = 0
         for sp in b["spaces"]:
             funnel["spaces"] += 1
             rent = rent_for(sp)
@@ -203,11 +233,17 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                 funnel["combinations"] += 1
                 fit = row["fits"].get(sp["value"], {}).get(key)
                 if not fit or fit["status"] == "no":
+                    if property_ids and fate.get(key, (-1,))[0] < 0:
+                        fate[key] = (0, "; ".join((fit or {}).get("reasons") or ["No space needs recorded"]))
                     continue
                 funnel["building_can_host"] += 1
+                reach[pid] = max(reach[pid], 1)
                 cost = cash_to_open(key, sp["sf"], rent["monthly"], budget=budget, reserve=reserve,
                                     building_type=b["facts"].get("type"))
                 if cost["affordability"] == "over":
+                    if property_ids and fate.get(key, (-1,))[0] < 1:
+                        fate[key] = (1, f"Cash to open + reserve is ${cost['required']['low']:,.0f} even in the low case, "
+                                        f"over the ${budget:,.0f} budget")
                     continue
                 demand = row["demand"].get(key)
                 if cost["affordability"] == "unknown":
@@ -219,10 +255,21 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                         u["places"] += 1
                     continue
                 funnel["affordable"] += 1
+                reach[pid] = max(reach[pid], 2)
                 funnel["rent_not_listed"] += cost["affordability"] == "rent_unknown"
                 if not demand or not promising(demand):
+                    if property_ids and fate.get(key, (-1,))[0] < 2:
+                        verdict = (demand or {}).get("verdict") or "unknown"
+                        fate[key] = (2, "Neighborhood: not enough evidence to call it" if verdict == "unknown" else
+                                     f"Neighborhood: {verdict}" + (": " + demand["reasons"][0].lower()
+                                                                    if demand.get("reasons") else ""))
                     continue
                 funnel["neighborhood_support"] += 1
+                reach[pid] = max(reach[pid], 3)
+                if pid not in where:
+                    where[pid] = jurisdiction_cached(b["lat"], b["lon"])
+                w = where[pid]
+                tally[w.get("code") if w.get("code") in tally else "other_city" if w.get("place") else "unverified"] += 1
                 pairs.append({
                     "business": key, "label": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"],
                     "property_id": pid, "address": b["address"], "lat": b["lat"], "lon": b["lon"],
@@ -268,14 +315,34 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
         costs = sorted(d.pop("cash_to_open"))
         d["cash_to_open_range"] = [costs[0], costs[-1]] if costs else None
         d["why"] = (d["pairs"][0]["demand"]["reasons"] or ["Neighborhood signals are mixed"])[0]
+    # Compliance preflight (Jayant's jurisdiction lookup, cached): who permits each surviving building. Residential
+    # buildings already failed the building gate. Another city's or an unverified jurisdiction is kept but flagged.
+    for p in pairs:
+        w = where.get(p["property_id"]) or {}
+        p["jurisdiction"] = {"code": w.get("code"), "place": w.get("place"), "verified": bool(w.get("verified"))}
+    funnel["compliance"] = tally
+    funnel["authority_identified"] = tally["houston"] + tally["harris_unincorporated"]
+    for pid, w in where.items():
+        if w.get("verified"):
+            reach[pid] = 4
+    dots = [[round(market[pid]["lat"], 4), round(market[pid]["lon"], 4), stage] for pid, stage in reach.items()
+            if market[pid].get("lat") is not None and market[pid].get("lon") is not None]
     return {"budget": budget, "reserve": reserve, "funnel": funnel, "directions": ranked,
+            "map": {"buildings": dots, "after_gate": [sum(1 for d in dots if d[2] >= k) for k in range(5)],
+                    "note": "One dot per building with listed space; it stays lit while any business x space there "
+                            "passes the gate."},
             "cost_not_estimated": sorted(unpriced.values(), key=lambda u: -u["places"]),
-            "pairs": best[:top * 5], "excluded_groups": excluded_groups, "businesses_considered": len(keys),
+            "pairs": best[:top * 5], "all_pairs": len(best),
+            "not_here": sorted(({"business": k, "label": INDUSTRIES[k]["label"], "group": INDUSTRIES[k]["group"],
+                                 "stopped_at": ["building", "cash", "neighborhood"][g], "why": why}
+                                for k, (g, why) in fate.items() if k not in {p["business"] for p in pairs}),
+                               key=lambda r: (["neighborhood", "cash", "building"].index(r["stopped_at"]), r["label"])), "excluded_groups": excluded_groups, "businesses_considered": len(keys),
             "elapsed_ms": round(1000 * (time.perf_counter() - started)),
             "basis": ("Gates in order: the building can host the business (CoStar facts vs space needs), cash to open "
                       "plus your reserve fits the budget (sourced opening-cost benchmarks, labelled; where the listing "
                       "has no rent, the cost before rent must fit and the pair is labelled), and the "
-                      "neighborhood supports it (supported, or mixed with a positive total). Lease only. One best "
+                      "neighborhood supports it (supported, or mixed with a positive total), then the compliance "
+                      "preflight says who permits it (Census boundary, not the postal city). Lease only. One best "
                       "space per building per business.")}
 
 

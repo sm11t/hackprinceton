@@ -467,22 +467,67 @@ def main():
                     if route.path == "/api/opportunities":
                         lat, lon, radius = number("lat"), number("lon"), number("radius")
                         exclude = [k for k in params.get("exclude", [""])[0].split(",") if k]
+                        include = [k for k in params.get("include", [""])[0].split(",") if k] or None
+                        pids = {int(x) for x in params.get("property_id", [""])[0].split(",") if x.isdigit()} or None
                         body = opportunity.scan(budget, reserve, args.kit, center=(lat, lon) if lat and lon else None,
-                                                radius_mi=radius, exclude=exclude, top=int(number("top", 8)))
+                                                radius_mi=radius, exclude=exclude, top=int(number("top", 8)),
+                                                include=include, property_ids=pids)
                     else:
                         property_id = params.get("property_id", [""])[0]
                         if not property_id.isdigit():
                             raise ValueError("Give a CoStar property_id.")
+                        bank = None
+                        if params.get("nessie", [""])[0]:  # the user's other bills, from the Nessie sandbox account
+                            try:
+                                import suite_nessie
+                                bank = suite_nessie.read(params["nessie"][0] if params["nessie"][0] != "1" else None)
+                            except (RuntimeError, OSError, ValueError, KeyError):
+                                bank = None
                         body = venture_review.review(params.get("business", [""])[0], int(property_id),
                                                      params.get("suite", [""])[0] or None, budget, reserve, args.kit,
                                                      delay_months=int(number("delay", 0)),
-                                                     explain=params.get("explain", ["0"])[0] == "1")
+                                                     explain=params.get("explain", ["0"])[0] == "1", bank=bank)
                     self.send(json.dumps(body, default=str).encode(), "application/json")
                 except ValueError as error:
                     self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
                 except (OSError, RuntimeError, KeyError):
                     self.send(b'{"error":"Opportunity data unavailable. Run opportunity.py --build once."}',
                               "application/json", 502)
+                return
+            if route.path == "/api/site/preflight":
+                try:
+                    property_id = params.get("property_id", [""])[0]
+                    if not property_id.isdigit():
+                        raise ValueError("Give a CoStar property_id.")
+                    body = venture_review.site_preflight(int(property_id), args.kit)
+                    self.send(json.dumps(body, default=str).encode(), "application/json")
+                except ValueError as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError, KeyError):
+                    self.send(b'{"error":"Building check unavailable. Check the kit."}', "application/json", 502)
+                return
+            if route.path == "/api/places":
+                q = params.get("q", [""])[0].strip()[:80]
+                listed = {b["property_id"]: b for b in opportunity.load_market(args.kit)}
+                rows = lookup(properties.values(), q) if len(q) >= 2 else []
+                out = []
+                for row in rows[:40]:
+                    pid = int(row["PropertyId"]) if row["PropertyId"].isdigit() else None
+                    b = listed.get(pid)
+                    out.append({"property_id": pid, "address": row["Address"], "listed_spaces": len(b["spaces"]) if b else 0})
+                out.sort(key=lambda r: -r["listed_spaces"])
+                self.send(json.dumps({"query": q, "places": out[:12], "matches": len(rows)}).encode(), "application/json")
+                return
+            if route.path == "/api/nessie/account":
+                try:
+                    import suite_nessie
+                    self.send(json.dumps(suite_nessie.read(params.get("id", [""])[0] or None)).encode(), "application/json")
+                except (RuntimeError, OSError, ValueError, KeyError) as error:
+                    self.send(json.dumps({"error": f"Nessie unavailable: {error}"}).encode(), "application/json", 502)
+                return
+            if route.path == "/api/signal-guide":
+                import signal_guide
+                self.send(json.dumps(signal_guide.guide(), default=str).encode(), "application/json")
                 return
             if route.path == "/api/neighborhood/industries":
                 self.send(json.dumps(neighborhood.industry_catalog()).encode(), "application/json")
