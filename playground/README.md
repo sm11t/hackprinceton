@@ -130,6 +130,43 @@ Tanner demo path: open `/pilot` → inspect aerial/tour → compare the three ev
 change opening delay from 0 to 3 → observe the $5,000 reserve gap in month 6 →
 review the suite identity and dimension check before estimating court count.
 
+### Tanner Location & Demand
+
+Load the sponsor keys along with `UPSTAGE_API_KEY`, `TAVILY_API_KEY` and the
+activated `CENSUS_API_KEY` into your shell. From the repo root, run:
+
+```sh
+uv run playground/location_run.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" \
+  --output playground/output/location-tanner.json
+```
+
+CoStar archive joins, Matterport rooms and Vexcel structure data build the
+property evidence packet. The Census geocoder, FEMA and ACS provide public
+context. A Deep Agents supervisor calls three specialists for property
+evidence, market research and independent claim review. Market research makes
+at most one Tavily search and extracts up to three pages. Candidate web claims
+must match an exact excerpt from a fetched page and pass the reviewer. Census
+and FEMA summaries come directly from the API values. Demand remains unverified.
+
+The kit run sends selected property evidence fields to Upstage. Use
+`--public-only` for the public Tanner address and public sources. Add
+`--skip-market` to omit Tavily retrieval. Individual source gaps are recorded
+in the review. The saved report is local and gitignored.
+
+Start the existing Python web server, choose Tanner Road and indoor pickleball,
+then open the saved review in the Location & Demand panel. Re-run the CLI and
+reload the review to refresh it. The endpoint serves accepted findings and
+source references. Raw sponsor and search payloads stay in the local report.
+
+### Live Location & Demand demo
+
+Start the web server with the CoStar kit and the same credentials as the
+Location & Demand CLI. Open `/location-demo`, pick Houston or Los Angeles,
+filter the property dropdown by address, choose a proposed use, and click
+**Run live review**. Houston starts with 9700 Tanner Rd selected. Allow a few
+minutes for source retrieval and agent review. The page shows findings,
+citations, and verification gaps. Each run uses its own temporary report and
+does not overwrite the saved Tanner review.
 ## Evidence reconciliation (`reconcile.py`)
 
 Cross-checks CoStar, Matterport and public data for one property and emits
@@ -141,13 +178,61 @@ status (agrees|conflict|unknown), needs_human, note`.
 set -a; source .env; set +a
 python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --property-id 23296
 python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --scan-identity Houston
+python3 playground/reconcile.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --scan-occupancy Houston
 ```
+
+**Occupancy at scan time** (from Asmit's data pilot, `attdates.py` + `hist.py`):
+for a scan that names a suite, find the CoStar tenancy covering that suite on
+the scan's `originationDate`. Suites are matched from both the space rows and
+the tenant's company record, and spellings are normalised (`C-1A` = `C1A`).
+- Lease running well past the scan → `conflict` (marketing scans are usually of
+  empty space, so CoStar's record is stale or the scan shows the tenant's own space).
+- Lease ending within a year, or move-in under 180 days before the scan date →
+  `unknown`, needs a look at the tour photos (pre-marketing is normal).
+- Tenant moved in after the scan, or left before it → `agrees` (the usual false alarm).
+- Scan captioned for another building → not compared.
+
+Houston: 356 suite-named scans: 135 agree, 33 conflict, 188 unknown (mostly no
+tenancy recorded for the suite). Takes ~50 s.
+
+**CoStar size math:** gross area vs typical floor × stories (±20%) and rentable
+> gross. E.g. 1800 Sherwood Forest St: 24,567 sq ft gross vs 18,000 sq ft × 1
+story = 1.36× → conflict. The aerial footprint vs floor-size check is in
+`exterior.py` (physical fit), not duplicated here.
 
 Checks: scan caption address vs CoStar address, scan date (CoStar
 `originationDate`, never Matterport `created`), ceiling height of the largest
 scanned space vs CoStar, FEMA flood zone at the pin. `--offline` skips network
 calls. Houston run: 7 of 1,731 scanned properties have a scan captioned with a
 different address (most captions name no address, so only ~44 can be tested).
+
+## Market ranking (`market_rank.py`)
+
+"Where should I do this?" Ranks every active for-lease space in a market for one use and
+cash budget, then links each result into the full `/maximo` review (suite preselected, review
+runs on open). On `/maximo`, use **Find the best matches** under the form.
+
+```sh
+set -a; source .env; set +a
+python3 playground/market_rank.py --kit "$HOME/Downloads/costar-hackathon-kit.zip" --use "indoor pickleball" --capital 500000
+```
+
+API: `GET /api/maximo/rank?use=&capital=&reserve=&market=Houston[&min_sf=&max_sf=]`. The
+server reads the market once at startup (~30 s, in the background), then each ranking takes
+0.5–3 s.
+
+Rules: property type must suit the use, residential properties and dwelling tours are out,
+`space_fit` on CoStar facts must not rule it out, and the space must meet a minimum size
+(pickleball: 3 courts = 5,400 sq ft, matching the cash scenario's 3-court revenue; fitness
+1,500 sq ft; others 1,000 sq ft; override with `--min-sf`). Ranked by fit verdict, then
+within budget, then no evidence flag (tour for another address, CoStar size math, asking rent
+under $3/sq ft/yr), then a listed rent, then lowest planning cash to open. One space per
+building, no numeric score. Limits: no per-building aerial/scan data, so most non-pickleball
+uses are "investigate"; cash uses the same unverified allowances as the review; lease only.
+
+Houston, pickleball, $500k: 2,431 spaces in 240 buildings → 37 pass, top 5 = 15603 W Hardy
+Rd #350, 5829 W Sam Houston Pky #1009, 6855 Wynnwood Ln (9,900 sq ft), 1923 Kolfahl St,
+5025 Jensen Dr.
 
 ## Physical fit (`space_fit.py`, `exterior.py`, `interior.py`)
 
@@ -229,6 +314,32 @@ The response says where the rent came from (`rent_source`, `bills`), and `/pilot
 If the kit can't be read or the space has no asking rent, the scenario's assumed rent stays
 and `rent_source` is `scenario assumption`. Build cost, bookings and other dollars remain
 editable assumptions.
+
+### Combined redevelopment review
+
+Open `/maximo` and choose a kit property, an advertised suite, and a proposed use.
+The review brings together dated identity and occupancy checks, space and condition,
+listing terms, location research, approvals to confirm, and a cash comparison.
+Tanner's demo shortlist card also opens the combined review with your budget inputs.
+
+Start the server using the kit and sponsor credentials above. Live location research
+also needs `uv` and `UPSTAGE_API_KEY`; configure Tavily and Census for their findings.
+With `--offline`, the review uses the kit and any cached property evidence and skips
+live market research. `--nessie-account` reads sandbox starting cash and recurring
+bills. Review the displayed monthly costs for overlap with those bills.
+
+The same advertised suite must match one active listing before its base rent is
+prefilled. Cash inputs remain editable, and the approval allowance, build-out, and
+delay update the modeled opening month together. Before relying on court capacity,
+confirm the scan covers the advertised suite and obtain a dimensioned plan. City
+guidance identifies approvals to investigate. Parcel jurisdiction, approved use,
+and paid demand still require verification.
+
+A property review pauses when the kit cannot establish the commercial premises for
+the selected deal. Cypresswood (966604) is the residential regression, Tanner Suite A
+and Wynnwood's unnamed 9,900 sq ft listing are the commercial paths. A separately
+requested hypothetical scenario uses editable placeholders. The property decision
+shows evidence by issue and records behind expandable details.
 
 ## Market rent check (trained model)
 

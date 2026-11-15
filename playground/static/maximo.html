@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Property review · Reuse</title>
+  <link rel="stylesheet" href="/static/workspace.css">
+  <link rel="stylesheet" href="/static/maximo.css">
+  <script src="/static/maximo.js" defer></script>
+  <script src="/static/market-rank.js" defer></script>
+</head>
+<body><main class="review-page">
+  <nav class="review-nav"><a class="brand" href="/">↗ reuse</a><a href="/pilot">Tanner pilot</a></nav>
+  <h1>What can this space become?</h1>
+  <p>Check the space, the asking terms, and how much cash you’d need to open.</p>
+  <form id="review" class="review-form">
+    <label>Market<select id="city"><option>Houston</option><option>Los Angeles</option></select></label>
+    <label>Filter addresses<input id="filter" type="search" placeholder="e.g. Tanner"></label>
+    <label>Property<select id="property" required></select></label>
+    <label>Advertised suite<select id="suite"></select></label>
+    <label>Proposed use<select id="use"><option>indoor pickleball</option><option>fitness studio</option><option>warehouse / storage</option><option>flex workspace</option><option>office / service</option><option>retail / showroom</option></select></label>
+    <label>Deal type<select id="ownership"><option value="lease">Lease</option><option value="buy">Buy</option></select></label>
+    <label>Available cash ($)<input id="budget" type="number" min="0" value="320000" required></label>
+    <label>Keep in reserve ($)<input id="reserve" type="number" min="0" value="50000" required></label>
+    <button class="primary" disabled>Run property review</button>
+  </form>
+  <section class="market-rank panel">
+    <h2>Not sure where?</h2>
+    <p>Rank every listed space in the market for the use and cash above, then open one for the full review.</p>
+    <button type="button" class="secondary" id="rank-button">Find the best matches</button>
+    <p id="rank-status" role="status" aria-live="polite"></p>
+    <ol id="rank-results"></ol>
+    <p id="rank-basis" class="small muted"></p>
+  </section>
+  <p id="status" role="status" aria-live="polite">Loading properties…</p>
+  <div id="report"></div>
+</main></body>
+</html>
