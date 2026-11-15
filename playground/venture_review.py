@@ -47,7 +47,11 @@ HARRIS_STEPS = [  # unincorporated Harris County: the county permits, not the Ci
 AUTHORITY = {"houston": ("City of Houston (Houston Permitting Center)",
                          "https://www.houstontx.gov/business/plan/permits-inspections.html"),
              "harris_unincorporated": ("Harris County Office of the County Engineer",
-                                       "https://oce.harriscountytx.gov/Services/Permits/Permits-A-to-Z/Commercial-Building")}
+                                       "https://oce.harriscountytx.gov/Services/Permits/Permits-A-to-Z/Commercial-Building"),
+             "los_angeles": ("City of Los Angeles Building and Safety / Planning",
+                             "https://dbs.lacity.gov/services/search-online-building-records"),
+             "la_unincorporated": ("LA County Public Works / Planning",
+                                   "https://permits.lacounty.gov/permits/building-and-safety/")}
 COMPLIANCE_FACTS = ("identity", "occupancy", "fire", "accessibility", "parking", "mep", "business_space_fit",
                     "official_process", "scan_address")
 
@@ -263,6 +267,13 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
     if where.get("code") == "houston":
         add("supports", "permits", "Inside City of Houston limits (Census boundary): Houston's permit path applies",
             "jurisdiction", where.get("place") or "Houston", j_rule, j_refs)
+    elif where.get("code") == "los_angeles":
+        add("supports", "permits", "Inside City of Los Angeles limits (Census boundary): the City's permit path "
+            "applies", "jurisdiction", where.get("place") or "Los Angeles", j_rule, j_refs)
+    elif where.get("code") == "la_unincorporated":
+        add("check", "permits", "Outside Los Angeles city limits (unincorporated LA County): LA County permits it, "
+            "not the City of Los Angeles", "jurisdiction", "unincorporated " + (where.get("county") or "LA County"),
+            j_rule, j_refs, decides=True)
     elif where.get("code") == "harris_unincorporated":
         add("check", "permits", "Outside Houston city limits (unincorporated Harris County): City of Houston permits "
             "don't apply; Harris County does", "jurisdiction", "unincorporated " + (where.get("county") or "Harris County"), j_rule, j_refs,
@@ -378,6 +389,57 @@ def cash_months(cost, rent, budget, reserve, months=12, delay=3, extra_bills=Non
                     "revenue are modelled, so read it as 'how long could rent alone be covered'."}
 
 
+NOT_CALIBRATED = ("The neighborhood model is calibrated for the Houston area only (its ACS percentiles, supply rates, "
+                  "Texas licensed-childcare data and lookalike models). It is not applied to Los Angeles, so demand "
+                  "stays unknown here.")
+LA_STEPS = [  # City / County of Los Angeles: generic process only; no Houston or Texas rule is reused
+    ("Allowed use (zoning) for this parcel", "Los Angeles has zoning: confirm the parcel's zone allows this use "
+     "(ZIMAS for the City of LA; LA County Planning outside city limits)."),
+    ("Building permit and plan check for the tenant build-out", "Change of use or occupancy and build-out go through "
+     "plan check; trade permits follow."),
+    ("Fire and accessibility review", "Exits, occupant load and accessible route are reviewed with the plans."),
+    ("Final inspections and Certificate of Occupancy", "Final sign-offs before opening."),
+]
+
+
+def outside_houston(key, building, suite):
+    """Review inputs for a building outside Houston: building fit from CoStar facts (national planning ranges), and an
+    explicit 'not calibrated' neighborhood instead of Houston-calibrated signals."""
+    fit = nb.building_fit(key, building["facts"], suite)
+    if INDUSTRIES[key]["space"].get("outdoor_sf_per_unit") or key == "childcare":  # Texas licensing ratios
+        fit = dict(fit, capacity=None,
+                   reasons=[r for r in fit["reasons"] if "Room for" not in r],
+                   unknowns=[u for u in fit["unknowns"] if "outdoor play space" not in u]
+                   + ["California childcare licensing ratios are not modelled here: confirm capacity and outdoor "
+                      "space with California Community Care Licensing"])
+        fit["status"] = "check" if fit["status"] == "fits" else fit["status"]
+    city = building["address"].split(",")[-2].strip() if building["address"].count(",") >= 2 else "this market"
+    step = lambda agent, role, summary, findings=(), status="ok": {  # noqa: E731
+        "agent": agent, "role": role, "computed_by": "code", "inputs": {}, "sources": [], "findings": list(findings),
+        "summary": summary, "confidence": None, "handoff": "", "signal": None, "per_industry": {}, "status": status,
+        "ms": 0}
+    trace = [
+        step("planner", "Maps the request to a business", f"{INDUSTRIES[key]['label']} at a {city} listing"),
+        step("site", "Finds the point", f"{building['address']} ({building['lat']:.5f}, {building['lon']:.5f})",
+             [record("site_point", {"lat": building["lat"], "lon": building["lon"], "address": building["address"]},
+                     "costar", f"property-{building['property_id']}", None, 0.9, None, "agrees",
+                     note="CoStar property pin.")]),
+        step("building", "Can the building host it?", f"{fit['status']}: " + "; ".join(fit["reasons"] + fit["unknowns"]),
+             [record(f"{key}.building_fit", {"status": fit["status"], "space_sf": fit["space_sf"]}, "costar",
+                     f"property-{building['property_id']}", None, 0.6, None,
+                     "unknown" if fit["status"] == "check" else "agrees",
+                     note="; ".join(fit["reasons"] + fit["unknowns"]) + ". " + fit["basis"])]),
+        step("coordinator", "Combines neighborhood signals", "Not calibrated for " + city + ": demand unknown",
+             [record(f"{key}.neighborhood", None, "computed", "neighborhood-model", note=NOT_CALIBRATED)], "unknown"),
+    ]
+    decision = {"industry": key, "use": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"],
+                "verdict": "unknown", "headline": f"Not calibrated for {city}", "score": None,
+                "basis": NOT_CALIBRATED, "insight": None, "reasons": [],
+                "unknown": [{"signal": "neighborhood model", "reason": NOT_CALIBRATED}],
+                "lookalike_percentile": None, "lookalike_validated": False, "building": fit}
+    return {"decisions": [decision], "trace": trace, "narration": None, "narration_label": None}
+
+
 def licenses_for(key):
     try:
         from venture_license_data import LICENSES
@@ -420,8 +482,8 @@ def step(trace, agent, role, fn):
 def find_space(property_id, suite, kit, key=None):
     """The building and the listed space to review: the chosen suite, else the listed space that best suits the
     business's typical size (not the biggest one: costs scale with floor area)."""
-    from opportunity import load_market
-    building = next((b for b in load_market(kit) if b["property_id"] == int(property_id)), None)
+    from opportunity import find_building
+    building, _ = find_building(property_id, kit)
     if not building:
         return None, None
     space = next((s for s in building["spaces"] if s["value"] == suite), None)
@@ -452,7 +514,9 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
     suite = space["value"]
     trace, conditions, blockers = [], [], []
 
-    hood = nb.investigate(key, property_id=int(property_id), kit=kit, suite=suite, explain=explain)
+    market = building.get("market", "houston")
+    hood = (nb.investigate(key, property_id=int(property_id), kit=kit, suite=suite, explain=explain)
+            if market == "houston" else outside_houston(key, building, suite))
     decision = hood["decisions"][0] if hood["decisions"] else None
     fit = (decision or {}).get("building") or nb.building_fit(key, building["facts"], suite)
     trace.extend(s for s in hood["trace"] if s["agent"] in ("planner", "site", "building"))
@@ -540,14 +604,22 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
         compliance_holder["report"] = report
         where = (report or {}).get("jurisdiction") or {}
         code = where.get("code")
-        authority, authority_url = AUTHORITY.get(code, AUTHORITY["houston"])
+        authority, authority_url = AUTHORITY.get(code, AUTHORITY["houston" if market == "houston" else "los_angeles"])
         if code == "harris_unincorporated":
             steps = [{"title": t, "detail": d, "authority": authority, "url": authority_url, "status": "to verify"}
                      for t, d in HARRIS_STEPS]
+        elif market != "houston" or code in ("los_angeles", "la_unincorporated"):
+            steps = [{"title": t, "detail": d, "authority": authority, "url": authority_url, "status": "to verify"}
+                     for t, d in LA_STEPS]
         else:
             steps = [{"title": t, "detail": d, "authority": "City of Houston", "url": REFERENCES[ref][1],
                       "status": "to verify"} for t, d, ref in HOUSTON_STEPS]
-        licenses = licenses_for(key)
+        licenses = licenses_for(key) if market == "houston" else []
+        if market != "houston":
+            steps.insert(-1, {"title": "Business licences for this business (California / Los Angeles)",
+                              "detail": "Not modelled here: the licence list is Houston and Texas only. Check the "
+                                        "City of LA Office of Finance and the relevant state board for this business.",
+                              "authority": authority, "url": authority_url, "status": "to verify"})
         for lic in licenses:
             city_only = code == "harris_unincorporated" and "Houston" in lic["authority"]
             steps.insert(-1, {"title": lic["name"], "detail": (lic.get("applies_when") or "") + (
@@ -598,6 +670,9 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
     if where.get("code") == "harris_unincorporated":
         conditions.append("Outside Houston city limits (unincorporated Harris County): City of Houston permits "
                           "don't apply; Harris County does")
+    elif where.get("code") == "la_unincorporated":
+        conditions.append("Outside Los Angeles city limits (unincorporated LA County): LA County permits it, not the "
+                          "City of Los Angeles")
     elif not where.get("code") and where.get("place"):
         conditions.append(f"Inside {where['place']}, which has its own permitting office: Houston's path does "
                           "not apply")
@@ -734,11 +809,11 @@ def site_preflight(property_id, kit=None):
     """'I have a space': the building check before any business (Jayant's compliance_engine.preflight, as is), plus
     the listed spaces a business review can use. A residential building or an identity conflict stops here."""
     import compliance_engine as ce
-    from opportunity import load_market
+    from opportunity import find_building
     context = ce.context_from_kit(int(property_id), None, str(kit) if kit else None)
     report = ce.preflight(context)
     where = report.get("jurisdiction") or {}
-    building = next((b for b in load_market(kit) if b["property_id"] == int(property_id)), None)
+    building, _ = find_building(property_id, kit)
     spaces = [{"value": sp["value"], "suite": sp.get("suite"), "sf": sp.get("sf"),
                "label": f"Suite {sp['suite']}" if sp.get("suite") else f"{sp['sf']:,.0f} sq ft space",
                "monthly_rent": sp.get("monthly_rent"), "lease_basis": sp.get("lease_basis")}

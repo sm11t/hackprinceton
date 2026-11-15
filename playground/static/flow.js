@@ -112,7 +112,7 @@
     directions: { rail: "What it can become", stage: "Helix stage 1 · Discovery", head: () => `What ${kmoney(S.budget - S.reserve)} can become.`, lede: () => `${S.opp.directions.length} kinds of business have at least one space that fits, is affordable and has neighborhood support.`, tools: ["Cost ledger", "Neighborhood verdicts", "Lookalike accuracy (AUC)"] },
     shortlist: { rail: "Three places", stage: "Helix stage 1 · Selection", head: () => "Three places worth a closer look.", lede: () => "The best space for each direction. Pick one to follow through the agents; the others come back when you compare.", tools: ["Gate results per space"] },
     site: { rail: "Building check", stage: "Helix stage 2 · Building preflight", head: () => "Check the building before any business.", lede: () => "Who permits this address, from the pin's official boundary, and can it be used commercially at all.", tools: ["Jayant's compliance engine: preflight", "U.S. Census geocoder", "CoStar property record"] },
-    fits: { rail: "What fits here", stage: "Helix stage 3 · Business options", head: () => `What ${esc((S.pre && S.pre.address) || "this space")} can become.`, lede: () => "Each of the 26 businesses either passes every gate here or stops at one. Both are shown.", tools: ["Building fit", "Cost ledger", "Neighborhood index"] },
+    fits: { rail: "What fits here", stage: "Helix stage 3 · Business options", head: () => `What ${esc((S.pre && S.pre.address) || "this space")} can become.`, lede: () => isLA() ? "Each of the 26 businesses is checked for fit and cash here. The neighborhood model is calibrated for Houston, so in Los Angeles demand stays unknown instead of borrowing Houston's thresholds." : "Each of the 26 businesses either passes every gate here or stops at one. Both are shown.", tools: ["Building fit", "Cost ledger", "Neighborhood index"] },
     investigate: { rail: "Investigate", stage: "Helix stages 2–4 · Investigation", head: () => { const r = lead(); return r ? `Thirteen agents examine ${esc(r.label.split(" / ")[0].toLowerCase())} at ${esc(r.address.split(",")[0])}.` : "Nothing to investigate."; }, lede: () => "Each agent answers one question in code, shows what it found and where it came from, and hands off to the next. The verdict stays hidden until the evidence is in.", tools: ["13 agents · computed in code", "Evidence records with sources", "LLM writes only the optional summary"] },
     verdict: { rail: "Verdict", stage: "Helix stage 4 · Decision", head: () => "What the evidence adds up to.", lede: () => "Every reason in one place, ranked by what decided it, then the call and what would change it.", tools: ["Verdict rule (code)", "because[] from the review"] },
     decide: { rail: "Decide", stage: "Helix stage 4 · Feasibility", head: () => "The next twelve months, with zero revenue.", lede: () => "Side by side, then month by month: which pick dips into your reserve, and when. Your bank's bills are included. If cash falls short, a Nessie loan shows what borrowing the gap would do.", tools: ["Jayant's Nessie-pilot simulator", "Nessie loan plan (sandbox)", "CoStar asking rent"] },
@@ -120,11 +120,13 @@
   };
   const lbl = (key) => (S.industries.find((x) => x.key === key) || {}).label || key || "business";
   const lead = () => { const r = S.reviews[S.lead]; return r && !r.error ? r : null; };
+  const isLA = () => (S.opp && S.opp.market === "los_angeles") || /Los Angeles/.test((S.pre && S.pre.address) || "") || S.reviews.some((r) => r && /Los Angeles/.test(r.address || ""));
 
   function render() {
     // A building that fails the preflight ends the flow there: no business is suggested for it.
     const chapters = S.pre && !S.pre.can_continue ? ["cash", "site"] : PATHS[S.kind].chapters;
     $("#heroMeta").innerHTML = heroMeta();
+    if (isLA()) { $(".hero .eyebrow").textContent = "Venture Suite · Los Angeles"; $(".hero .display").innerHTML = "One budget.<br>One Los Angeles lease."; }
     $("#chapters").innerHTML = chapters.map((id, i) => `<section class="ch" id="ch-${id}" data-ch="${id}">
         <div class="ch-intro"><div class="fields" aria-hidden="true"><i class="f1"></i><i class="f2"></i><i class="f3"></i></div>
           <div class="ch-intro-inner"><p class="stage-no"><b>${String(i + 1).padStart(2, "0")}</b> / ${String(chapters.length).padStart(2, "0")} · ${esc(CH[id].stage)}</p>
@@ -139,7 +141,7 @@
   }
   function heroMeta() {
     const r = S.reviews.filter((x) => !x.error);
-    return `${chip("blue", PATHS[S.kind].short)} ${S.nessie ? chip("blue", "Capital One Nessie · sandbox") : ""}
+    return `${chip("blue", PATHS[S.kind].short)} ${S.nessie ? chip("blue", "Capital One Nessie · sandbox") : ""}${isLA() ? chip("amber", "Los Angeles: neighborhood model not calibrated, demand stays unknown") : ""}
       <span>${kmoney(S.budget)} cash · keep ${kmoney(S.reserve)}</span>${S.opp ? `<span>· ${num(S.opp.funnel.combinations)} combinations checked in ${S.opp.elapsed_ms} ms</span>` : ""}
       <span>· ${r.length} place${r.length === 1 ? "" : "s"} reviewed by 13 agents</span>`;
   }

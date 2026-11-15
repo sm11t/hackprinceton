@@ -182,7 +182,7 @@ class FindSpace(unittest.TestCase):
         building = {"property_id": 1, "spaces": [{"value": "A", "sf": 1600, "executive_suite": False},
                                                  {"value": "B", "sf": 27750, "executive_suite": False},
                                                  {"value": "C", "sf": 700, "executive_suite": True}]}
-        with mock.patch("opportunity.load_market", lambda kit=None: [building]):
+        with mock.patch("opportunity.load_market", lambda kit=None, market="houston": [building] if market == "houston" else []):
             self.assertEqual(vr.find_space(1, None, None, "yoga_pilates")[1]["value"], "A")
             self.assertEqual(vr.find_space(1, None, None, "self_storage")[1]["value"], "B")
             self.assertEqual(vr.find_space(1, "C", None, "yoga_pilates")[1]["value"], "C")  # an explicit choice wins
@@ -315,7 +315,7 @@ class SitePreflight(unittest.TestCase):
                    "jurisdiction": {"code": code, "verified": code is not None, "evidence_url": "https://x.test",
                                     "note": "n"}}
         with mock.patch.object(ce, "context_from_kit", lambda *a, **k: dict(context)), \
-                mock.patch("opportunity.load_market", lambda kit=None: [b] if spaces else []):
+                mock.patch("opportunity.load_market", lambda kit=None, market="houston": [b] if spaces and market == "houston" else []):
             return vr.site_preflight(1)
 
     def test_commercial_building_continues(self):
@@ -391,3 +391,24 @@ class LoanOption(unittest.TestCase):
         self.assertIn("not a credit offer", out["loan"]["label"])
         rich = vr.cash_months(cost, {"monthly": 8000}, 900000, 50000)
         self.assertIsNone(rich["loan"])
+
+
+class OutsideHouston(unittest.TestCase):
+    """Los Angeles: building fit and cost run; Houston-calibrated neighborhood signals and Texas rules do not."""
+    def test_neighborhood_not_calibrated_and_no_texas_childcare_ratio(self):
+        building, _ = market()
+        b = dict(building[1], address="1250 S Broadway, Los Angeles, CA", market="los_angeles")
+        texas = {"status": "check", "scope": "suite A", "space_sf": 5000, "capacity": "up to 166 children",
+                 "reasons": ["Flex buildings commonly host this", "Room for up to 166 children (30 sq ft each)"],
+                 "unknowns": ["Needs 80 sq ft of fenced outdoor play space per child"], "verify": [], "sources": [],
+                 "basis": "b"}
+        with mock.patch.object(nb, "building_fit", lambda *a, **k: dict(texas)):
+            out = vr.outside_houston("childcare", b, b["spaces"][0]["value"])
+        d = out["decisions"][0]
+        self.assertEqual(d["verdict"], "unknown")
+        self.assertIn("Houston", d["basis"])
+        self.assertIsNone(d["building"]["capacity"])
+        self.assertTrue(any("California" in u for u in d["building"]["unknowns"]))
+        self.assertFalse(any("Room for" in r for r in d["building"]["reasons"]))
+        self.assertFalse(any("outdoor play" in u for u in d["building"]["unknowns"]))
+        self.assertEqual([s["agent"] for s in out["trace"]], ["planner", "site", "building", "coordinator"])

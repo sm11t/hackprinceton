@@ -37,9 +37,11 @@ DEMO = [
     ("Gym, 14405 Walters Rd (unincorporated Harris)", "fitness_gym", 237365, "140", 500000, 50000, "CONDITIONAL"),
     ("Childcare, 9700 Tanner Rd suite A ($750k)", "childcare", 23296, "A", 750000, 50000, "CONDITIONAL"),
     ("Pickleball, 6855 Wynnwood Ln", "indoor_pickleball", 13890701, None, 500000, 50000, "NO-GO"),
+    ("Auto repair, 1250 S Broadway, Los Angeles", "auto_repair", 4809147, None, 500000, 50000, "CONDITIONAL"),
 ]
 # "I have a space": the building check (Jayant's preflight) before any business
-SITES = [("9721 Cypresswood Dr (residential, unincorporated Harris)", 966604, False, "harris_unincorporated"),
+SITES = [("1250 S Broadway, Los Angeles (Jessenth's Stage 2 property)", 4809147, True, "los_angeles"),
+         ("9721 Cypresswood Dr (residential, unincorporated Harris)", 966604, False, "harris_unincorporated"),
          ("11220 Louetta Rd", 6017645, True, "houston"), ("14405 Walters Rd", 237365, True, "harris_unincorporated")]
 FUNNEL = {"combinations": 61620, "building_can_host": 13263, "affordable": 7399, "neighborhood_support": 1265}
 
@@ -89,11 +91,13 @@ def run(kit, offline):
         print(f"  {'PASS' if good else 'FAIL'}  building check {label}: "
               + ("continues" if s.get("can_continue") else "stops: " + "; ".join(s.get("stops", []))[:90]))
     for label, kwargs in (("one business (yoga)", {"include": ["yoga_pilates"]}),
-                          ("one building (11220 Louetta)", {"property_ids": {6017645}})):
+                          ("one building (11220 Louetta)", {"property_ids": {6017645}}),
+                          ("one LA building (1250 S Broadway)", {"property_ids": {4809147}})):
         o = opportunity.scan(500000, 50000, kit, top=20, **kwargs)
-        good = o["funnel"]["neighborhood_support"] > 0
+        good = o["funnel"]["neighborhood_support"] > 0 or o["funnel"].get("neighborhood_not_calibrated", 0) > 0
         ok &= good
-        print(f"  {'PASS' if good else 'FAIL'}  scan for {label}: {o['funnel']['authority_identified']} pass every gate")
+        print(f"  {'PASS' if good else 'FAIL'}  scan for {label}: {len(o['directions'])} businesses fit"
+              + (" (neighborhood not calibrated)" if o.get("market") == "los_angeles" else ""))
     return ok, scan, reviews
 
 

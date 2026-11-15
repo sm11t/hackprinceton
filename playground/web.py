@@ -511,13 +511,16 @@ def main():
                 return
             if route.path == "/api/places":
                 q = params.get("q", [""])[0].strip()[:80]
-                listed = {b["property_id"]: b for b in opportunity.load_market(args.kit)}
-                rows = lookup(properties.values(), q) if len(q) >= 2 else []
+                listed = {b["property_id"]: b for m in ("houston", "los_angeles") for b in opportunity.load_market(args.kit, m)}
+                terms = words(q)
+                rows = [r for r in location_properties.values() if len(q) >= 2 and all(
+                    any(word.startswith(t) for word in words(f'{r["address"]} {r["city"]}')) for t in terms)]
                 out = []
-                for row in rows[:40]:
-                    pid = int(row["PropertyId"]) if row["PropertyId"].isdigit() else None
+                for row in rows[:60]:
+                    pid = int(row["id"])
                     b = listed.get(pid)
-                    out.append({"property_id": pid, "address": row["Address"], "listed_spaces": len(b["spaces"]) if b else 0})
+                    out.append({"property_id": pid, "address": f'{row["address"]}, {row["city"]}', "city": row["city"],
+                                "listed_spaces": len(b["spaces"]) if b else 0})
                 out.sort(key=lambda r: -r["listed_spaces"])
                 self.send(json.dumps({"query": q, "places": out[:12], "matches": len(rows)}).encode(), "application/json")
                 return

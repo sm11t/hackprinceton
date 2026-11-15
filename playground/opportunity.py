@@ -30,6 +30,7 @@ from neighborhood_industries import INDUSTRIES
 
 INDEX_VERSION = 2
 MARKET_ID = 14  # Houston (reconcile.MARKETS)
+MARKET_IDS = {"houston": 14, "los_angeles": 20}
 LOW_RENT_PER_SF_YEAR = 3.0  # below this an asking rent is more likely a data-entry error (market_rank)
 
 
@@ -44,18 +45,21 @@ def kit_file(kit=None):
     return path
 
 
-def market_path(kit=None):
-    return nb.CACHE / "market-houston-v2.json"  # derived from the kit; same data whether zip or folder
+def market_path(kit=None, market="houston"):
+    # derived from the kit; same data whether zip or folder
+    return nb.CACHE / ("market-houston-v2.json" if market == "houston" else f"market-{market}-v2.json")
 
 
-def load_market(kit=None):
-    """Houston buildings with active lease listings, reduced to what the scan needs. One kit pass, cached."""
+def load_market(kit=None, market="houston"):
+    """Buildings with active lease listings in one market (Houston by default), reduced to what the scan needs.
+    One kit pass, cached. The neighborhood model is calibrated for Houston only; other markets get building fit and
+    cost, and say so."""
     from deal import SERVICE, monthly_rent
     from reconcile import costar_ceiling_ft, unique_scans
     from space_fit import building_numbers, kit_lines
     from market_rank import evidence_flags
     kit = kit_file(kit)
-    path = market_path(kit)
+    path = market_path(kit, market)
     if path.exists():
         return json.loads(path.read_text())
     pw = password()
@@ -86,7 +90,7 @@ def load_market(kit=None):
     for line in kit_lines(kit, "data/commercial-property.jsonl", pw):
         prop = json.loads(line)
         a = prop.get("primaryAddress") or {}
-        if prop["id"] not in spaces or a.get("researchMarketId") != MARKET_ID or a.get("latitude") is None:
+        if prop["id"] not in spaces or a.get("researchMarketId") != MARKET_IDS[market] or a.get("latitude") is None:
             continue
         ceiling, ceiling_source = costar_ceiling_ft(prop)
         numbers = building_numbers(prop)
@@ -102,11 +106,23 @@ def load_market(kit=None):
                       "listed": [{"value": v, "suite": s["suite"], "sf": s["sf"], "floor": s["floor"],
                                   "executive_suite": s["executive_suite"]} for v, s in spaces[prop["id"]].items()]},
             "spaces": list(spaces[prop["id"]].values()),
-            "evidence_flags": evidence_flags(prop), "tours": len(unique_scans(prop)),
+            "evidence_flags": evidence_flags(prop), "tours": len(unique_scans(prop)), "market": market,
         })
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(buildings))
     return buildings
+
+
+def find_building(property_id, kit=None):
+    """(building, market) from the Houston market first, then Los Angeles; (None, None) if not listed for lease."""
+    for market in MARKET_IDS:
+        try:
+            b = next((b for b in load_market(kit, market) if b["property_id"] == int(property_id)), None)
+        except (OSError, RuntimeError, ValueError, KeyError):
+            b = None
+        if b:
+            return b, market
+    return None, None
 
 
 def write_seed(buildings):
@@ -207,6 +223,10 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
     The last gate is the compliance preflight from the jurisdiction cache: who permits each surviving building."""
     from venture_costs import cash_to_open, rent_for
     started = time.perf_counter()
+    if property_ids:
+        outside = [b for b in load_market(kit, "los_angeles") if b["property_id"] in property_ids]
+        if outside:
+            return scan_outside(budget, reserve, kit, outside, exclude=exclude, include=include, top=top)
     market, index = load_index(kit)
     budget, reserve = float(budget), float(reserve or 0)
     keys = [k for k in INDUSTRIES if k not in set(exclude) and (not include or k in set(include))]
@@ -344,6 +364,88 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                       "neighborhood supports it (supported, or mixed with a positive total), then the compliance "
                       "preflight says who permits it (Census boundary, not the postal city). Lease only. One best "
                       "space per building per business.")}
+
+
+def scan_outside(budget, reserve, kit, buildings, exclude=(), include=None, top=8):
+    """Chosen buildings outside Houston: building fit and cash for every business, in code. The neighborhood model is
+    Houston-calibrated, so it is not applied: demand is 'unknown' on every pair and that gate is not counted."""
+    from venture_costs import cash_to_open, rent_for
+    from venture_review import NOT_CALIBRATED
+    started = time.perf_counter()
+    budget, reserve = float(budget), float(reserve or 0)
+    keys = [k for k in INDUSTRIES if k not in set(exclude) and (not include or k in set(include))]
+    funnel = {"spaces": 0, "combinations": 0, "building_can_host": 0, "affordable": 0, "neighborhood_support": 0,
+              "neighborhood_not_calibrated": 0, "cost_not_estimated": 0, "rent_not_listed": 0,
+              "compliance": {}, "authority_identified": 0}
+    pairs, fate = [], {}
+    demand = {"verdict": "unknown", "score": 0, "insight": None, "basis": NOT_CALIBRATED,
+              "reasons": ["Neighborhood not calibrated for Los Angeles: demand unknown"], "lookalike": None,
+              "validated": False}
+    for b in buildings:
+        for sp in b["spaces"]:
+            funnel["spaces"] += 1
+            rent = rent_for(sp)
+            for key in keys:
+                funnel["combinations"] += 1
+                fit = nb.building_fit(key, b["facts"], sp["value"])
+                if fit["status"] == "no":
+                    fate.setdefault(key, (0, "; ".join(fit["reasons"])))
+                    continue
+                funnel["building_can_host"] += 1
+                cost = cash_to_open(key, sp["sf"], rent["monthly"], budget=budget, reserve=reserve,
+                                    building_type=b["facts"].get("type"))
+                if cost["affordability"] == "over":
+                    fate[key] = (1, f"Cash to open + reserve is ${cost['required']['low']:,.0f} even in the low case, "
+                                    f"over the ${budget:,.0f} budget")
+                    continue
+                if cost["affordability"] == "unknown":
+                    funnel["cost_not_estimated"] += 1
+                    fate[key] = (1, "No comparable opening-cost benchmark")
+                    continue
+                funnel["affordable"] += 1
+                funnel["neighborhood_not_calibrated"] += 1
+                funnel["rent_not_listed"] += cost["affordability"] == "rent_unknown"
+                pairs.append({
+                    "business": key, "label": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"],
+                    "property_id": b["property_id"], "address": b["address"], "lat": b["lat"], "lon": b["lon"],
+                    "suite": sp["value"], "suite_label": f"Suite {sp['suite']}" if sp.get("suite") else f"{sp['sf']:,.0f} sq ft space",
+                    "sf": sp["sf"], "rent": rent, "demand": demand,
+                    "building": {k: fit[k] for k in ("status", "capacity", "reasons", "unknowns")},
+                    "cost": {k: cost.get(k) for k in ("affordability", "cash_to_open", "required", "headroom",
+                                                       "months_of_rent_after_opening", "basis_quality", "excludes",
+                                                       "note")},
+                    "evidence_flags": b["evidence_flags"], "tours": b["tours"], "market": b.get("market")})
+    afford = {"within": 0, "stretch": 1, "rent_unknown": 2}
+    pairs.sort(key=lambda p: (afford[p["cost"]["affordability"]], p["building"]["status"] != "fits",
+                              -(p["cost"]["headroom"] or -1e12)))
+    best, seen = [], set()
+    for p in pairs:
+        if (p["business"], p["property_id"]) not in seen:
+            seen.add((p["business"], p["property_id"]))
+            best.append(p)
+    directions = []
+    for p in best:
+        c = p["cost"]["cash_to_open"]["base"]
+        directions.append({"business": p["business"], "label": p["label"], "group": p["group"], "places": 1,
+                           "supported": 0, "within_budget": int(p["cost"]["affordability"] == "within"),
+                           "only_low_case": int(p["cost"]["affordability"] == "stretch"),
+                           "rent_not_listed": int(p["cost"]["affordability"] == "rent_unknown"),
+                           "excludes": p["cost"].get("excludes"), "cost_basis": p["cost"]["basis_quality"],
+                           "cash_to_open_range": [c, c] if c is not None else None,
+                           "why": "Fits physically and financially; " + demand["reasons"][0][0].lower() + demand["reasons"][0][1:],
+                           "pairs": [p]})
+    return {"budget": budget, "reserve": reserve, "funnel": funnel, "directions": directions,
+            "map": {"buildings": [[round(b["lat"], 4), round(b["lon"], 4), 2] for b in buildings],
+                    "after_gate": [len(buildings)] * 3 + [0, 0], "note": "Los Angeles: neighborhood not calibrated"},
+            "cost_not_estimated": [], "pairs": best[:top * 5], "all_pairs": len(best),
+            "not_here": sorted(({"business": k, "label": INDUSTRIES[k]["label"], "group": INDUSTRIES[k]["group"],
+                                 "stopped_at": ["building", "cash"][g], "why": why}
+                                for k, (g, why) in fate.items() if k not in {p["business"] for p in pairs}),
+                               key=lambda r: (["cash", "building"].index(r["stopped_at"]), r["label"])),
+            "excluded_groups": [], "businesses_considered": len(keys), "market": "los_angeles",
+            "elapsed_ms": round(1000 * (time.perf_counter() - started)),
+            "basis": "Los Angeles: building fit (CoStar facts vs space needs) and sourced cash to open are checked; "
+                     "the neighborhood model is calibrated for Houston and is not applied, so demand is unknown."}
 
 
 def warm(kit=None):
