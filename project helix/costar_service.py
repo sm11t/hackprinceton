@@ -185,6 +185,26 @@ class CoStarService:
             "amenities": [a.get("name") for a in (found.get("amenities") or []) if isinstance(a, dict) and a.get("name")]
         }
 
+    def get_stage2_raw_record(self, property_id: int):
+        """Read one original CoStar property row for Stage 2 evidence reconciliation.
+
+        This additive method does not change Stage 1 responses. Callers must select
+        only provenance fields they need; do not serialize the full row to clients.
+        """
+        pid = int(property_id)
+        with ZipFile(self.kit_path) as archive:
+            with archive.open("data/commercial-property.jsonl", pwd=self.password) as stream:
+                for line in stream:
+                    if f'"id": {pid},'.encode() not in line and f'"id":{pid},'.encode() not in line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if item.get("id") == pid:
+                        return item
+        return None
+
     def get_listings_and_spaces(self, property_id: int):
         """Fetch active listings, spaces/suites, and asking rents for a property."""
         pid_int = int(property_id)

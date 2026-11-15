@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 import urllib.request
 import urllib.error
 import webbrowser
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -51,6 +52,7 @@ def load_env():
                     os.environ[k] = v
 
 load_env()
+from stage2.orchestrator import investigate as run_stage2_investigation
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -346,6 +348,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        if urlsplit(self.path).path == "/api/investigation":
+            query = parse_qs(urlsplit(self.path).query)
+            handoff_id = (query.get("id") or [""])[0]
+            handoff = INVESTIGATION_HANDOFFS.get(handoff_id)
+            if handoff and handoff.get("dossier"):
+                self.send_json({"handoff": handoff})
+            else:
+                self.send_json({"error": "Investigation dossier not found."}, status=404)
+            return
+
         if self.path == "/api/config":
             self.send_json({
                 "model": MODEL,
@@ -507,20 +519,31 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not record:
             self.send_json({"error": "Listing is not part of this discovery."}, status=404)
             return
+        stable_id = str(record.get("stable_id", ""))
+        with DISCOVERY_LOCK:
+            existing = next((item for item in INVESTIGATION_HANDOFFS.values()
+                             if item.get("discovery_id") == discovery_id and item.get("selected_stable_id") == stable_id
+                             and item.get("dossier")), None)
+        if existing:
+            self.send_json({"handoff": existing})
+            return
         handoff_id = uuid.uuid4().hex
         try:
             property_facts = costar.get_property(record["property_id"]) if costar else {}
         except (OSError, ValueError, KeyError, TypeError, RuntimeError):
             property_facts = {}
         property_facts_available = isinstance(property_facts, dict) and "error" not in property_facts
-        handoff = {
-            "handoff_id": handoff_id, "created_at": datetime.now(timezone.utc).isoformat(),
-            "status": "stage2_placeholder", "stage": 2,
+        source_handoff = {
+            "handoff_id": handoff_id, "created_at": datetime.now(timezone.utc).isoformat(), "stage": 2,
             "intake": session["intake"], "selected_listing": record,
             "property_facts": property_facts if property_facts_available else {},
             "property_facts_status": "available" if property_facts_available else "unavailable",
-            "message": "Selection saved for a future investigation stage. Stage 2 was not run.",
         }
+        result = run_stage2_investigation(source_handoff, costar_service=costar)
+        handoff = {**source_handoff, "discovery_id": discovery_id, "selected_stable_id": stable_id,
+                   "status": "stage2_complete" if result["status"] == "complete" else "stage2_partial",
+                   "dossier": result["dossier"],
+                   "message": "Building investigation completed with source-backed facts and explicit unknowns."}
         INVESTIGATION_HANDOFFS[handoff_id] = handoff
         try:
             write_json_store(INVESTIGATION_PATH, INVESTIGATION_HANDOFFS)

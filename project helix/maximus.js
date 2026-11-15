@@ -54,6 +54,110 @@
     parent.append(node);
     return node;
   }
+  function clear(node) { node.replaceChildren(); }
+  function sectionMessage(node, message) { clear(node); text(node, "p", message, "investigation-empty"); }
+  function renderInvestigation(handoff) {
+    const d = handoff?.dossier;
+    if (!d) return;
+    const p = d.selected_property || {};
+    const facts = d.reported_building_facts?.costar || {};
+    $("#investigation-title").textContent = p.address || "Selected property";
+    $("#investigation-summary").textContent = `${p.city || ""}${p.state ? `, ${p.state}` : ""} · CoStar property ${p.property_id || "unknown"}${p.space_id ? ` · selected suite/space ${p.space_id}` : ""} · Listing ${p.listing_id || "unknown"}. This investigation describes reported evidence and unresolved questions; it does not certify compliance or safety.`;
+    $("#investigation-state").textContent = handoff.status === "stage2_complete" ? "Investigation complete" : "Partial investigation";
+    const overview = $("#investigation-overview"); clear(overview);
+    const factsOverview = [
+      ["Identity", d.identity_resolution?.status || "unknown"],
+      ["Property type", facts.property_type || "Not recorded"],
+      ["Building area (CoStar)", facts.gross_building_area_sqft == null ? "Unknown" : `${Number(facts.gross_building_area_sqft).toLocaleString()} SF`],
+      ["Rentable area (CoStar)", facts.rentable_building_area_sqft == null ? "Unknown" : `${Number(facts.rentable_building_area_sqft).toLocaleString()} SF`],
+      ["Stories (CoStar)", facts.stories ?? "Unknown"],
+      ["Zoning label (CoStar)", facts.zoning_description || "Unknown"],
+    ];
+    for (const [label, value] of factsOverview) {
+      const card = text(overview, "div", undefined, "overview-fact");
+      text(card, "small", label); text(card, "strong", value);
+    }
+
+    const sources = $("#investigation-sources"); clear(sources);
+    const statuses = d.source_status || {};
+    const models = d.identity_resolution?.matterport_models || [];
+    for (const key of ["costar", "matterport", "vexcel"]) {
+      const item = statuses[key] || { status: "unknown" };
+      const card = text(sources, "article", undefined, "source-card");
+      const header = text(card, "div", undefined, "source-card-head");
+      text(header, "strong", key === "costar" ? "CoStar" : key === "matterport" ? "Matterport" : "Vexcel");
+      text(header, "span", item.status || "unknown", `source-status ${item.status || "unknown"}`);
+      if (item.reason) text(card, "p", item.reason);
+      if (item.error) text(card, "p", `Provider error: ${item.error}`);
+      if (key === "matterport" && models.length) {
+        for (const m of models) {
+          const line = text(card, "p", undefined, "source-detail");
+          text(line, "span", `${m.model_id} · ${m.status}${m.name ? ` · ${m.name}` : ""}`);
+          if (m.model_id && m.status === "matched") {
+            const a = text(line, "a", "Open Matterport model");
+            a.href = `https://my.matterport.com/show/?m=${encodeURIComponent(m.model_id)}`; a.target = "_blank"; a.rel = "noopener noreferrer";
+          }
+          if (m.floor_count != null) text(card, "p", `${m.floor_count} floors · ${m.room_count} rooms · ${m.available_panorama_count}/${m.panorama_count} panoramas with imagery`, "source-detail");
+        }
+      }
+      if (key === "matterport" && item.visual_analysis?.status) text(card, "p", `Image interpretation: ${item.visual_analysis.status}${item.visual_analysis.reason ? ` · ${item.visual_analysis.reason}` : ""}`, "source-detail");
+      if (key === "vexcel") {
+        const ops = item.operations || {};
+        for (const [name, result] of Object.entries(ops)) {
+          text(card, "p", `${name.replaceAll("_", " ")}: ${result.status || "unknown"}${result.feature_count != null ? ` · ${result.feature_count} records` : ""}`, "source-detail");
+        }
+        for (const s of item.selected_structure_candidates || [])
+          text(card, "p", `Vexcel structure ${s.structure_id}: ${s.identity_status}${s.footprint_area_sqft != null ? ` · ${Number(s.footprint_area_sqft).toLocaleString()} SF footprint` : ""} · capture estimate ${s.capture_estimate || "unknown"}`, "source-detail");
+        if (item.image_extraction) text(card, "p", item.image_extraction, "source-detail");
+      }
+    }
+
+    const physical = $("#investigation-physical"); clear(physical);
+    const observations = d.physical_observations || [];
+    if (!observations.length) sectionMessage(physical, d.visual_analysis?.reason || "No physical observations were established from available data.");
+    else for (const item of observations) {
+      const row = text(physical, "article", undefined, "evidence-row");
+      text(row, "strong", `${item.fact || item.feature || item.kind || "Observation"}${item.value != null ? ` · ${item.value}${item.unit ? ` ${item.unit}` : ""}` : ""}`);
+      if (item.note || item.evidence) text(row, "p", item.note || item.evidence);
+      text(row, "small", `Evidence: ${(item.evidence_ids || [item.image_id]).filter(Boolean).join(", ") || "reference unavailable"}`);
+      if (item.bbox_xyxy_normalized) text(row, "small", `Image region (normalized): ${item.bbox_xyxy_normalized.join(", ")}`);
+    }
+
+    const contradictions = $("#investigation-contradictions"); clear(contradictions);
+    const all = [...(d.contradictions || []), ...(d.resolved_discrepancies || [])];
+    if (!all.length) sectionMessage(contradictions, "No comparable cross-source claims were available to reconcile. Missing evidence is treated as unknown, not as agreement.");
+    else for (const v of all) {
+      const row = text(contradictions, "article", undefined, `evidence-row verdict-${v.status}`);
+      text(row, "strong", `${v.status.replaceAll("_", " ")} · ${v.fact || "Evidence comparison"}`);
+      text(row, "p", v.reason || "Requires source review.");
+      text(row, "small", `Evidence IDs: ${(v.evidence_ids || []).filter(Boolean).join(", ") || "unavailable"}`);
+    }
+
+    const compliance = $("#investigation-compliance"); clear(compliance);
+    const preflight = d.property_compliance_preflight || {};
+    const report = preflight.report || {};
+    if (!report.schema_version) sectionMessage(compliance, preflight.note || "Property preflight is unavailable; jurisdiction and applicability remain unverified.");
+    else {
+      const j = report.jurisdiction || {};
+      text(compliance, "p", `Jurisdiction: ${j.code || "unknown"}${j.place ? ` · ${j.place}` : ""}${j.county ? ` · ${j.county}` : ""}`, "evidence-row");
+      if (j.evidence_url) { const a = text(compliance, "a", "Census boundary lookup"); a.href = j.evidence_url; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+      if (j.note) text(compliance, "p", j.note, "source-detail");
+      text(compliance, "p", `Preflight status: ${report.status || "unknown"} · Legal approval: never asserted`, "source-detail");
+      for (const gate of report.gates || []) text(compliance, "p", `Unresolved gate: ${gate}`, "caveat");
+      for (const r of (report.records || []).filter(x => x.fact !== "identity" && x.value != null).slice(0, 12))
+        text(compliance, "p", `${r.fact}: ${r.value}${r.note ? ` · ${r.note}` : ""}`, "source-detail");
+    }
+
+    const unknowns = $("#investigation-unknowns"); clear(unknowns);
+    const todo = [...(d.unknowns || []), ...(d.verification_tasks || []).map(x => ({ topic: "Next step", note: x.task, status: "needs verification" }))];
+    if (!todo.length) sectionMessage(unknowns, "No additional tasks were generated.");
+    else for (const item of todo) {
+      const row = text(unknowns, "article", undefined, "evidence-row");
+      text(row, "strong", `${item.topic || "Unknown"} · ${item.status || "unknown"}`);
+      text(row, "p", item.note || item.task || "Requires verification.");
+    }
+    $("#investigation-handoff").textContent = JSON.stringify(d.stage3_handoff || {}, null, 2);
+  }
   function classificationLabel(value) {
     return ({ within_budget: "Within budget", stretch: "Stretch", over_budget: "Over budget", unknown: "Unknown" })[value] || "Unknown";
   }
@@ -179,13 +283,17 @@
     verify.addEventListener("click", () => r.verification ? (verificationBox.hidden = !verificationBox.hidden) : verifyListing(false));
     refresh.addEventListener("click", () => verifyListing(true));
     investigate.addEventListener("click", async () => {
-      investigate.disabled = true; investigate.textContent = "Saving…";
+      investigate.disabled = true; investigate.textContent = "Investigating…";
+      $("#stage2").hidden = false;
+      $("#investigation-summary").textContent = "Checking the selected property identity and gathering available CoStar, Matterport and Vexcel evidence…";
+      sectionMessage($("#investigation-sources"), "Checking evidence sources. This can take a moment.");
+      $("#stage2").scrollIntoView({ behavior: "smooth", block: "start" });
       try {
         const saved = await post("/api/investigate", { discovery_id: currentDiscovery.discovery_id, stable_id: r.stable_id });
-        $("#stage2").hidden = false; $("#stage2").scrollIntoView({ behavior: "smooth", block: "center" });
-        text($("#stage2"), "p", `Handoff ${saved.handoff.handoff_id} saved. This is a placeholder; Stage 2 was not run.`);
+        renderInvestigation(saved.handoff);
+        $("#stage2").scrollIntoView({ behavior: "smooth", block: "start" });
       } catch (err) { text(card, "p", err.message, "caveat"); }
-      finally { investigate.disabled = false; investigate.textContent = "Investigate this property"; }
+      finally { investigate.disabled = false; investigate.textContent = "Open investigation"; }
     });
     return card;
   }
