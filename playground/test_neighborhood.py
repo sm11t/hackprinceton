@@ -345,6 +345,21 @@ class Building(unittest.TestCase):
         self.assertEqual(unlisted["status"], "check")
         self.assertIn("No space is listed", " ".join(unlisted["unknowns"]))
 
+    def test_floor_codes_and_executive_suites(self):
+        street = facts(type_="6", stories=3, listed=[("100", 1500)])
+        street["listed"][0]["floor"] = 23
+        fit = n.building_fit("cafe", street)
+        self.assertEqual(fit["status"], "fits")
+        self.assertIn("Street level (ground floor, CoStar)", fit["reasons"])
+        upstairs = facts(type_="6", stories=3, listed=[("300", 1500)])
+        upstairs["listed"][0]["floor"] = 27
+        self.assertEqual(n.building_fit("cafe", upstairs)["status"], "no")
+        self.assertEqual(n.building_fit("dental", upstairs | {"type": "5"})["status"], "fits")  # offices need no ground floor
+        suites = facts(type_="5", listed=[("Office for 3", 650), ("200", 2000)])
+        suites["listed"][0]["executive_suite"] = True
+        self.assertIn("2,000 sq ft", " ".join(n.building_fit("tutoring", suites)["reasons"]))  # exec suite skipped
+        self.assertEqual(n.building_fit("tutoring", suites, "Office for 3")["status"], "no")
+
     def test_ground_floor_and_drive_in(self):
         tower = n.building_fit("cafe", facts(type_="9", stories=6, listed=[("200", 1500)]))
         self.assertIn("ground-floor", " ".join(tower["unknowns"]))
