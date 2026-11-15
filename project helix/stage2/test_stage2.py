@@ -114,7 +114,7 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(result["models"][0]["room_count"],1)
         self.assertIn("not camera capture dates",result["models"][0]["timestamps_interpretation"])
         self.assertEqual(result["claims"][0]["scope_type"],"room")
-        self.assertIn("applicationKey=public-sdk-key",result["models"][0]["showcase_url"])
+        self.assertEqual(result["models"][0]["showcase_url"],"https://my.matterport.com/show/?m=NDMWnz1H9uV")
         self.assertEqual(result["visual_analysis"]["status"],"unavailable")
 
     def test_string_address_lines_and_panorama_inventory_are_handled(self):

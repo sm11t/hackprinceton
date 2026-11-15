@@ -219,9 +219,9 @@ class MatterportAdapter:
                 "rooms":[{"room_id":r.get("id"),"label":r.get("label"),"area":(r.get("dimensions") or {}).get("areaFloor"),
                            "height":(r.get("dimensions") or {}).get("height"),"unit":"sqft" if (r.get("dimensions") or {}).get("units")=="imperial" else None,"scope":"room"} for r in rooms],
                 "images":images}
-            sdk_key=os.environ.get("MATTERPORT_SDK_KEY")
             if identity=="matched" and model.get("visibility")=="public":
-                safe_model["showcase_url"]="https://my.matterport.com/show/?"+urlencode({"m":model_id,"play":"1",**({"applicationKey":sdk_key} if sdk_key else {})})
+                # This is a plain Showcase iframe. An applicationKey makes it wait for an SDK client.
+                safe_model["showcase_url"]="https://my.matterport.com/show/?"+urlencode({"m":model_id})
                 safe_model["embed_status"]="configured"
             else:
                 safe_model["showcase_url"]=None

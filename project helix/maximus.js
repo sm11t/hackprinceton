@@ -165,13 +165,21 @@
     }
 
     const models = d.identity_resolution?.matterport_models || [];
-    const matched = models.find(m => m.status === "matched" && m.showcase_url);
+    // Rebuild the plain share URL so saved dossiers with SDK parameters work too.
+    const matched = models.find(m => m.status === "matched" && m.showcase_url && /^[A-Za-z0-9]{11}$/.test(m.model_id));
+    const tourUrl = matched ? `https://my.matterport.com/show/?m=${matched.model_id}` : null;
     const viewerWrap = $("#matterport-viewer-wrap"), iframe = $("#matterport-frame");
     if (matched) {
       viewerWrap.hidden = false; $("#matterport-unavailable").hidden = true;
-      iframe.src = matched.showcase_url; $("#matterport-open").href = matched.showcase_url;
+      if (iframe.dataset.tourUrl !== tourUrl) {
+        iframe.src = tourUrl;
+        iframe.dataset.tourUrl = tourUrl;
+      }
+      $("#matterport-open").href = tourUrl;
       $("#matterport-open").setAttribute("aria-label", "Open full Matterport tour in a new tab");
     } else {
+      if (iframe.dataset.tourUrl) iframe.removeAttribute("src");
+      delete iframe.dataset.tourUrl;
       viewerWrap.hidden = true; $("#matterport-unavailable").hidden = false;
       $("#matterport-unavailable").textContent = models.some(m => m.status === "quarantined")
         ? "A linked Matterport scan did not match this property's address, so it is not shown."
@@ -237,8 +245,9 @@
           const action = text(row, "button", item.image_url ? "View image" : "View inside tour", "text-action"); action.type = "button";
           action.addEventListener("click", () => {
             if (item.image_url) imageDialog(item.image_url, item.feature || "Exterior evidence");
-            else if (matched && item.location_id) {
-              const url = new URL(matched.showcase_url); url.searchParams.set("ss", item.location_id); iframe.src = url.toString();
+            else if (matched && item.location_id && item.model_id === matched.model_id) {
+              const url = new URL(tourUrl); url.searchParams.set("ss", item.location_id); url.searchParams.set("play", "1");
+              if (iframe.src !== url.href) iframe.src = url.href;
               $("#investigation-explore").scrollIntoView({ behavior: "smooth", block: "start" });
             } else if (matched) { $("#investigation-explore").scrollIntoView({ behavior: "smooth", block: "start" }); }
           });
