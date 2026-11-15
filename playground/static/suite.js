@@ -12,8 +12,6 @@
     investigate: "investigating", decide: "investigating", plan: "verifying" };
   const GROUPS = ["Sports & fitness", "Food & drink", "Health", "Personal services", "Children & education", "Retail",
     "Auto & storage"];
-  const GROUP_ICON = { "Sports & fitness": "🏓", "Food & drink": "☕", Health: "✚", "Personal services": "✂",
-    "Children & education": "▣", Retail: "🛍", "Auto & storage": "🔧" };
   const PLACES = [
     ["Downtown", 29.7604, -95.3698], ["The Heights", 29.798, -95.398], ["Galleria / Uptown", 29.739, -95.463],
     ["Energy Corridor", 29.783, -95.62], ["Katy", 29.7858, -95.8245], ["Cypress", 29.9691, -95.6972],
@@ -88,15 +86,40 @@
   function buildingImg(pair, size) {
     const a = archetype(pair);
     const url = thumb(a, { size: size || 160 });
-    return url ? `<img src="${url}" alt="${esc(ARCH_LABEL[a])}" title="${esc(ARCH_LABEL[a])}">` : `<span title="${esc(ARCH_LABEL[a])}">▦</span>`;
+    return url ? `<img src="${url}" alt="${esc(ARCH_LABEL[a])}" title="${esc(ARCH_LABEL[a])}">` : `<span title="${esc(ARCH_LABEL[a])}">${ic("building", 22)}</span>`;
   }
   function propImg(group) {
     const url = thumb("prop:" + (GROUPS.includes(group) ? group : "other"), { size: 112 });
-    return url ? `<img src="${url}" alt="">` : `<span>${GROUP_ICON[group] || "◆"}</span>`;
+    return url ? `<img src="${url}" alt="">` : `<span>${esc((group || "?")[0])}</span>`;
   }
   function agentImg(name) {
     const url = thumb("agent:" + name, { size: 88 });
     return url ? `<img src="${url}" alt="">` : `<span class="fallback">${esc(name.slice(0, 2).toUpperCase())}</span>`;
+  }
+  const ICONS = {
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    right: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+    left: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+    wallet: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14.5h2"/>',
+    bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+    building: '<rect x="5" y="3" width="14" height="18" rx="1"/><path d="M9 7h2M13 7h2M9 11h2M13 11h2M9 15h2M13 15h2"/>',
+    brief: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M3 13h18"/>',
+    key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>',
+    shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+    landmark: '<path d="M3 21h18M4 10h16M12 3l9 5H3zM6 10v8M10 10v8M14 10v8M18 10v8"/>',
+    compass: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
+    spark: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
+    ext: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+    grid: '<rect x="4" y="4" width="7" height="7" rx="1"/><rect x="13" y="4" width="7" height="7" rx="1"/><rect x="4" y="13" width="7" height="7" rx="1"/><rect x="13" y="13" width="7" height="7" rx="1"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
+  };
+  const ic = (n, s) => `<svg class="ic" width="${s || 16}" height="${s || 16}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n] || ""}</svg>`;
+  const ext = (url, text) => (url ? `<a class="ext" href="${esc(url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${esc(text || "Source")}${ic("ext", 12)}</a>` : "");
+  const cap = (t) => (t ? t[0].toUpperCase() + t.slice(1) : "");
+  function crumbs(list) {
+    const el = document.getElementById("crumbs"); if (!el) return;
+    el.innerHTML = list.map(([t, href], k) => (k ? `<span class="sep">/</span>` : "") + (href ? `<a href="${href}">${esc(t)}</a>` : `<span class="cur">${esc(t)}</span>`)).join("");
   }
 
   // ---------- status semantics ----------
@@ -107,6 +130,9 @@
     weak: ["red", "Weak neighborhood"], unknown: ["grey", "Neighborhood unknown"] };
   const VERDICT_CLS = { GO: "go", CONDITIONAL: "conditional", "NO-GO": "no-go" };
   const VERDICT_CHIP = { GO: "green", CONDITIONAL: "amber", "NO-GO": "red" };
+  const VLABEL = { GO: "Go", CONDITIONAL: "Conditional", "NO-GO": "No-go" };
+  const verdictBadge = (v, sm) => `<div class="verdict v-${VERDICT_CLS[v] || "unknown"}${sm ? " sm" : ""}"><span class="verdict-k">Verdict</span><span class="verdict-v"><i></i>${esc(VLABEL[v] || v || "Pending")}</span></div>`;
+  const STATUS_CHIP = { exploring: "blue", shortlisted: "blue", investigating: "blue", verifying: "amber", ready: "green", paused: "grey", dropped: "red" };
   const look = (map, key) => map[key] || ["grey", key ? String(key) : "Unknown"];
   const costSrc = (basis) => (basis === "itemized" ? "FDD benchmark" : basis ? `FDD benchmark · ${basis}` : "FDD benchmark");
   const rentSrc = (rent) => (!rent || rent.monthly == null ? "not listed" : /model|comps|similar/i.test(rent.source || "") ? "rent model" : "CoStar");
@@ -191,49 +217,65 @@
   // ---------- My ventures ----------
   async function renderHome() {
     state.v = null;
+    crumbs([["My ventures"]]);
     app.innerHTML = `<div class="loading"><span class="spinner"></span>Loading your ventures…</div>`;
     state.ventures = await api(`/api/ventures?user=${USER}`);
-    const cards = state.ventures.map((v) => {
-      const idx = stageIdx(v.stage);
-      const dots = STAGES.map((s, k) => `<span class="${k < idx ? "done" : k === idx ? "now" : ""}"></span>`).join("");
-      const prog = v.summary && v.summary.progress;
-      const status = { exploring: "blue", shortlisted: "blue", investigating: "blue", verifying: "amber", ready: "green", paused: "grey", dropped: "red" }[v.status] || "grey";
-      return `<a class="card clickable venture-card" href="#/v/${esc(v.id)}" style="color:inherit;text-decoration:none">
-        <div class="kind">${esc(v.kind === "budget" ? "I have a budget" : v.kind)}</div>
-        <h3>${esc(v.name)}</h3>
-        <div class="summary">${esc((v.summary && v.summary.line) || summaryLine(v))}</div>
-        ${prog && prog.total ? `<div><div class="venture-meta" style="margin-bottom:6px"><span>Checks answered</span><span class="num">${prog.done} / ${prog.total}</span></div><div class="check-bar"><i style="width:${Math.round(100 * prog.done / prog.total)}%"></i></div></div>` : ""}
-        <div class="progress-dots" title="Stage ${idx + 1} of 7">${dots}</div>
-        <div class="venture-meta"><span>${esc(STAGE_NAMES[v.stage] || v.stage)} · ${esc(ago(v.updated_at))}</span>${chip(status, v.status)}</div>
-      </a>`;
+    const vs = state.ventures;
+    const active = vs.filter((v) => !["ready", "paused", "dropped"].includes(v.status)).length;
+    const committed = vs.filter((v) => v.chosen).length, ready = vs.filter((v) => v.status === "ready").length;
+    const checks = vs.reduce((a, v) => { const g = v.summary && v.summary.progress; return g && g.total ? [a[0] + g.done, a[1] + g.total] : a; }, [0, 0]);
+    const rows = vs.map((v) => {
+      const idx = stageIdx(v.stage), prog = v.summary && v.summary.progress;
+      const seg = STAGES.map((s, k) => `<span class="${k < idx ? "done" : k === idx ? "now" : ""}"></span>`).join("");
+      return `<tr data-id="${esc(v.id)}" tabindex="0">
+        <td><div class="vn">${esc(v.name)}</div><div class="vs">${esc(((v.summary && v.summary.line) || summaryLine(v)).replace(/· (GO|CONDITIONAL|NO-GO)$/, (m, x) => "· " + VLABEL[x]))}</div></td>
+        <td class="hide-sm muted">${esc(v.kind === "budget" ? "Budget" : cap(v.kind))}</td>
+        <td><div class="seg7" title="Step ${idx + 1} of 7">${seg}</div><div class="small muted">${esc(STAGE_NAMES[v.stage] || v.stage)}</div></td>
+        <td>${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}</td>
+        <td class="hide-sm">${prog && prog.total ? `<div class="meter"><div class="check-bar"><i style="width:${Math.round(100 * prog.done / prog.total)}%"></i></div><span class="small num">${prog.done}/${prog.total}</span></div>` : `<span class="faint">—</span>`}</td>
+        <td class="hide-sm muted small" style="white-space:nowrap">${esc(ago(v.updated_at))}</td>
+      </tr>`;
     }).join("");
     app.innerHTML = `
-      <div class="home-head">
-        <div><div class="eyebrow">My ventures</div><h1>What are we opening?</h1>
-          <p class="empty-hint">${state.ventures.length ? "Each venture is one saved workflow. Pick up where you left off." : "No ventures yet. Start one: it saves at every step."}</p></div>
-        <a class="btn primary" href="#/new">+ New venture</a>
+      <div class="page-head">
+        <div><div class="eyebrow">Workspace</div><h1>My ventures</h1>
+          <p class="lede">Each venture is one saved workflow, from a budget to a place you can sign for. Pick up where you left off.</p></div>
+        <a class="btn primary" href="#/new">${ic("plus")}New venture</a>
       </div>
-      <div class="grid ventures">
-        <a class="card clickable new-card" href="#/new" style="text-decoration:none"><div><div class="plus">+</div><div style="font-weight:600;margin-top:6px">New venture</div><div class="muted small">Start from a budget</div></div></a>
-        ${cards}
+      <div class="kpis">
+        <div class="glass kpi"><div class="k">Ventures</div><div class="v">${vs.length}</div><div class="s">${active} in progress</div></div>
+        <div class="glass kpi"><div class="k">Committed to a place</div><div class="v">${committed}</div><div class="s">After a reviewed verdict</div></div>
+        <div class="glass kpi"><div class="k">Checks answered</div><div class="v">${checks[1] ? `${checks[0]}<span class="faint" style="font-size:16px;font-weight:500"> / ${checks[1]}</span>` : "—"}</div><div class="s">Across committed ventures</div></div>
+        <div class="glass kpi"><div class="k">Ready to sign</div><div class="v">${ready}</div><div class="s">Every check answered</div></div>
+      </div>
+      <div class="glass table-card">
+        ${vs.length ? `<div class="table-scroll"><table class="vt">
+          <thead><tr><th>Venture</th><th class="hide-sm">Type</th><th>Stage</th><th>Status</th><th class="hide-sm">Checks</th><th class="hide-sm">Updated</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+        : `<div class="empty"><div>No ventures yet. Start one; it saves at every step.</div><a class="btn primary" href="#/new">${ic("plus")}New venture</a></div>`}
       </div>`;
+    app.querySelectorAll("tr[data-id]").forEach((tr) => {
+      const go = () => { location.hash = `#/v/${tr.dataset.id}`; };
+      tr.onclick = go; tr.onkeydown = (e) => { if (e.key === "Enter") go(); };
+    });
   }
 
   function renderNew() {
+    crumbs([["My ventures", "#/"], ["New venture"]]);
     app.innerHTML = `
-      <div><a class="link-btn" href="#/">← My ventures</a></div>
-      <div style="margin-top:14px"><div class="eyebrow">New venture</div><h1>What do you have?</h1>
-        <p class="muted" style="margin-top:6px">We'll start from what you already know and check everything else.</p></div>
+      <div class="page-head"><div><div class="eyebrow">New venture</div><h1>What do you start with?</h1>
+        <p class="lede">We start from what you already know and check everything else against CoStar listings and public data.</p></div>
+        <a class="btn ghost" href="#/">${ic("left")}My ventures</a></div>
       <div class="grid chooser">
-        <button class="card clickable choice" id="kind-budget" style="text-align:left">
-          <div class="icon">💵</div><h3>I have a budget</h3>
-          <p class="muted small">You know what you can put in, not what to open or where. We scan every listed Houston space against 26 kinds of business.</p>
-          <span class="chip blue nodot" style="align-self:flex-start">Start here</span>
+        <button class="card clickable choice" id="kind-budget">
+          <div class="icon">${ic("wallet", 20)}</div><h3>I have a budget</h3>
+          <p>You know what you can put in, not what to open or where. We scan every listed Houston space against 26 kinds of business.</p>
+          ${chip("blue", "Available")}
         </button>
-        <div class="card choice soon" aria-disabled="true"><div class="icon">💡</div><h3>I have an idea</h3>
-          <p class="muted small">You know the business. We find where it works.</p>${chip("grey nodot", "Coming soon")}</div>
-        <div class="card choice soon" aria-disabled="true"><div class="icon">🏢</div><h3>I have a space</h3>
-          <p class="muted small">You have a building. We find what it can become.</p>${chip("grey nodot", "Coming soon")}</div>
+        <div class="card choice soon" aria-disabled="true"><div class="icon">${ic("bulb", 20)}</div><h3>I have an idea</h3>
+          <p>You know the business. We find where it works.</p>${chip("grey", "Coming soon")}</div>
+        <div class="card choice soon" aria-disabled="true"><div class="icon">${ic("building", 20)}</div><h3>I have a space</h3>
+          <p>You have a building. We find what it can become.</p>${chip("grey", "Coming soon")}</div>
       </div>`;
     document.getElementById("kind-budget").onclick = async (ev) => {
       ev.currentTarget.disabled = true;
@@ -246,41 +288,51 @@
     };
   }
 
-  // ---------- venture shell + rail ----------
+  // ---------- venture shell: header + stepper ----------
   function lockIns(i) {
     const v = state.v, o = state.opp;
-    const area = i.area && i.area.mode === "near" && i.area.place ? `within ${i.area.radius} mi of ${i.area.place}` : "anywhere in Houston";
     const reviewed = Object.values(state.reviews);
     return {
-      budget: i.budget ? `<b>${kmoney(i.budget - i.reserve)}</b> to open with · ${esc(area)}` : "",
-      scan: o ? `<b>${num(o.funnel.neighborhood_support)}</b> combinations pass every gate` : (i.reached >= 1 ? "Scanned" : ""),
+      budget: i.budget ? `<b>${kmoney(i.budget - i.reserve)}</b> to open with` : "",
+      scan: o ? `<b>${num(o.funnel.neighborhood_support)}</b> pass every gate` : (i.reached >= 1 ? "Scanned" : ""),
       opportunities: (i.directionLabels || []).length ? esc(i.directionLabels.join(", ")) : "",
       shortlist: (v.shortlist || []).length ? `<b>${v.shortlist.length}</b> place${v.shortlist.length > 1 ? "s" : ""}` : "",
-      investigate: reviewed.length ? reviewed.map((r) => `<b>${esc(r.verdict)}</b>`).join(" · ") : "",
+      investigate: reviewed.length ? reviewed.map((r) => `<b>${esc(VLABEL[r.verdict] || r.verdict)}</b>`).join(" · ") : "",
       decide: v.chosen ? `${esc(v.chosen.label)} · ${esc(v.chosen.address.split(",")[0])}` : "",
-      plan: v.summary && v.summary.progress && v.summary.progress.total ? `<b>${v.summary.progress.done} / ${v.summary.progress.total}</b> checks answered` : "",
+      plan: v.summary && v.summary.progress && v.summary.progress.total ? `<b>${v.summary.progress.done}/${v.summary.progress.total}</b> checks answered` : "",
     };
   }
-  function rail(stage) {
-    const i = inputs(), cur = stageIdx(stage), reached = Math.max(i.reached || 0, cur), lock = lockIns(i);
+  const savedText = () => (state.savedAt ? "Saved " + state.savedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Saved");
+  function vtop(stage) {
+    const i = inputs(), v = state.v, cur = stageIdx(stage), reached = Math.max(i.reached || 0, cur), lock = lockIns(i);
+    const area = i.area && i.area.mode === "near" && i.area.place ? `${i.area.place} · ${i.area.radius} mi` : "All of Houston";
     const steps = STAGES.map((s, k) => {
       const cls = k === cur ? "now" : k <= reached ? "done" : "locked";
       return `<li class="step ${cls}"><button data-stage="${s}" ${k > reached ? "disabled" : ""} aria-current="${k === cur ? "step" : "false"}">
-        <span class="dot">${k < cur || (k <= reached && k !== cur) ? "✓" : k + 1}</span><span class="label">${STAGE_NAMES[s]}</span></button>
-        ${lock[s] && k !== cur ? `<div class="lock-in">${lock[s]}</div>` : ""}</li>`;
+        <span class="idx">${k !== cur && k <= reached ? ic("check", 13) : k + 1}</span><span class="label">${STAGE_NAMES[s]}</span>
+        <span class="sub">${k === cur ? "In progress" : lock[s] || ""}</span></button></li>`;
     }).join("");
-    return `<aside class="rail">
-      <div class="rail-title"><a class="link-btn" href="#/">← My ventures</a>
-        <input id="vname" value="${esc(state.v.name)}" aria-label="Venture name" maxlength="80"></div>
-      <ol class="steps">${steps}</ol>
-      <div class="saved">${state.savedAt ? "Saved " + state.savedAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Saved"}</div>
-    </aside>`;
+    return `<div class="glass vhead">
+        <div class="vhead-main"><input id="vname" class="vname" value="${esc(v.name)}" aria-label="Venture name" maxlength="80">
+          <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>I have a budget</span><span class="saved">${savedText()}</span></div></div>
+        <dl class="facts">
+          <div><dt>Budget</dt><dd>${kmoney(i.budget)}</dd></div>
+          <div><dt>Reserve</dt><dd>${kmoney(i.reserve)}</dd></div>
+          <div><dt>To open with</dt><dd>${kmoney(i.budget - i.reserve)}</dd></div>
+          <div><dt>Area</dt><dd>${esc(area)}</dd></div>
+        </dl>
+      </div>
+      <ol class="glass stepper" aria-label="Steps">${steps}</ol>`;
   }
-  async function renderVenture(stage) {
-    app.innerHTML = `<div class="venture">${rail(stage)}<section id="stage"><div class="loading"><span class="spinner"></span>Loading…</div></section></div>`;
+  function bindTop(stage) {
+    crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [STAGE_NAMES[stage]]]);
     app.querySelectorAll(".step button[data-stage]").forEach((b) => { b.onclick = () => { if (!b.disabled) goStage(b.dataset.stage); }; });
     const name = document.getElementById("vname");
-    name.onchange = () => { const n = name.value.trim(); if (n) save({ name: n }); };
+    name.onchange = () => { const n = name.value.trim(); if (n) save({ name: n }).then(() => crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [STAGE_NAMES[stage]]])); };
+  }
+  async function renderVenture(stage) {
+    app.innerHTML = `<div class="venture"><div id="vtop" class="venture">${vtop(stage)}</div><section id="stage"><div class="loading"><span class="spinner"></span>Loading…</div></section></div>`;
+    bindTop(stage);
     const el = document.getElementById("stage");
     try {
       await ({ budget: stageBudget, scan: stageScan, opportunities: stageOpportunities, shortlist: stageShortlist,
@@ -291,14 +343,10 @@
     if (state.v.stage !== stage) save({ stage }, true);
   }
   function refreshRail(stage) {
-    const r = app.querySelector(".rail"); if (!r) return;
-    const tmp = document.createElement("div"); tmp.innerHTML = rail(stage);
-    r.replaceWith(tmp.firstElementChild);
-    app.querySelectorAll(".step button[data-stage]").forEach((b) => { b.onclick = () => { if (!b.disabled) goStage(b.dataset.stage); }; });
-    const name = document.getElementById("vname");
-    name.onchange = () => { const n = name.value.trim(); if (n) save({ name: n }); };
+    const t = document.getElementById("vtop"); if (!t) return;
+    t.innerHTML = vtop(stage); bindTop(stage);
   }
-  const head = (n, title, lede, right) => `<div class="stage-head"><div><div class="eyebrow">Stage ${n} of 7 · ${STAGE_NAMES[STAGES[n - 1]]}</div>
+  const head = (n, title, lede, right) => `<div class="stage-head"><div><div class="eyebrow">Step ${n} of 7 · ${STAGE_NAMES[STAGES[n - 1]]}</div>
     <h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ""}</div>${right ? `<div class="actions">${right}</div>` : ""}</div>`;
 
   // ---------- Stage 1: budget ----------
@@ -328,7 +376,7 @@
               <select class="select" id="radius" aria-label="Radius">${[3, 5, 10, 15, 25].map((r) => `<option value="${r}" ${+area.radius === r ? "selected" : ""}>within ${r} mi</option>`).join("")}</select>
             </div>
           </div>
-          <div class="field" style="margin-bottom:0"><span class="label">Leave out (optional)</span>
+          <div class="field"><span class="label">Leave out (optional)</span>
             <div class="toggle-chips" id="exclude">${GROUPS.map((g) => `<button type="button" data-g="${esc(g)}" class="${ex.has(g) ? "on" : ""}">${esc(g)}</button>`).join("")}</div>
             <span class="hint">Tap a group you'd never run. Everything else is considered: 26 kinds of business.</span>
           </div>
@@ -338,7 +386,7 @@
           <div class="big" id="open-with">${kmoney(i.budget - i.reserve)}</div>
           <div class="eq" id="open-eq">${money(i.budget)} cash − ${money(i.reserve)} reserve</div>
           <div class="note">Opening costs come from sourced franchise disclosure benchmarks, scaled to each space, plus the deposit and rent while you build. No revenue forecast: we show how many months of rent you'd have left.</div>
-          <button class="btn primary" id="go-scan" style="justify-content:center">Scan Houston →</button>
+          <button class="btn primary block" id="go-scan">Scan Houston${ic("right")}</button>
           <div class="muted small" id="budget-err"></div>
         </div>
       </div>`;
@@ -354,7 +402,7 @@
       return { b, r, bad };
     };
     let t;
-    const persist = () => { clearTimeout(t); t = setTimeout(() => { const s = sync(); if (!s.bad) setInputs({ budget: s.b, reserve: s.r }, true); }, 500); };
+    const persist = () => { clearTimeout(t); t = setTimeout(() => { const s = sync(); if (!s.bad) setInputs({ budget: s.b, reserve: s.r }, true).then(() => refreshRail("budget")); }, 500); };
     cash.oninput = () => { range.value = parse(cash.value); sync(); persist(); };
     cash.onblur = () => { cash.value = num(parse(cash.value)); };
     reserve.oninput = () => { sync(); persist(); };
@@ -387,11 +435,11 @@
     el.innerHTML = `${head(2, "Our agents check every combination", `Every listed Houston space against every business, with ${kmoney(i.budget - i.reserve)} to open with. Three gates, in order: can the building host it, can you afford it, does the neighborhood support it.`,
       `<button class="btn ghost small" id="skip">Skip animation</button>`)}
       <div class="scan">
-        <div class="panel"><div class="funnel" id="funnel"><div class="loading"><span class="spinner"></span>Scanning…</div></div></div>
-        <div class="panel"><h3 style="margin-bottom:12px">The agents</h3><div class="agents">${agents.map((a) => `<div class="agent" data-a="${a}">${agentImg(a)}<div class="name">${a[0].toUpperCase() + a.slice(1)}</div><div class="job">${esc(AGENT_JOBS[a])}</div></div>`).join("")}</div>
-          <p class="muted small" style="margin-top:12px">Every number and gate is computed in code. No AI decides who passes.</p></div>
+        <div class="panel"><div class="ph">Combinations left after each gate<span class="aside">Houston · lease</span></div><div class="funnel" id="funnel"><div class="loading"><span class="spinner"></span>Scanning…</div></div></div>
+        <div class="panel"><div class="ph">Agents<span class="aside">${agents.length} on this scan</span></div><div class="agents">${agents.map((a) => `<div class="agent" data-a="${a}">${agentImg(a)}<div class="name">${a[0].toUpperCase() + a.slice(1)}</div><div class="job">${esc(AGENT_JOBS[a])}</div></div>`).join("")}</div>
+          <div class="note-line">${ic("info", 14)}<span>Every number and gate is computed in code. No AI decides who passes.</span></div></div>
       </div>
-      <div class="sticky-bar hidden" id="next-bar"><span id="next-note" class="muted small"></span><button class="btn primary" id="next">See what ${kmoney(i.budget - i.reserve)} can become →</button></div>`;
+      <div class="sticky-bar hidden" id="next-bar"><span id="next-note" class="muted small"></span><button class="btn primary" id="next">See what ${kmoney(i.budget - i.reserve)} can become${ic("right")}</button></div>`;
     let o;
     try { o = await opportunities(); } catch (e) { el.querySelector("#funnel").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
     const f = o.funnel;
@@ -404,7 +452,7 @@
     ];
     const max = Math.sqrt(f.combinations);
     el.querySelector("#funnel").innerHTML = rows.map(([n, title, what, s], k) => `
-      <div class="funnel-row" data-k="${k}"><div class="top"><span><span style="font-weight:600">${esc(title)}</span>${src(s)}</span><b data-n="${n}">0</b></div>
+      <div class="funnel-row" data-k="${k}"><div class="top"><span><span class="t">${esc(title)}</span>${src(s)}</span><b data-n="${n}">0</b></div>
         <div class="bar"><i data-w="${Math.max(2, 100 * Math.sqrt(n) / max)}"></i></div><div class="what">${esc(what)}</div></div>`).join("") +
       `<div class="funnel-foot">${f.rent_not_listed ? chip("grey", `${num(f.rent_not_listed)} with no listed rent: judged on cost before rent`) : ""}
         ${f.cost_not_estimated ? chip("grey", `${num(f.cost_not_estimated)} pass but cost not estimated`, "No comparable opening-cost benchmark (e.g. car wash)") : ""}
@@ -425,7 +473,7 @@
     };
     const finish = () => {
       clearTimers(); rows.forEach((_, k) => light(k, true));
-      el.querySelectorAll(".agent").forEach((a) => a.classList.add("done"));
+      el.querySelectorAll(".agent").forEach((a) => { a.classList.remove("on"); a.classList.add("done"); });
       el.querySelector("#next-bar").classList.remove("hidden");
       el.querySelector("#next-note").innerHTML = `<b class="num">${num(f.neighborhood_support)}</b> combinations pass every gate, across <b class="num">${o.directions.length}</b> kinds of business.`;
       el.querySelector("#skip").classList.add("hidden");
@@ -476,12 +524,15 @@
       const best = d.pairs.map((p) => `<li><span class="mk ${look(AFFORD, p.cost.affordability)[0]}">•</span><span>${esc(p.address.split(",")[0])} · ${esc(p.suite_label)} · <span class="num">${kmoney(p.cost.cash_to_open.base)}</span></span></li>`).join("");
       return `<div class="card clickable direction ${picked.includes(d.business) ? "selected" : ""}" data-b="${esc(d.business)}" tabindex="0" role="button" aria-pressed="${picked.includes(d.business)}">
         <div class="head"><div class="prop">${propImg(d.group)}</div><div><h3>${esc(d.label)}</h3><div class="group">${esc(d.group)}</div></div></div>
-        <div class="headline">${d.places} <small>place${d.places > 1 ? "s" : ""} pass every gate</small></div>
+        <div class="metrics">
+          <div><span class="k">Places</span><span class="v">${d.places}</span></div>
+          <div><span class="k">Within budget</span><span class="v">${d.within_budget || 0}</span></div>
+          <div class="wide"><span class="k">Cash to open</span><span class="v">${kmoney(d.cash_to_open_range[0])}–${kmoney(d.cash_to_open_range[1])}${src(costSrc(d.cost_basis))}</span></div>
+        </div>
         <div class="chips">${d.supported ? chip("green", `${d.supported} neighborhood-supported`) : chip("amber", "Mixed neighborhoods, net positive")}
-          ${d.within_budget ? chip("green", `${d.within_budget} within budget`) : ""}${d.only_low_case ? chip("amber", `${d.only_low_case} low case only`) : ""}${d.rent_not_listed ? chip("grey", `${d.rent_not_listed} rent not listed`) : ""}</div>
-        <div class="range">Cash to open <span class="num">${kmoney(d.cash_to_open_range[0])}–${kmoney(d.cash_to_open_range[1])}</span>${src(costSrc(d.cost_basis))} ${basis}</div>
-        <div class="why">${esc(d.why)}${src(demandSrc(d.business))}</div>
-        <details onclick="event.stopPropagation()"><summary class="link-btn">Best places (${d.pairs.length})</summary><ul class="plain" style="margin-top:8px;font-size:13px">${best}</ul></details>
+          ${d.only_low_case ? chip("amber", `${d.only_low_case} low case only`) : ""}${d.rent_not_listed ? chip("grey", `${d.rent_not_listed} rent not listed`) : ""}${basis}</div>
+        <p class="why">${esc(d.why)}${src(demandSrc(d.business))}</p>
+        <details onclick="event.stopPropagation()"><summary class="link-btn">Best places (${d.pairs.length})</summary><ul class="plain">${best}</ul></details>
       </div>`;
     }).join("");
     const cne = (o.cost_not_estimated || []).map((u) => `<div><b>${esc(u.label)}</b>: ${u.places} place${u.places > 1 ? "s" : ""} pass the building and neighborhood gates. ${esc(u.why)} We don't guess a number.</div>`).join("");
@@ -489,18 +540,18 @@
       <div class="opps">
         <div>
           ${o.directions.length ? `<div class="grid directions">${cards}</div>` : `<div class="panel">Nothing passes every gate at this budget. Try more cash, a smaller reserve, or a wider area.</div>`}
-          ${cne ? `<div class="panel not-estimated"><div class="eyebrow" style="color:#B4BCC6">Cost not estimated</div><div style="margin-top:8px;display:flex;flex-direction:column;gap:6px">${cne}</div></div>` : ""}
+          ${cne ? `<div class="panel not-estimated"><div class="ph">Cost not estimated</div><div class="muted" style="display:flex;flex-direction:column;gap:6px">${cne}</div></div>` : ""}
         </div>
-        <div class="map-wrap"><div class="map" id="map"></div>
-          <div class="map-legend"><span>● best spaces for each direction</span><span>rings ≈ I-610 and Beltway 8</span><span>drag to rotate · tap a pin</span></div></div>
+        <div class="glass map-wrap" style="border-radius:var(--r)"><div class="ph">Where they are<span class="aside">Best spaces per direction</span></div><div class="map" id="map"></div>
+          <div class="map-legend"><span>Rings ≈ I-610 and Beltway 8</span><span>Drag to rotate · select a pin</span></div></div>
       </div>
-      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Pick where →</button></div>`;
+      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Pick where${ic("right")}</button></div>`;
     const pairs = directionPairs(o).filter((p) => o.directions.some((d) => d.business === p.business));
     const pinsFor = () => pairs.map((p) => ({ id: pairKey(p), lat: p.lat, lon: p.lon, label: `${p.label} · ${p.address}`,
-      color: !picked.length || picked.includes(p.business) ? "#00B0E6" : "#2B4A6F" }));
+      color: !picked.length || picked.includes(p.business) ? "#D9DCE1" : "#4A4F57" }));
     const map = mapInto(el.querySelector("#map"), pinsFor(), (id) => {
       const b = id.split("|")[0], card = el.querySelector(`.direction[data-b="${CSS.escape(b)}"]`);
-      if (card) { card.scrollIntoView({ behavior: "smooth", block: "center" }); card.animate([{ boxShadow: "0 0 0 2px #00B0E6" }, { boxShadow: "none" }], { duration: 1200 }); }
+      if (card) { card.scrollIntoView({ behavior: "smooth", block: "center" }); card.animate([{ borderColor: "#00B0E6" }, { borderColor: "rgba(255,255,255,.08)" }], { duration: 1400 }); }
       map.select && map.select(id);
     });
     const update = () => {
@@ -548,7 +599,7 @@
     el.innerHTML = `<div class="loading"><span class="spinner"></span>Ranking places…</div>`;
     const o = await opportunities();
     const keys = (i.directions || []).filter((k) => o.directions.some((d) => d.business === k));
-    if (!keys.length) { el.innerHTML = `${head(4, "Pick where", "")}<div class="panel">Pick at least one direction first. <button class="link-btn" id="back">← Opportunities</button></div>`; el.querySelector("#back").onclick = () => goStage("opportunities"); return; }
+    if (!keys.length) { el.innerHTML = `${head(4, "Pick where", "")}<div class="panel">Pick at least one direction first. <button class="link-btn" id="back">${ic("left", 14)}Opportunities</button></div>`; el.querySelector("#back").onclick = () => goStage("opportunities"); return; }
     const pairs = directionPairs(o, keys);
     let chosen = (state.v.shortlist || []).map(pairKey).filter((k) => pairs.some((p) => pairKey(p) === k));
     const filter = keys.includes(state.filter) ? state.filter : "all";
@@ -561,15 +612,15 @@
         <div><div class="title"><span class="rank">#${k + 1}</span>${esc(p.label)}</div>
           <div class="addr">${esc(p.address)} · ${esc(p.suite_label)}${/sq ft/.test(p.suite_label || "") ? "" : ` · ${num(p.sf)} sq ft`}${p.rent && p.rent.monthly ? ` · ${money(p.rent.monthly)}/mo${src(rentSrc(p.rent))}` : ` · rent not listed`}</div>
           ${gateChips(p)}<div class="reason">${esc(decidingReason(p))}</div></div>
-        <div class="cash"><div>Cash to open${src(costSrc(p.cost.basis_quality))}</div><b>${kmoney(p.cost.cash_to_open.base)}</b>
-          <div>${kmoney(p.cost.cash_to_open.low)}–${kmoney(p.cost.cash_to_open.high)}</div>
-          ${runway != null ? `<div title="Months of rent your remaining cash would cover with zero revenue">${runway} mo of rent left after opening</div>` : ""}</div>
+        <div class="cash"><b>${kmoney(p.cost.cash_to_open.base)}</b>
+          <div>${kmoney(p.cost.cash_to_open.low)}–${kmoney(p.cost.cash_to_open.high)}${src(costSrc(p.cost.basis_quality))}</div>
+          ${runway != null ? `<div title="Months of rent your remaining cash would cover after opening, with zero revenue">${runway} mo of rent in reserve</div>` : ""}</div>
       </div>`;
     }).join("");
     el.innerHTML = `${head(4, "Pick where", "The best spaces for your directions, ranked: neighborhood support first, then cash. Four gates on each. Pick up to 3 to investigate.")}
       <div class="filter-row"><div class="seg" id="filter"><button data-f="all" class="${filter === "all" ? "on" : ""}">All (${pairs.length})</button>${keys.map((k) => { const d = o.directions.find((x) => x.business === k); return `<button data-f="${esc(k)}" class="${filter === k ? "on" : ""}">${esc(d.label)} (${pairs.filter((p) => p.business === k).length})</button>`; }).join("")}</div></div>
-      <div class="pairs">${rows || `<div class="panel">No ranked spaces for this direction.</div>`}</div>
-      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Investigate →</button></div>`;
+      <div class="pairs">${rows ? `<div class="pairs-head"><span></span><span>Place and gates</span><span>Cash to open</span></div>${rows}` : `<div class="panel">No ranked spaces for this direction.</div>`}</div>
+      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Investigate${ic("right")}</button></div>`;
     const update = () => {
       el.querySelector("#pick-note").innerHTML = chosen.length ? `<b class="num">${chosen.length}</b> of 3 places picked` : "Pick up to 3 places";
       el.querySelector("#next").disabled = !chosen.length;
@@ -600,18 +651,30 @@
   function stanceMark(s) { return s > 0 ? ["green", "✓"] : s < 0 ? ["red", "✗"] : ["grey", "·"]; }
   function li(cls, mk, html) { return `<li><span class="mk ${cls}">${mk}</span><span>${html}</span></li>`; }
   function verdictCard(r, p) {
-    const cls = VERDICT_CLS[r.verdict] || "conditional";
-    const flips = r.flips && r.flips.length ? r.flips : [];
-    return `<div class="panel verdict-card">
-      <div class="stamp ${cls}">${esc(r.verdict)}</div>
-      <div class="verdict-body"><div class="eyebrow">${esc(r.label)} · ${esc(p.suite_label || r.suite || "")}</div>
-        <h2>${esc(r.address)}</h2>
-        <ul>${(r.blockers || []).map((b) => `<li style="color:#F3B4B0">${esc(tidy(b))}</li>`).join("")}${(r.blockers || []).length ? "" : (r.reasons || []).slice(0, 3).map((x) => `<li>${esc(tidy(x))}</li>`).join("")}</ul>
-        ${flips.length ? `<div class="flip"><b>What would flip it:</b> ${flips.map(esc).join(" · ")}</div>` : r.verdict === "GO" ? `<div class="flip"><b>What would flip it:</b> nothing flagged. The checks below still need answers before you sign.</div>` : ""}
-        <div class="actions" style="margin-top:12px"><span class="muted small">${esc(r.computed_by)}</span>
-          <button class="link-btn" data-explain="1">✦ Explain the neighborhood in plain English</button></div>
-        <div class="narr"></div>
-      </div></div>`;
+    const flips = r.flips && r.flips.length ? r.flips : [], blockers = r.blockers || [];
+    const items = blockers.length ? blockers.map((b) => `<li class="blk">${esc(tidy(b))}</li>`).join("")
+      : (r.reasons || []).slice(0, 3).map((x) => `<li>${esc(tidy(x))}</li>`).join("");
+    const flipText = flips.length ? flips.map(esc).join(" · ") : r.verdict === "GO" ? "Nothing flagged. The checks below still need answers before you sign." : "";
+    return `<div class="panel verdict-panel">
+      <div class="verdict-top">${verdictBadge(r.verdict)}
+        <div class="verdict-id"><div class="eyebrow">${esc(r.label)} · ${esc(p.suite_label || r.suite || "")}</div><h2>${esc(r.address)}</h2></div></div>
+      ${items ? `<ul class="verdict-reasons">${items}</ul>` : ""}
+      ${flipText ? `<div class="flip well"><span class="k">What would flip it</span><span>${flipText}</span></div>` : ""}
+      <div class="verdict-foot"><span class="faint small">${esc(r.computed_by)}</span>
+        <button class="btn ghost small" data-explain="1">${ic("spark", 14)}Explain the neighborhood in plain English</button></div>
+      <div class="narr"></div>
+    </div>`;
+  }
+  function figures(r) {
+    const m = r.pillars.money, rent = m.rent || {}, req = m.required || {}, months = m.months_of_rent_after_opening;
+    const dem = look(DEMAND, r.pillars.demand.verdict)[1];
+    return `<div class="panel"><div class="ph">Key figures</div><dl class="figures">
+      <div><dt>Cash to open (base)</dt><dd>${kmoney(m.cash_to_open.base)}</dd><span class="sub">${kmoney(m.cash_to_open.low)}–${kmoney(m.cash_to_open.high)}${src(costSrc(m.basis_quality))}</span></div>
+      <div><dt>Needed incl. reserve</dt><dd>${kmoney(req.base)}</dd><span class="sub">vs ${kmoney(inputs().budget)} budget · ${esc(look(AFFORD, m.affordability)[1])}</span></div>
+      <div><dt>Months of rent left</dt><dd>${months ?? "—"}</dd><span class="sub">After opening, with zero revenue</span></div>
+      <div><dt>Asking rent</dt><dd>${rent.monthly != null ? money(rent.monthly) + "/mo" : "Not listed"}</dd><span class="sub">${rent.monthly != null ? `$${rent.psf_year}/sq ft/yr${src(rentSrc(rent))}` : "Ask the broker"}</span></div>
+      <div><dt>Neighborhood</dt><dd>${esc(cap(dem.replace(/^Neighborhood /, "")))}</dd><span class="sub">${src(demandSrc(r.business))}</span></div>
+    </dl></div>`;
   }
   function pillarsHtml(r, p) {
     const P = r.pillars, m = P.money, sp = P.space, d = P.demand, i = inputs();
@@ -633,17 +696,17 @@
       <details class="pillar" data-p="money"><summary><span class="ptitle">Money</span>${chip(aff[0], aff[1])}<span class="pline">Cash to open <span class="num">${kmoney(m.cash_to_open.base)}</span> (${kmoney(m.cash_to_open.low)}–${kmoney(m.cash_to_open.high)})${m.months_of_rent_after_opening != null ? ` · ${m.months_of_rent_after_opening} months of rent left with zero revenue` : ""}</span></summary>
         <div class="pillar-body">
           <div class="stress">
-            <div class="stat"><div class="k">Needed incl. ${kmoney(r.reserve)} reserve (base)</div><div class="v">${kmoney(req.base)}</div><div class="k">${kmoney(req.low)}–${kmoney(req.high)}</div></div>
-            <div class="stat"><div class="k">Left of your ${kmoney(i.budget)} (base)</div><div class="v ${left < 0 ? "red" : "green"}">${left < 0 ? "−" : ""}${kmoney(Math.abs(left))}</div></div>
-            <div class="stat"><div class="k">Months of rent left after opening, zero revenue</div><div class="v ${m.months_of_rent_after_opening == null ? "" : m.months_of_rent_after_opening < 6 ? "red" : m.months_of_rent_after_opening < 12 ? "amber" : "green"}">${m.months_of_rent_after_opening ?? "—"}</div></div>
-            ${dw.required ? `<div class="stat"><div class="k">If opening slips 3 months (base)</div><div class="v ${dw.affordability === "within" ? "green" : dw.affordability === "stretch" ? "amber" : "red"}">${kmoney(dw.required.base)}</div><div class="k">${esc(look(AFFORD, dw.affordability)[1])} · ${dw.months_of_rent_after_opening ?? "—"} mo left</div></div>` : ""}
+            <div class="stat well"><div class="k">Needed incl. ${kmoney(r.reserve)} reserve (base)</div><div class="v">${kmoney(req.base)}</div><div class="k">${kmoney(req.low)}–${kmoney(req.high)}</div></div>
+            <div class="stat well"><div class="k">Left of your ${kmoney(i.budget)} (base)</div><div class="v ${left < 0 ? "red" : "green"}">${left < 0 ? "−" : ""}${kmoney(Math.abs(left))}</div></div>
+            <div class="stat well"><div class="k">Months of rent left after opening, zero revenue</div><div class="v ${m.months_of_rent_after_opening == null ? "" : m.months_of_rent_after_opening < 6 ? "red" : m.months_of_rent_after_opening < 12 ? "amber" : "green"}">${m.months_of_rent_after_opening ?? "—"}</div></div>
+            ${dw.required ? `<div class="stat well"><div class="k">If opening slips 3 months (base)</div><div class="v ${dw.affordability === "within" ? "green" : dw.affordability === "stretch" ? "amber" : "red"}">${kmoney(dw.required.base)}</div><div class="k">${esc(look(AFFORD, dw.affordability)[1])} · ${dw.months_of_rent_after_opening ?? "—"} mo left</div></div>` : ""}
           </div>
           <table class="ledger"><thead><tr><th>What you pay before opening</th><th>Low</th><th>Base</th><th>High</th></tr></thead>
             <tbody>${ledger}<tr class="total"><td>Cash to open</td><td>${money(m.cash_to_open.low)}</td><td>${money(m.cash_to_open.base)}</td><td>${money(m.cash_to_open.high)}</td></tr></tbody></table>
           ${m.excludes ? `<div>${chip("amber", "Excludes " + m.excludes)}</div>` : ""}${m.note ? `<div class="muted small">${esc(m.note)}</div>` : ""}
           ${dw.franchise_fee_excluded ? `<div class="muted small">Franchise fee left out (independent operator): ${kmoney(dw.franchise_fee_excluded[0])}–${kmoney(dw.franchise_fee_excluded[1])} if you franchise.</div>` : ""}
-          <details><summary class="link-btn">ⓘ Where these numbers come from (${(m.sources || []).length})</summary>
-            <div class="sources" style="margin-top:8px">${(m.sources || []).map((s) => `<div class="source"><b>${esc(s.publisher_or_brand)}</b>, ${esc(s.document)} · <a href="${esc(s.url)}" target="_blank" rel="noopener">source ↗</a><q>${esc(s.quote)}</q></div>`).join("")}
+          <details><summary class="link-btn">Where these numbers come from (${(m.sources || []).length})</summary>
+            <div class="sources" style="margin-top:8px">${(m.sources || []).map((s) => `<div class="source"><b>${esc(s.publisher_or_brand)}</b>, ${esc(s.document)} · ${ext(s.url, "Source")}<q>${esc(s.quote)}</q></div>`).join("")}
             <div class="muted small">Franchise disclosure document (Item 7) ranges, scaled to this space's size, plus the listing's 2-month deposit and rent while building. No revenue forecast.</div></div></details>
         </div></details>
       <details class="pillar" data-p="deal"><summary><span class="ptitle">Deal</span>${rent.monthly != null ? chip("green", "Rent listed") : chip("grey", "Rent not listed")}<span class="pline">${rent.monthly != null ? `${money(rent.monthly)}/month · $${rent.psf_year}/sq ft/yr` : "Ask the broker for the rent"}</span></summary>
@@ -654,9 +717,9 @@
           ${r.space.lease_pending ? li("amber", "!", "A lease is pending on this space") : ""}
         </ul></div></details>
       <details class="pillar" data-p="records"><summary><span class="ptitle">Records</span>${conflicts.length ? chip("amber", `${conflicts.length} to check`) : recs.length ? chip("grey", `${recs.length} unconfirmed`) : chip("green", "No conflicts")}<span class="pline">${recs.length ? esc(recs[0].note.split(".")[0]) : "CoStar's record and the linked scans agree on what we could check"}</span></summary>
-        <div class="pillar-body"><ul class="plain">${recs.length ? recs.map((x) => li(x.status === "unknown" ? "grey" : "amber", x.status === "unknown" ? "?" : "!", `<b>${esc(x.fact.replace(/_/g, " "))}</b>: ${esc(Array.isArray(x.value) ? x.value.join(", ") : typeof x.value === "object" ? JSON.stringify(x.value) : x.value)}<br><span class="muted small">${esc(x.note)}</span>${x.evidence_url ? ` <a href="${esc(x.evidence_url)}" target="_blank" rel="noopener">open ↗</a>` : ""}${src(x.source)}`)).join("") : li("green", "✓", "No disagreements between CoStar and the linked tours")}</ul></div></details>
+        <div class="pillar-body"><ul class="plain">${recs.length ? recs.map((x) => li(x.status === "unknown" ? "grey" : "amber", x.status === "unknown" ? "?" : "!", `<b>${esc(x.fact.replace(/_/g, " "))}</b>: ${esc(Array.isArray(x.value) ? x.value.join(", ") : typeof x.value === "object" ? JSON.stringify(x.value) : x.value)}<br><span class="muted small">${esc(x.note)}</span>${x.evidence_url ? " " + ext(x.evidence_url, "Open") : ""}${src(x.source)}`)).join("") : li("green", "✓", "No disagreements between CoStar and the linked tours")}</ul></div></details>
       <details class="pillar" data-p="permits"><summary><span class="ptitle">Permits</span>${chip("amber", `${permits.length} to verify`)}<span class="pline">City change-of-use path + business licenses. None counted as cleared.</span></summary>
-        <div class="pillar-body"><ul class="plain permits">${permits.map((x) => `<li><span class="mk amber">!</span><span><b>${esc(x.title)}</b> · <span class="muted">${esc(x.authority)}</span><br><span class="small">${esc(x.detail)}</span></span>${x.url ? `<a class="small" href="${esc(x.url)}" target="_blank" rel="noopener">official page ↗</a>` : ""}</li>`).join("")}</ul>
+        <div class="pillar-body"><ul class="plain permits">${permits.map((x) => `<li><span class="mk amber">!</span><span><b>${esc(x.title)}</b> · <span class="muted">${esc(x.authority)}</span><br><span class="small">${esc(x.detail)}</span></span>${x.url ? ext(x.url, "Official page") : ""}</li>`).join("")}</ul>
           <div class="muted small">Assumes City of Houston rules. Some "Houston" addresses are in unincorporated Harris County; confirm the jurisdiction for this pin. No timelines are claimed.</div></div></details>
       <details class="pillar" data-p="neighborhood"><summary><span class="ptitle">Neighborhood</span>${chip(dem[0], dem[1])}<span class="pline">${esc(d.headline || "")}</span></summary>
         <div class="pillar-body">${d.insight ? `<div><b>${esc(d.insight)}</b></div>` : ""}
@@ -665,8 +728,9 @@
     </div>`;
   }
   function mission(r) {
-    return `<div class="mission">${(r.trace || []).map((t, k) => `<div class="mstep" data-k="${k}" title="${esc(t.role)}">${agentImg(t.agent)}<div><div class="n">${esc(t.agent)}</div><div class="s">${esc(t.summary || "")}</div></div></div>`).join("")}</div>
-      <div class="trace-detail" id="trace-detail"></div>`;
+    return `<div class="panel"><div class="ph">Agent run<span class="aside">${(r.trace || []).length} steps</span></div>
+      <div class="mission">${(r.trace || []).map((t, k) => `<div class="mstep" data-k="${k}" title="${esc(t.role)}">${agentImg(t.agent)}<div style="min-width:0"><div class="n">${esc(t.agent)}</div><div class="s">${esc(t.summary || "")}</div></div></div>`).join("")}</div>
+      <div class="trace-detail well" id="trace-detail"></div></div>`;
   }
   async function stageInvestigate(el) {
     const list = state.v.shortlist || [];
@@ -674,10 +738,10 @@
     const keys = list.map(pairKey);
     if (!keys.includes(state.tab)) state.tab = keys[0];
     await industries();
-    const tabs = () => list.map((p) => { const k = pairKey(p), r = state.reviews[k]; return `<button data-k="${esc(k)}" class="${k === state.tab ? "on" : ""}">${r ? chip(VERDICT_CHIP[r.verdict] || "grey", r.verdict) : state.reviewErr[k] ? chip("red", "error") : `<span class="spinner" style="width:12px;height:12px"></span>`}${esc(p.label)} · ${esc(p.address.split(",")[0])}</button>`; }).join("");
+    const tabs = () => list.map((p) => { const k = pairKey(p), r = state.reviews[k]; return `<button data-k="${esc(k)}" class="${k === state.tab ? "on" : ""}">${r ? chip(VERDICT_CHIP[r.verdict] || "grey", VLABEL[r.verdict] || r.verdict) : state.reviewErr[k] ? chip("red", "error") : `<span class="spinner" style="width:12px;height:12px"></span>`}${esc(p.label)} · ${esc(p.address.split(",")[0])}</button>`; }).join("");
     el.innerHTML = `${head(5, "Investigate", "Thirteen agents review each place: the space, the money, the deal, the records, the permits and the neighborhood. Verdict first; open any section for the evidence.")}
       <div class="tabs" id="tabs">${tabs()}</div><div id="review"></div>
-      <div class="sticky-bar"><span class="muted" id="rev-note"></span><button class="btn primary" id="next">Compare and decide →</button></div>`;
+      <div class="sticky-bar"><span class="muted" id="rev-note"></span><button class="btn primary" id="next">Compare and decide${ic("right")}</button></div>`;
     const bindTabs = () => el.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => { state.tab = b.dataset.k; el.querySelector("#tabs").innerHTML = tabs(); bindTabs(); show(true); });
     bindTabs();
     const note = () => { const n = Object.keys(state.reviews).filter((k) => keys.includes(k)).length; el.querySelector("#rev-note").innerHTML = `<b class="num">${n}</b> of ${keys.length} reviewed`; el.querySelector("#next").disabled = !n; };
@@ -686,7 +750,7 @@
       const box = el.querySelector("#review"), k = state.tab, p = list.find((x) => pairKey(x) === k), r = state.reviews[k];
       if (state.reviewErr[k]) { box.innerHTML = `<div class="error">${esc(state.reviewErr[k])}</div>`; return; }
       if (!r) { box.innerHTML = `<div class="loading"><span class="spinner"></span>Agents are reviewing ${esc(p.label)} at ${esc(p.address)}…</div>`; return; }
-      box.innerHTML = `${mission(r)}<div id="vc" style="opacity:0;transition:opacity .4s">${verdictCard(r, p)}${pillarsHtml(r, p)}</div>`;
+      box.innerHTML = `<div class="inv"><div class="inv-main" id="vc" style="opacity:0">${verdictCard(r, p)}${pillarsHtml(r, p)}</div><aside class="inv-side">${figures(r)}${mission(r)}</aside></div>`;
       const steps = [...box.querySelectorAll(".mstep")];
       const reveal = () => { const vc = box.querySelector("#vc"); if (vc) vc.style.opacity = 1; };
       if (animate) { steps.forEach((s, j) => later(() => s.classList.add("lit"), 80 + j * 110)); later(reveal, 80 + steps.length * 110); }
@@ -697,10 +761,10 @@
         steps.forEach((x) => x.classList.remove("active"));
         if (open) { det.innerHTML = ""; return; }
         s.classList.add("active");
-        det.innerHTML = `<div class="panel"><b style="text-transform:capitalize">${esc(t.agent)}</b> · <span class="muted">${esc(t.role)}</span>
+        det.innerHTML = `<b style="text-transform:capitalize">${esc(t.agent)}</b> · <span class="muted">${esc(t.role)}</span>
           <div style="margin-top:6px">${esc(t.summary || "")}</div>
-          <div class="muted small" style="margin-top:6px">Computed by ${esc(t.computed_by)}${t.confidence != null ? ` · confidence ${t.confidence}` : ""}${t.ms != null ? ` · ${t.ms} ms` : ""} · hands off: ${esc(t.handoff || "")}</div>
-          ${(t.findings || []).length ? `<details><summary class="link-btn">Findings (${t.findings.length})</summary><pre>${esc(JSON.stringify(t.findings, null, 1).slice(0, 4000))}</pre></details>` : ""}</div>`;
+          <div class="faint small" style="margin-top:6px">Computed by ${esc(t.computed_by)}${t.confidence != null ? ` · confidence ${t.confidence}` : ""}${t.ms != null ? ` · ${t.ms} ms` : ""} · hands off: ${esc(t.handoff || "")}</div>
+          ${(t.findings || []).length ? `<details style="margin-top:6px"><summary class="link-btn">Findings (${t.findings.length})</summary><pre>${esc(JSON.stringify(t.findings, null, 1).slice(0, 4000))}</pre></details>` : ""}`;
       });
       const space = box.querySelector(".space3d");
       box.querySelector('details[data-p="space"]').addEventListener("toggle", function onT(ev) {
@@ -722,7 +786,7 @@
         out.innerHTML = `<div class="loading" style="padding:8px 0"><span class="spinner"></span>Writing a plain-English summary…</div>`;
         try {
           const x = await review(p, true);
-          out.innerHTML = x.narration ? `<div class="narration"><span class="ai-label">✦ ${esc(x.narration_label || "AI-written, numbers checked")}</span><div>${esc(x.narration)}</div></div>` : `<div class="muted small">No AI summary available (no LLM key on this server). The verdict above is computed in code.</div>`;
+          out.innerHTML = x.narration ? `<div class="narration"><span class="ai-label">${ic("spark", 12)}${esc(x.narration_label || "AI-written, numbers checked")}</span><div>${esc(x.narration)}</div></div>` : `<div class="muted small">No AI summary available (no LLM key on this server). The verdict above is computed in code.</div>`;
         } catch (e) { out.innerHTML = `<div class="muted small">AI summary unavailable: ${esc(e.message)}</div>`; }
       };
     };
@@ -747,20 +811,20 @@
     const order = { GO: 0, CONDITIONAL: 1, "NO-GO": 2 };
     const rows = list.map((p) => ({ p, r: state.reviews[pairKey(p)] })).filter((x) => x.r).sort((a, b) => (order[a.r.verdict] ?? 3) - (order[b.r.verdict] ?? 3));
     const ch = state.v.chosen ? pairKey(state.v.chosen) : null, budget = inputs().budget;
-    el.innerHTML = `${head(6, "Decide", "Side by side. The deciding reason and what would flip each one. Commit to one and we'll turn its open checks into a plan.")}
-      <div class="compare">${rows.map(({ p, r }) => {
-        const m = r.pillars.money, k = pairKey(p);
-        return `<div class="card col ${k === ch ? "chosen" : ""}">
-          <div class="eyebrow">${esc(r.label)}</div><h3>${esc(r.address.split(",")[0])} · ${esc(p.suite_label)}</h3>
-          <div class="stamp small ${VERDICT_CLS[r.verdict]}">${esc(r.verdict)}</div>
-          <div class="row"><div class="k">Deciding reason</div>${esc(tidy((r.blockers || [])[0] || (r.conditions || [])[0] || (r.reasons || [])[0] || ""))}</div>
-          <div class="row"><div class="k">What would flip it</div>${esc(tidy((r.flips || [])[0]) || (r.verdict === "GO" ? "Nothing flagged; checks still apply" : "—"))}</div>
-          <div class="row"><div class="k">Needed incl. reserve (base) vs ${kmoney(budget)}${src(costSrc(m.basis_quality))}</div><span class="num">${kmoney(m.required.base)}</span> · ${m.months_of_rent_after_opening ?? "—"} months of rent left</div>
-          <div class="row"><div class="k">Neighborhood${src(demandSrc(r.business))}</div>${esc(look(DEMAND, r.pillars.demand.verdict)[1])}</div>
-          <div class="row"><div class="k">Open checks</div>${(r.checks || []).length + (r.pillars.permits || []).length}</div>
-          <button class="btn ${k === ch ? "" : "primary"}" data-k="${esc(k)}" style="align-self:stretch;justify-content:center">${k === ch ? "✓ Committed" : "Commit to this one"}</button>
-        </div>`;
-      }).join("") || `<div class="panel">No reviews yet.</div>`}</div>`;
+    const isCh = (p) => pairKey(p) === ch;
+    const cell = (fn) => rows.map(({ p, r }) => `<td class="${isCh(p) ? "chosen" : ""}">${fn(p, r)}</td>`).join("");
+    el.innerHTML = `${head(6, "Decide", "Side by side: the deciding reason and what would flip each one. Commit to one and its open checks become your plan.")}
+      ${rows.length ? `<div class="glass cmp-card"><div class="table-scroll"><table class="cmp">
+        <thead><tr><th></th>${rows.map(({ p, r }) => `<th class="${isCh(p) ? "chosen" : ""}"><div class="eyebrow">${esc(r.label)}</div><div class="ct">${esc(r.address.split(",")[0])} · ${esc(p.suite_label)}</div>${verdictBadge(r.verdict, true)}</th>`).join("")}</tr></thead>
+        <tbody>
+          <tr><th>Deciding reason</th>${cell((p, r) => esc(tidy((r.blockers || [])[0] || (r.conditions || [])[0] || (r.reasons || [])[0] || "")))}</tr>
+          <tr><th>What would flip it</th>${cell((p, r) => esc(tidy((r.flips || [])[0]) || (r.verdict === "GO" ? "Nothing flagged; checks still apply" : "—")))}</tr>
+          <tr><th>Needed incl. reserve</th>${cell((p, r) => `<span class="num">${kmoney(r.pillars.money.required.base)}</span> <span class="faint">of ${kmoney(budget)}</span>${src(costSrc(r.pillars.money.basis_quality))}`)}</tr>
+          <tr><th>Months of rent left</th>${cell((p, r) => `<span class="num">${r.pillars.money.months_of_rent_after_opening ?? "—"}</span> <span class="faint">with zero revenue</span>`)}</tr>
+          <tr><th>Neighborhood</th>${cell((p, r) => { const d = look(DEMAND, r.pillars.demand.verdict); return chip(d[0], d[1]) + src(demandSrc(r.business)); })}</tr>
+          <tr><th>Open checks</th>${cell((p, r) => `<span class="num">${(r.checks || []).length + (r.pillars.permits || []).length}</span>`)}</tr>
+          <tr class="act"><th></th>${cell((p) => { const k = pairKey(p); return `<button class="btn ${isCh(p) ? "" : "primary"} block" data-k="${esc(k)}">${isCh(p) ? ic("check", 14) + "Committed" : "Commit to this one"}</button>`; })}</tr>
+        </tbody></table></div></div>` : `<div class="panel">No reviews yet.</div>`}`;
     el.querySelectorAll("button[data-k]").forEach((b) => b.onclick = async () => {
       const p = list.find((x) => pairKey(x) === b.dataset.k), r = state.reviews[b.dataset.k];
       if (r.verdict === "NO-GO" && !confirm("This one is NO-GO. Commit anyway and plan around the blocker?")) return;
@@ -771,10 +835,10 @@
 
   // ---------- Stage 7: plan & track ----------
   const WHO = [
-    ["broker", "Broker", "📇", /records disagree|caption|scan|survey|size field|asking|rent|lease basis|available|pending|suite/i],
-    ["landlord", "Landlord", "🔑", /landlord|tenant-improvement|build-out|outdoor|fenced|plumb|ventilat|hvac|electric|power|ceiling|parking|loading|deed|grease|hood|drain|floor|consent|signage/i],
-    ["inspector", "Inspector", "🦺", /inspect|fire|accessib|occupancy|final|sprinkler|exit/i],
-    ["city", "City & state", "🏛", /permit|license|certificate|registration|tax|city|county|state|health|tabc|tdlr|hhsc/i],
+    ["broker", "Broker", "brief", /records disagree|caption|scan|survey|size field|asking|rent|lease basis|available|pending|suite/i],
+    ["landlord", "Landlord", "key", /landlord|tenant-improvement|build-out|outdoor|fenced|plumb|ventilat|hvac|electric|power|ceiling|parking|loading|deed|grease|hood|drain|floor|consent|signage/i],
+    ["inspector", "Inspector", "shield", /inspect|fire|accessib|occupancy|final|sprinkler|exit/i],
+    ["city", "City & state", "landmark", /permit|license|certificate|registration|tax|city|county|state|health|tabc|tdlr|hhsc/i],
   ];
   function planItems(r) {
     const items = [], seen = new Set();
@@ -793,15 +857,15 @@
     const k = pairKey(c);
     if (!state.reviews[k]) state.reviews[k] = await review(c);
     const r = state.reviews[k], items = planItems(r), done = Object.assign({}, state.v.checklist || {});
-    const groups = [["you", "You", "🧭"]].concat(WHO.map(([id, name, icon]) => [id, name, icon]))
+    const groups = [["you", "You", "compass"]].concat(WHO.map(([id, name, icon]) => [id, name, icon]))
       .map(([id, name, icon]) => ({ id, name, icon, items: items.filter((x) => x.who === id) })).filter((g) => g.items.length);
     const render = () => {
       const n = items.filter((x) => done[x.id]).length;
       el.innerHTML = `${head(7, "Plan & track", `Every open question for <b>${esc(c.label)}</b> at ${esc(c.address)}, grouped by who can answer it. Tick them off as answers come in; progress shows on your venture card.`)}
-        <div class="panel plan-progress"><div class="stamp small ${VERDICT_CLS[r.verdict]}" style="width:84px;height:84px;font-size:13px">${esc(r.verdict)}</div>
-          <div style="flex:1"><div style="display:flex;justify-content:space-between;margin-bottom:8px"><b>${n} of ${items.length} answered</b><span class="muted small">${n === items.length ? "Ready to sign" : "Keep going"}</span></div><div class="check-bar"><i style="width:${items.length ? Math.round(100 * n / items.length) : 0}%"></i></div></div></div>
-        <div class="grid who">${groups.map((g) => `<div class="panel"><h3><span>${g.icon}</span>${esc(g.name)}<span class="count">${g.items.filter((x) => done[x.id]).length} / ${g.items.length}</span></h3>
-          ${g.items.map((x) => `<label class="check ${done[x.id] ? "done" : ""}"><input type="checkbox" data-id="${esc(x.id)}" ${done[x.id] ? "checked" : ""}><span>${x.blocker ? chip("red", "Blocks") + " " : ""}${esc(tidy(x.text))}${x.url ? ` <a href="${esc(x.url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗</a>` : ""}</span></label>`).join("")}</div>`).join("")}</div>`;
+        <div class="panel plan-progress">${verdictBadge(r.verdict)}
+          <div class="pp"><div style="display:flex;justify-content:space-between;gap:12px"><b>${n} of ${items.length} checks answered</b><span class="muted small">${n === items.length ? "Ready to sign" : `${items.length - n} open`}</span></div><div class="check-bar"><i style="width:${items.length ? Math.round(100 * n / items.length) : 0}%"></i></div></div></div>
+        <div class="grid who">${groups.map((g) => `<div class="panel"><div class="ph">${ic(g.icon)}${esc(g.name)}<span class="count">${g.items.filter((x) => done[x.id]).length} / ${g.items.length}</span></div>
+          ${g.items.map((x) => `<label class="check ${done[x.id] ? "done" : ""}"><input type="checkbox" data-id="${esc(x.id)}" ${done[x.id] ? "checked" : ""}><span>${x.blocker ? chip("red", "Blocks") + " " : ""}${esc(tidy(x.text))}${x.url ? " " + ext(x.url, "Official page") : ""}</span></label>`).join("")}</div>`).join("")}</div>`;
       el.querySelectorAll("input[data-id]").forEach((b) => b.onchange = async () => {
         if (b.checked) done[b.dataset.id] = true; else delete done[b.dataset.id];
         const n2 = items.filter((x) => done[x.id]).length;
