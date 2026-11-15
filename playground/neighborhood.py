@@ -757,6 +757,255 @@ def momentum_agent(lat, lon, use, radius=MOMENTUM_RADIUS_MI, kit=None, today=Non
                           "costar_property_id": r["property_id"]} for r in examples]}
 
 
+# --- Lookalike model ---------------------------------------------------------------
+
+FEATURES = {  # name -> (label, function of a 3-mile area profile)
+    "log_density": ("residents per sq mi (log)", lambda p: math.log1p(p["density_per_sqmi"] or 0)),
+    "log_income": ("median household income (log, approx.)", lambda p: math.log(max(p["median_income_approx"], 1))),
+    "share_25_34": ("share aged 25-34", lambda p: p["share_age_25_34"]),
+    "share_35_54": ("share aged 35-54", lambda p: p["share_age_35_54"]),
+    "share_55_plus": ("share aged 55+", lambda p: p["share_age_55_64"] + p["share_age_65_plus"]),
+    "share_under_18": ("share under 18", lambda p: p["share_under_5"] + p["share_age_5_17"]),
+    "growth": ("population growth since 2015-19", lambda p: max(-0.5, min(1.0, p["growth"] or 0.0))),
+}
+
+
+def features(profile):
+    if not profile or profile.get("median_income_approx") is None or not profile.get("population"):
+        return None
+    return [fn(profile) for _, fn in FEATURES.values()]
+
+
+def solve(a, b):
+    """Solve a small linear system by Gauss-Jordan elimination with partial pivoting."""
+    m = [row[:] + [v] for row, v in zip(a, b)]
+    size = len(m)
+    for col in range(size):
+        pivot = max(range(col, size), key=lambda r: abs(m[r][col]))
+        m[col], m[pivot] = m[pivot], m[col]
+        if abs(m[col][col]) < 1e-12:
+            raise ValueError("singular system")
+        for r in range(size):
+            if r != col:
+                factor = m[r][col] / m[col][col]
+                m[r] = [x - factor * y for x, y in zip(m[r], m[col])]
+    return [m[r][size] / m[r][r] for r in range(size)]
+
+
+def sigmoid(z):
+    return 1 / (1 + math.exp(-max(-35.0, min(35.0, z))))
+
+
+def fit_logistic(x, y, l2=1.0, iterations=25):
+    """L2-regularised logistic regression by Newton's method on standardised features."""
+    k = len(x[0])
+    mean = [sum(r[j] for r in x) / len(x) for j in range(k)]
+    sd = [math.sqrt(sum((r[j] - mean[j]) ** 2 for r in x) / len(x)) or 1.0 for j in range(k)]
+    z = [[1.0] + [(r[j] - mean[j]) / sd[j] for j in range(k)] for r in x]
+    w = [0.0] * (k + 1)
+    for _ in range(iterations):
+        p = [sigmoid(sum(a * b for a, b in zip(w, row))) for row in z]
+        grad = [sum((yi - pi) * row[j] for row, yi, pi in zip(z, y, p)) - (l2 * w[j] if j else 0)
+                for j in range(k + 1)]
+        hess = [[sum(pi * (1 - pi) * row[i] * row[j] for row, pi in zip(z, p)) + (l2 if i == j and i else 0)
+                 for j in range(k + 1)] for i in range(k + 1)]
+        step = solve(hess, grad)
+        w = [a + b for a, b in zip(w, step)]
+        if max(abs(v) for v in step) < 1e-6:
+            break
+    return {"mean": mean, "sd": sd, "weights": w, "features": list(FEATURES)}
+
+
+def model_logit(model, row):
+    return model["weights"][0] + sum(w * (v - m) / s for w, v, m, s in
+                                     zip(model["weights"][1:], row, model["mean"], model["sd"]))
+
+
+def contributions(model, row):
+    """Per-feature push on the score (standardised value x weight): what makes this place look alike."""
+    return {name: round(w * (v - m) / s, 3) for name, w, v, m, s in
+            zip(model["features"], model["weights"][1:], row, model["mean"], model["sd"])}
+
+
+def auc(positives, negatives):
+    """Probability that a random positive scores above a random negative (ties count half)."""
+    if not positives or not negatives:
+        return None
+    ranked = sorted([(v, 1) for v in positives] + [(v, 0) for v in negatives])
+    rank_sum, i = 0.0, 0
+    while i < len(ranked):
+        j = i
+        while j < len(ranked) and ranked[j][0] == ranked[i][0]:
+            j += 1
+        average_rank = (i + j + 1) / 2
+        rank_sum += average_rank * sum(label for _, label in ranked[i:j])
+        i = j
+    n_pos, n_neg = len(positives), len(negatives)
+    return (rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+
+
+def training_data(use, radius=RADIUS_MI):
+    """Positives: real facilities (OSM). Background: every Houston-area tract point (random places)."""
+    facilities, _ = osm_facilities(use)
+    pos = []
+    for f in facilities:
+        row = features(area_profile(f["lat"], f["lon"], radius))
+        if row:
+            pos.append({"lat": f["lat"], "lon": f["lon"], "x": row, "name": f["name"],
+                        "indoor": f["indoor"], "commercial": f["commercial"]})
+    background = []
+    for p in reference_profiles(radius):
+        row = features(p)
+        if row:
+            background.append({"lat": p["lat"], "lon": p["lon"], "x": row})
+    return pos, background
+
+
+def spatial_fold(lat, lon, folds, cell=0.2):
+    """Assign a place to a fold by its 0.2-degree grid cell, so held-out places are not next to training ones."""
+    key = f"{math.floor(lat / cell)}:{math.floor(lon / cell)}"
+    return int(hashlib.sha1(key.encode()).hexdigest(), 16) % folds
+
+
+def cross_validate(pos, background, cols, folds, assign):
+    """Fit on all folds but one, score the held-out fold; pooled over folds."""
+    for r in pos + background:
+        r["fold"] = assign(r)
+    held_pos, held_neg = [], []
+    for k in range(folds):
+        train_pos = [r for r in pos if r["fold"] != k]
+        train_neg = [r for r in background if r["fold"] != k]
+        test_pos = [r for r in pos if r["fold"] == k]
+        test_neg = [r for r in background if r["fold"] == k]
+        if not train_pos or not test_neg:
+            continue
+        model = fit_logistic([[r["x"][c] for c in cols] for r in train_pos + train_neg],
+                             [1] * len(train_pos) + [0] * len(train_neg))
+        neg_scores = [model_logit(model, [r["x"][c] for c in cols]) for r in test_neg]
+        held_neg.extend(neg_scores)
+        for r in test_pos:
+            held_pos.append((model_logit(model, [r["x"][c] for c in cols]), neg_scores, r["indoor"] or r["commercial"]))
+    return held_pos, held_neg
+
+
+def evaluate(use, folds=5, seed=7, radius=RADIUS_MI):
+    """Hold out real facilities and check they score above random Houston-area places.
+
+    Positives are mapped facilities; the background is every Houston-area tract point
+    (one per ~4,500 residents, so roughly a random residential address). Two splits:
+    random by place, and spatial by 0.2-degree grid cell (~13 miles) so a held-out
+    facility's neighbours are not in training. The 7-feature model was fixed before
+    evaluation; one-feature baselines (income only, density only) go through the same
+    cross-validation. Reports AUC with a bootstrap interval and the hit rate: the share
+    of held-out facilities scoring in the top 30% of their fold's background places.
+    """
+    pos, background = training_data(use, radius)
+    rng = random.Random(seed)
+    names = list(FEATURES)
+    all_cols = list(range(len(names)))
+    out = {"use": use, "facilities": len(pos), "background_places": len(background), "radius_mi": radius,
+           "features": {k: v[0] for k, v in FEATURES.items()}, "splits": {}}
+    for split in ("random", "spatial"):
+        fold_of = {}
+
+        def assign(r, split=split):
+            key = (r["lat"], r["lon"])
+            if key not in fold_of:
+                fold_of[key] = rng.randrange(folds) if split == "random" else spatial_fold(r["lat"], r["lon"], folds)
+            return fold_of[key]
+        held_pos, held_neg = cross_validate(pos, background, all_cols, folds, assign)
+        pos_scores = [s for s, _, _ in held_pos]
+        paid = [s for s, _, flag in held_pos if flag]
+        hits = [percentile(s, negs) >= 70 for s, negs, _ in held_pos if negs]
+        boot = sorted(auc([rng.choice(pos_scores) for _ in pos_scores], [rng.choice(held_neg) for _ in held_neg])
+                      for _ in range(300))
+        baselines = {}
+        for label, name in (("income_only", "log_income"), ("density_only", "log_density")):
+            bp, bn = cross_validate(pos, background, [names.index(name)], folds, assign)
+            baselines[label] = round(auc([s for s, _, _ in bp], bn), 3)
+        out["splits"][split] = {
+            "auc": round(auc(pos_scores, held_neg), 3),
+            "auc_90ci": [round(boot[15], 3), round(boot[284], 3)],
+            "hit_rate_top30": round(sum(hits) / len(hits), 3) if hits else None, "hit_rate_by_chance": 0.3,
+            "indoor_or_paid_facilities": len(paid),
+            "indoor_or_paid_auc": round(auc(paid, held_neg), 3) if paid else None,
+            "baseline_auc": baselines,
+            "held_out_facilities": len(pos_scores), "held_out_background": len(held_neg),
+        }
+    model = fit_logistic([r["x"] for r in pos + background], [1] * len(pos) + [0] * len(background))
+    out["model"] = model
+    out["coefficients"] = {k: round(w, 3) for k, w in zip(model["features"], model["weights"][1:])}
+    out["background_logits"] = sorted(round(model_logit(model, r["x"]), 4) for r in background)
+    out["caveats"] = [
+        "Facilities come from OpenStreetMap, which is incomplete and skews to mapped parks and clubs.",
+        "Measures resemblance to where facilities already are, not paid demand or profitability.",
+        "Bootstrap interval resamples places independently and ignores spatial correlation, so it is too narrow.",
+    ]
+    out["evaluated_at"] = now_iso()
+    return out
+
+
+def evaluation_path(use):
+    return CACHE / f"lookalike-eval-{re.sub(r'[^a-z]+', '-', use)}.json"
+
+
+@lru_cache(maxsize=None)
+def lookalike_model(use):
+    path = evaluation_path(use)
+    if path.exists():
+        return json.loads(path.read_text())
+    result = evaluate(use)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result))
+    return result
+
+
+VALIDATED_AUC = 0.6  # below this on the spatial hold-out, the score is shown but does not vote
+
+
+def lookalike_agent(lat, lon, use, radius=RADIUS_MI):
+    """Does this place look like places where the business already operates? Measured, not asserted."""
+    ev = lookalike_model(use)
+    word = USES[use]["facility_word"]
+    row = features(area_profile(lat, lon, radius))
+    spatial = ev["splits"]["spatial"]
+    validated = spatial["auc"] is not None and spatial["auc"] >= VALIDATED_AUC
+    method = (f"Logistic model on 7 resident features within {radius:g} mi, trained on {ev['facilities']} mapped "
+              f"{word} vs {ev['background_places']} Houston-area tract points. Held out by area (13-mile grid "
+              f"cells): AUC {spatial['auc']} (90% CI {spatial['auc_90ci'][0]}-{spatial['auc_90ci'][1]}); "
+              f"{fmt_pct(spatial['hit_rate_top30'])} of held-out facilities score in the top 30% (30% by chance). "
+              f"Same CV with income alone: AUC {spatial['baseline_auc']['income_only']}; density alone: "
+              f"{spatial['baseline_auc']['density_only']}.")
+    sources = [{"name": "Lookalike evaluation (computed here)", "url": None, "retrieved_at": ev["evaluated_at"],
+                "cached": True, "note": method}]
+    if not row:
+        return {"sources": sources, "status": "unknown", "summary": "No resident profile; lookalike unknown.",
+                "findings": [record("lookalike_percentile", None, "computed", "lookalike", note=method)]}
+    logit = model_logit(ev["model"], row)
+    pct = percentile(logit, ev["background_logits"])
+    push = contributions(ev["model"], row)
+    top = sorted(push.items(), key=lambda kv: -abs(kv[1]))[:3]
+    why = ", ".join(f"{FEATURES[k][0]} {'raises' if v > 0 else 'lowers'} it" for k, v in top)
+    findings = [
+        record("lookalike_percentile", pct, "computed", f"lookalike-{use}", ev["evaluated_at"][:10],
+               0.7 if validated else 0.3, None, "agrees" if validated else "unknown",
+               note=f"Looks more like places with {word} than {pct}% of Houston-area neighborhoods. Biggest "
+                    f"drivers here: {why}. {method}"),
+        record("lookalike_drivers", push, "computed", f"lookalike-{use}", ev["evaluated_at"][:10], 0.6, None,
+               "agrees", note="Standardised feature x model weight; positive pushes toward 'looks like existing "
+                              "facilities'. Correlation with where facilities are, not proof of demand."),
+    ]
+    signal = {"name": "lookalike", "value": pct, "validated": validated,
+              "stance": stance(pct, plus=70, minus=30) if validated else None,
+              "reason": (f"Looks more like places that already have {word} than {pct}% of Houston-area "
+                         f"neighborhoods" + ("" if validated else " (model not validated; not used in the verdict)"))}
+    return {"sources": sources, "findings": findings, "signal": signal, "confidence": 0.7 if validated else 0.3,
+            "summary": f"Lookalike score {pct}/100 vs Houston-area neighborhoods. {why}.",
+            "evaluation": {k: v for k, v in ev.items() if k not in ("model", "background_logits")},
+            "handoff": "Lookalike percentile to the coordinator (votes only if the held-out AUC clears "
+                       f"{VALIDATED_AUC})."}
+
+
 @lru_cache(maxsize=None)
 def us_population_6_plus_record():
     """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""

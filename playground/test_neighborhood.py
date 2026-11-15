@@ -245,6 +245,57 @@ class Momentum(unittest.TestCase):
         self.assertEqual(facts["kit_fitness_recreation_net_last_3_years"]["status"], "unknown")
 
 
+class Lookalike(unittest.TestCase):
+    def test_auc(self):
+        self.assertEqual(n.auc([3, 4], [1, 2]), 1.0)
+        self.assertEqual(n.auc([1], [1]), 0.5)
+        self.assertAlmostEqual(n.auc([2, 0], [1]), 0.5)
+        self.assertIsNone(n.auc([], [1]))
+
+    def test_solve(self):
+        self.assertEqual([round(v, 6) for v in n.solve([[2, 0], [0, 4]], [2, 8])], [1, 2])
+
+    def test_fit_logistic_learns_direction(self):
+        x = [[i / 10] for i in range(100)]
+        y = [1 if i > 60 or i % 7 == 0 else 0 for i in range(100)]
+        model = n.fit_logistic(x, y, l2=0.1)
+        self.assertGreater(model["weights"][1], 0)
+        self.assertGreater(n.model_logit(model, [9.0]), n.model_logit(model, [1.0]))
+
+    def test_spatial_fold_is_stable_per_cell(self):
+        self.assertEqual(n.spatial_fold(29.81, -95.41, 5), n.spatial_fold(29.82, -95.42, 5))
+
+    def test_cross_validation_on_separable_places(self):
+        rng = n.random.Random(1)
+        pos = [{"lat": 29 + rng.random(), "lon": -95 - rng.random(), "x": [5 + rng.random(), 0.0],
+                "indoor": False, "commercial": False, "name": "p"} for _ in range(40)]
+        bg = [{"lat": 29 + rng.random(), "lon": -95 - rng.random(), "x": [rng.random(), 0.0]} for _ in range(200)]
+        held_pos, held_neg = n.cross_validate(pos, bg, [0], 5, lambda r: n.spatial_fold(r["lat"], r["lon"], 5))
+        self.assertEqual(n.auc([s for s, _, _ in held_pos], held_neg), 1.0)
+
+    def fake_eval(self, auc_value):
+        model = {"mean": [0.0] * 7, "sd": [1.0] * 7, "weights": [0.0, 1.0] + [0.0] * 6, "features": list(n.FEATURES)}
+        split = {"auc": auc_value, "auc_90ci": [auc_value - 0.04, auc_value + 0.04], "hit_rate_top30": 0.44,
+                 "baseline_auc": {"income_only": 0.66, "density_only": 0.45}}
+        return {"model": model, "background_logits": [float(v) for v in range(11)], "facilities": 100,
+                "background_places": 11, "evaluated_at": "2026-11-14T00:00:00+00:00",
+                "splits": {"spatial": split, "random": split}}
+
+    def test_lookalike_agent_percentile_and_validation_gate(self):
+        profile = {"density_per_sqmi": math.e ** 9 - 1, "median_income_approx": 1, "population": 1,
+                   "share_age_25_34": 0, "share_age_35_54": 0, "share_age_55_64": 0, "share_age_65_plus": 0,
+                   "share_under_5": 0, "share_age_5_17": 0, "growth": 0}
+        with mock.patch.object(n, "area_profile", lambda *a, **k: profile):
+            with mock.patch.object(n, "lookalike_model", lambda use: self.fake_eval(0.64)):
+                out = n.lookalike_agent(29.8, -95.4, "indoor pickleball")
+            self.assertEqual(out["signal"]["value"], 86)   # logit 9 vs background 0..10 -> (9 + 0.5) / 11
+            self.assertEqual(out["signal"]["stance"], 1)
+            with mock.patch.object(n, "lookalike_model", lambda use: self.fake_eval(0.55)):
+                out = n.lookalike_agent(29.8, -95.4, "indoor pickleball")
+            self.assertIsNone(out["signal"]["stance"])     # not validated -> does not vote
+            self.assertIn("not validated", out["signal"]["reason"])
+
+
 class Planner(unittest.TestCase):
     def test_plan_for_modeled_and_unmodeled_uses(self):
         steps, _ = n.plan("indoor pickleball")
