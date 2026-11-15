@@ -54,6 +54,7 @@ def load_env():
 load_env()
 from stage2.orchestrator import investigate as run_stage2_investigation
 from stage3_engine import adapter as stage3_adapter
+import opportunity_report
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -365,6 +366,16 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = urlsplit(self.path)
+        if route.path in ('/api/opportunity-report', '/api/opportunity-report/source'):
+            query=parse_qs(route.query)
+            try:
+                investigation_id=(query.get('id') or [''])[0]
+                result=(opportunity_report.read_source(investigation_id,(query.get('report_id') or [''])[0],(query.get('stage') or [''])[0])
+                        if route.path.endswith('/source') else opportunity_report.read_report(investigation_id))
+                if result is None: self.send_json({'error':'Report or source not found.'},status=404)
+                else: self.send_json(result)
+            except ValueError as error: self.send_json({'error':str(error)},status=400)
+            return
         if route.path == "/api/stage3/result":
             query=parse_qs(route.query)
             result=read_json_store(STAGE3_RESULTS_PATH).get((query.get('id') or [''])[0])
@@ -611,13 +622,25 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         handoff_id = uuid.uuid4().hex
         try:
+            # Persist the actual full discovery response, not a reconstruction from the selected listing.
+            with DISCOVERY_LOCK:
+                stage1_snapshot=json.loads(json.dumps(session['response'],ensure_ascii=False))
+                intake_snapshot=json.loads(json.dumps(session['intake'],ensure_ascii=False))
+            record=next((r for r in stage1_snapshot['results'] if r.get('stable_id') == stable_id), None)
+            if record is None:
+                raise ValueError('Selected listing is no longer present in the discovery snapshot.')
+            opportunity_report.save_stage1(handoff_id,discovery_id,intake_snapshot,stage1_snapshot)
+        except (OSError,ValueError,TypeError) as error:
+            self.send_json({'error':f'Stage 1 evidence could not be preserved ({type(error).__name__}).'},status=500)
+            return
+        try:
             property_facts = costar.get_property(record["property_id"]) if costar else {}
         except (OSError, ValueError, KeyError, TypeError, RuntimeError):
             property_facts = {}
         property_facts_available = isinstance(property_facts, dict) and "error" not in property_facts
         source_handoff = {
             "handoff_id": handoff_id, "created_at": datetime.now(timezone.utc).isoformat(), "stage": 2,
-            "intake": session["intake"], "selected_listing": record,
+            "intake": intake_snapshot, "selected_listing": record,
             "property_facts": property_facts if property_facts_available else {},
             "property_facts_status": "available" if property_facts_available else "unavailable",
         }
@@ -683,6 +706,19 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {"error": f"Unknown tool: {name}"}
 
     def do_POST(self):
+        if self.path == '/api/opportunity-report/generate':
+            try:
+                payload=self.read_json_payload()
+                investigation_id=str(payload.get('investigation_id') or '')
+                stage1=opportunity_report.read_stage1(investigation_id)
+                with DISCOVERY_LOCK:
+                    handoff=json.loads(json.dumps(INVESTIGATION_HANDOFFS.get(investigation_id),ensure_ascii=False))
+                stage3=read_json_store(STAGE3_RESULTS_PATH).get(investigation_id)
+                result=opportunity_report.generate(investigation_id,stage1,handoff,stage3,OPENROUTER_API_KEY)
+                self.send_json(result)
+            except (ValueError,json.JSONDecodeError) as error: self.send_json({'error':str(error)},status=400)
+            except (OSError,RuntimeError) as error: self.send_json({'error':str(error)},status=503)
+            return
         if self.path == "/api/discovery":
             try:
                 self.run_discovery(self.read_json_payload())

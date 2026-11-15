@@ -4,6 +4,9 @@
 .verification-cache.json
 .stage2-handoffs.json
 .stage3-results.json
+.stage1-reports/
+.opportunity-reports/
+.opportunity-usage.jsonl
 .stage2-assets/
 /project helix/stage3_engine/vendor/output/
 *.json.tmp
