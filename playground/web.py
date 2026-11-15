@@ -409,6 +409,21 @@ def main():
             if urlsplit(self.path).path == "/api/location/run":
                 self.location_run()
                 return
+            if route in ("/api/finance-lab/run", "/api/finance-lab/create-loan"):
+                try:
+                    import finance_lab
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 16384:
+                        raise ValueError("Invalid request size")
+                    payload = json.loads(self.rfile.read(length))
+                    body = (finance_lab.run(payload, args.kit) if route.endswith("/run")
+                            else finance_lab.create_loan(payload))
+                    self.send(json.dumps(body).encode(), "application/json")
+                except (ValueError, TypeError, KeyError, OverflowError) as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError) as error:
+                    self.send(json.dumps({"error": f"Engine unavailable: {error}"[:300]}).encode(), "application/json", 502)
+                return
             if urlsplit(self.path).path != "/api/pilot/simulate":
                 self.send(b"Not found", "text/plain", 404)
                 return
@@ -436,6 +451,17 @@ def main():
                 return
             if route.path == "/flow":
                 self.send((ROOT / "static/flow.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            if route.path == "/finance-lab":
+                self.send((ROOT / "static/finance-lab.html").read_bytes(), "text/html; charset=utf-8")
+                return
+            if route.path == "/api/finance-lab/options":
+                try:
+                    import finance_lab
+                    body = finance_lab.options(params.get("market", ["houston"])[0], args.kit)
+                    self.send(json.dumps(body).encode(), "application/json")
+                except (ValueError, OSError, KeyError, RuntimeError) as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
                 return
             if route.path == "/suite":
                 self.send((ROOT / "static/suite.html").read_bytes(), "text/html; charset=utf-8")
@@ -602,7 +628,7 @@ def main():
                       "/static/neighborhood.js": "text/javascript", "/static/neighborhood.css": "text/css",
                       "/static/suite.css": "text/css", "/static/suite.js": "text/javascript",
                       "/static/suite3d.js": "text/javascript",
-                      "/static/flow.css": "text/css", "/static/flow.js": "text/javascript",
+                      "/static/flow.css": "text/css", "/static/flow.js": "text/javascript", "/static/finance-lab.js": "text/javascript",
                       "/static/vendor/gsap.min.js": "text/javascript", "/static/vendor/ScrollTrigger.min.js": "text/javascript",
                       "/static/vendor/lenis.min.js": "text/javascript", "/static/vendor/three.min.js": "text/javascript"}
             if route.path in assets:
