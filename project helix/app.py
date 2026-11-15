@@ -22,6 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR))
 
 from costar_service import CoStarService
+from intake import build_intake
 
 def load_env():
     """Load env vars from project helix/.env or root .env without overwriting existing."""
@@ -371,6 +372,20 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {"error": f"Unknown tool: {name}"}
 
     def do_POST(self):
+        if self.path == "/api/intake":
+            content_len = int(self.headers.get("Content-Length", 0))
+            if not 0 < content_len <= 8192:
+                self.send_json({"error": "Invalid intake request size."}, status=400)
+                return
+            try:
+                payload = json.loads(self.rfile.read(content_len).decode("utf-8"))
+                intake = build_intake(payload)
+            except (json.JSONDecodeError, ValueError) as e:
+                self.send_json({"error": str(e) or "Invalid intake."}, status=400)
+                return
+            self.send_json({"intake": intake})
+            return
+
         if self.path == "/api/chat":
             content_len = int(self.headers.get("Content-Length", 0))
             if content_len == 0:
