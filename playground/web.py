@@ -22,7 +22,7 @@ from advisor_money import advisor_cash, comparison_inputs
 from cost_ledger import estimate_costs
 from maximo import REVIEW_USES, project_cash, review_property, suite_options
 from market_rank import load_market, rank_market
-from deal import load_deal_data, rent_for_simulation, run_deal
+from deal import load_deal_data, load_rent_estimates, rent_for_simulation, run_deal
 import neighborhood
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
@@ -407,7 +407,8 @@ def main():
                     if not (0 <= capital <= 1e9 and 0 <= reserve <= 1e9):
                         raise ValueError("Cash and reserve must be between 0 and 1,000,000,000.")
                     body = rank_market(market_candidates(market), params.get("use", [""])[0], capital, reserve,
-                                       min_sf=number("min_sf"), max_sf=number("max_sf"))
+                                       min_sf=number("min_sf"), max_sf=number("max_sf"),
+                                       rent_estimates=load_rent_estimates())
                     self.send(json.dumps(body).encode(), "application/json")
                 except ValueError as error:
                     self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)

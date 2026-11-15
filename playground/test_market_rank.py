@@ -19,8 +19,9 @@ def prop(pid, kind=2, ceiling=24.0, captions=(), number="100", street="Main"):
     }
 
 
-def space(sf, suite="A", rate=12.0, listing=1):
+def space(sf, suite="A", rate=12.0, listing=1, space_id=None):
     raw = {"rateHigh": rate, "rateBasis": 2, "squareFeetMax": sf, "serviceType": 13} if rate else {"squareFeetMax": sf}
+    raw["id"] = space_id if space_id is not None else listing * 100 + sf
     return {"listing_id": listing, "suite": suite, "square_feet": sf, "available_on": None, "on_market": None,
             "raw": raw}
 
@@ -78,6 +79,28 @@ class MarketRanking(unittest.TestCase):
         self.assertIsNone(unknown["within_budget"])
         self.assertIn("budget fit unknown", unknown["why"])
         self.assertEqual(result["budget_unknown"], 1)
+
+    def estimates(self, sid, low, typical, high, low_confidence=False):
+        return {"spaces": {str(sid): {"low": low, "typical": typical, "high": high, "method": "similar_deals",
+                                      "low_confidence": low_confidence}}}
+
+    def test_rent_estimate_fills_a_missing_rent_conservatively(self):
+        est = self.estimates(7, 8.0, 10.0, 12.0)
+        result = self.rank((prop(1), [space(8000, rate=None, space_id=7)]), (prop(2), [space(8000, rate=10.0)]),
+                           (prop(3), [space(8000, rate=None, space_id=8)]), rent_estimates=est)
+        self.assertEqual(ids(result), [2, 1, 3])  # listed rent, then estimate-backed, then unknown
+        estimated = result["results"][1]
+        self.assertEqual((estimated["within_budget"], estimated["budget_basis"]), (True, "rent estimate"))
+        self.assertIn("even at the high rent estimate", estimated["why"])
+        self.assertEqual(result["rent_from_estimate"], 1)
+
+    def test_estimate_over_budget_and_low_confidence(self):
+        over = self.rank((prop(1), [space(8000, rate=None, space_id=7)]), capital=330000,
+                         rent_estimates=self.estimates(7, 40.0, 60.0, 80.0))
+        self.assertFalse(over["results"][0]["within_budget"])
+        thin = self.rank((prop(1), [space(8000, rate=None, space_id=7)]),
+                         rent_estimates=self.estimates(7, 8.0, 10.0, 12.0, low_confidence=True))
+        self.assertEqual((thin["results"][0]["within_budget"], thin["results"][0]["budget_basis"]), (None, "default rent"))
 
     def test_build_out_scales_with_size(self):
         self.assertEqual(build_allowance("indoor pickleball", 10000), 200000)

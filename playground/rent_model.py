@@ -9,9 +9,9 @@ location. The served model is trained on every deal, so a building's own past si
 range; the evaluation holds whole buildings out, so its figures are for buildings the model never saw.
 
 Evaluated with 5 folds grouped by building, on recent signed deals and on current listings' asking rents,
-against a simple baseline (median of the same city, use and lease basis). The 10th-90th percentile
+against a simple baseline (median of RECENT deals of the same city, use and lease basis). The 10th-90th percentile
 range is widened by a conformal margin so it holds about 80% of rents in buildings the model never saw.
-For a space use where the model did not beat the baseline in every held-out test (flex, today), the
+For a space use where the model did not beat that baseline in every held-out test, the
 served range is the 10th-90th percentile of similar recent deals instead, and the output says which.
 
 Training needs scikit-learn and numpy; the web server only reads the output file, so the app stays
@@ -131,17 +131,28 @@ def support(deals, now_year):
     return Counter(peer_key(r) for r in deals if r["year"] >= now_year - RECENT_YEARS)
 
 
-def baseline(train):
-    """Median rent of the same city, use and lease basis (falling back to city, then everything)."""
-    by_key, by_city = defaultdict(list), defaultdict(list)
-    for r in train:
-        by_key[peer_key(r)].append(r["rent"])
-        by_city[r["city"]].append(r["rent"])
+def baseline(train, since=None):
+    """Median rent of the same city, use and lease basis (falling back to city, then everything).
+
+    With `since`, only deals from that year on count, falling back to all years where a key has none. That
+    is the fair comparison: the model only trains on recent deals and knows the year, so an all-years median
+    is dragged down by old rents and is an easy target."""
+    def pools(rows):
+        by_key, by_city = defaultdict(list), defaultdict(list)
+        for r in rows:
+            by_key[peer_key(r)].append(r["rent"])
+            by_city[r["city"]].append(r["rent"])
+        return by_key, by_city
+    every = pools(train)
+    recent = pools([r for r in train if r["year"] >= since]) if since is not None else every
     overall = statistics.median(r["rent"] for r in train)
 
     def predict(row):
-        pool = by_key.get(peer_key(row)) or by_city.get(row["city"])
-        return statistics.median(pool) if pool else overall
+        for by_key, by_city in (recent, every):
+            pool = by_key.get(peer_key(row)) or by_city.get(row["city"])
+            if pool:
+                return statistics.median(pool)
+        return overall
     return predict
 
 
@@ -245,7 +256,7 @@ def out_of_fold(deals, listings, since, folds=5):
         train = [r for r in deals if fold(r) != k]
         tests = {"deals": [r for r in deals if fold(r) == k and r["year"] >= since],
                  "listings": [r for r in listings if fold(r) == k and r["rent"] is not None]}
-        model, base = fit(train), baseline(train)
+        model, base = fit(train), baseline(train, since)
         for name, rows in tests.items():
             if rows:
                 result[name][0].extend(rows)
