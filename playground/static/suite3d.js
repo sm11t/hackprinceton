@@ -20,6 +20,15 @@
     plate: 0x0f2036, floor: 0x0f2238
   };
   var PI = Math.PI;
+  var BG = 0x0B0C0E;   // page background (neutral graphite)
+
+  // Everything is drawn in neutral greys: any palette color maps to a grey of the same lightness.
+  function grey(c) {
+    var col = c instanceof THREE.Color ? c.clone() : new THREE.Color(c);
+    var L = 0.2126 * col.r + 0.7152 * col.g + 0.0722 * col.b;
+    var g = Math.min(0.92, 0.09 + 0.8 * L);
+    return new THREE.Color(g, g, g);
+  }
 
   function PR() { return Math.min(window.devicePixelRatio || 1, 2); }
   function hasThree() { return typeof window.THREE !== 'undefined' && window.THREE && window.THREE.WebGLRenderer; }
@@ -62,9 +71,8 @@
   function mat(color, o) {
     o = o || {};
     var m = new THREE.MeshPhongMaterial({
-      color: color, flatShading: true, shininess: o.shine == null ? 16 : o.shine, specular: 0x1a2a3a
+      color: grey(color), flatShading: true, shininess: Math.min(o.shine == null ? 12 : o.shine, 20), specular: 0x161616
     });
-    if (o.emissive != null) { m.emissive = new THREE.Color(o.emissive); m.emissiveIntensity = o.ei == null ? 0.5 : o.ei; }
     if (o.opacity != null && o.opacity < 1) {
       m.transparent = true; m.opacity = o.opacity; m.depthWrite = false;
     }
@@ -72,14 +80,14 @@
     return m;
   }
   function basic(color, opacity, additive) {
-    var m = new THREE.MeshBasicMaterial({ color: color });
+    var m = new THREE.MeshBasicMaterial({ color: grey(color) });
     if (opacity != null && opacity < 1) { m.transparent = true; m.opacity = opacity; }
-    if (additive) { m.transparent = true; m.blending = THREE.AdditiveBlending; m.depthWrite = false; }
+    if (additive) { m.transparent = true; m.depthWrite = false; }   // no additive blending: nothing glows
     return m;
   }
   function edges(mesh, opacity, color) {
     var e = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry, 25),
-      new THREE.LineBasicMaterial({ color: color || C.med, transparent: true, opacity: opacity == null ? 0.35 : opacity }));
+      new THREE.LineBasicMaterial({ color: grey(color || C.med), transparent: true, opacity: opacity == null ? 0.35 : opacity }));
     mesh.add(e);
     return mesh;
   }
@@ -115,9 +123,9 @@
     return m;
   }
   function lights(scene) {
-    scene.add(new THREE.HemisphereLight(0xcfeeff, 0x0a1628, 0.85));
-    var d = new THREE.DirectionalLight(0xffffff, 0.75); d.position.set(5, 10, 7); scene.add(d);
-    var rim = new THREE.DirectionalLight(0x00B0E6, 0.35); rim.position.set(-6, 3, -5); scene.add(rim);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x1a1a1a, 0.8));
+    var d = new THREE.DirectionalLight(0xffffff, 0.7); d.position.set(5, 10, 7); scene.add(d);
+    var rim = new THREE.DirectionalLight(0xffffff, 0.2); rim.position.set(-6, 3, -5); scene.add(rim);
   }
   function disposeTree(root) {
     root.traverse(function (o) {
@@ -286,7 +294,7 @@
     var g = new THREE.Group(), tint = AGENT_TINT[name] || C.med;
     put(g, new THREE.IcosahedronGeometry(1, 1), tint, 0, 0, 0, { shine: 40, edges: true, eo: 0.25, ec: C.cyan });
     var visor = put(g, new THREE.BoxGeometry(1.3, 0.48, 0.4), C.dark, 0, 0.08, 0.72, { shine: 80 });
-    visor.material.emissive = new THREE.Color(C.page);
+    visor.material.emissive = new THREE.Color(0x000000);
     put(g, new THREE.SphereGeometry(0.11, 8, 6), 0, -0.28, 0.1, 0.95, { material: basic(C.cyan) });
     put(g, new THREE.SphereGeometry(0.11, 8, 6), 0, 0.28, 0.1, 0.95, { material: basic(C.cyan) });
     put(g, new THREE.CylinderGeometry(0.18, 0.18, 0.2, 8), C.gray, -1.0, 0, 0, { rz: PI / 2 });
@@ -496,7 +504,7 @@
     };
     api.overlay = function (css) {
       var d = document.createElement('div');
-      d.style.cssText = 'position:absolute;pointer-events:none;color:#E4F6FF;font:12px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;' + (css || '');
+      d.style.cssText = 'position:absolute;pointer-events:none;color:#E8EAED;font:12px/1.35 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;' + (css || '');
       el.appendChild(d);
       api.overlays.push(d);
       return d;
@@ -545,7 +553,7 @@
     var bay = new THREE.Mesh(new THREE.CircleGeometry(14, 9), basic(0x05203d, 0.85));
     bay.rotation.x = -PI / 2; bay.position.set(32, 0.03, 26); world.add(bay);
 
-    var grid = new THREE.GridHelper(G * 2, 150, C.med, C.med);
+    var grid = new THREE.GridHelper(G * 2, 150, grey(C.med), grey(C.med));
     grid.material.transparent = true; grid.material.opacity = 0.06; grid.material.depthWrite = false;
     grid.position.y = 0.05;
     world.add(grid);
@@ -593,14 +601,14 @@
     if (!L) return null;
     var scene = L.scene;
     lights(scene);
-    scene.fog = new THREE.Fog(C.page, 60, 160);
+    scene.fog = new THREE.Fog(BG, 60, 160);
     buildHouston(scene);
     var pinGroup = new THREE.Group();
     scene.add(pinGroup);
     var pins = {}, hits = [], selected = null, hovered = null;
-    var label = L.overlay('padding:4px 8px;border-radius:6px;background:rgba(13,27,46,.92);border:1px solid rgba(0,176,230,.45);white-space:nowrap;transform:translate(-50%,-140%);display:none;z-index:2');
+    var label = L.overlay('padding:4px 8px;border-radius:6px;background:rgba(22,24,28,.88);border:1px solid rgba(255,255,255,.14);white-space:nowrap;transform:translate(-50%,-140%);display:none;z-index:2');
     var ray = new THREE.Raycaster();
-    var colOf = function (c) { try { return new THREE.Color(c == null ? C.med : c); } catch (e) { return new THREE.Color(C.med); } };
+    var colOf = function (c) { try { return grey(c == null ? C.med : c); } catch (e) { return grey(C.med); } };
 
     function clearPins() {
       disposeTree(pinGroup);
@@ -614,12 +622,12 @@
         P.col.scale.y = h; P.col.position.y = h / 2;
         P.glow.scale.y = h; P.glow.position.y = h / 2;
         P.cap.position.y = h + 0.18;
-        var color = sel ? new THREE.Color(C.light) : P.color;
+        var color = sel ? grey(C.cyan) : P.color;
         [P.col, P.cap, P.base].forEach(function (m) { m.material.color.copy(color); });
         P.glow.material.color.copy(color);
         P.col.material.opacity = dim ? 0.3 : 0.95;
         P.cap.material.opacity = dim ? 0.3 : 1;
-        P.glow.material.opacity = dim ? 0.05 : (sel ? 0.35 : 0.18);
+        P.glow.visible = false;
         P.base.material.opacity = dim ? 0.15 : 0.6;
       });
     }
@@ -950,7 +958,7 @@
     var lineSeg = function (arr, color, opacity) {
       var g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-      return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: opacity }));
+      return new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: grey(color), transparent: true, opacity: opacity }));
     };
     if (gp.length) root.add(lineSeg(gp, C.med, 0.1));
 
@@ -964,8 +972,8 @@
     root.add(lineSeg(ep, C.med, 0.8));
     var topPts = corners.concat([corners[0]]).map(function (c) { return new THREE.Vector3(c[0], H, c[1]); });
     var topLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(topPts), known
-      ? new THREE.LineBasicMaterial({ color: C.med, transparent: true, opacity: 0.8 })
-      : new THREE.LineDashedMaterial({ color: C.gold, dashSize: 2.5, gapSize: 2, transparent: true, opacity: 0.9 }));
+      ? new THREE.LineBasicMaterial({ color: grey(C.med), transparent: true, opacity: 0.8 })
+      : new THREE.LineDashedMaterial({ color: grey(C.cyan), dashSize: 2.5, gapSize: 2, transparent: true, opacity: 0.9 }));
     if (!known) topLine.computeLineDistances();
     root.add(topLine);
 
@@ -991,7 +999,7 @@
     if (o.label != null) {
       var ov = L.overlay('left:10px;top:8px;max-width:calc(100% - 20px)');
       var t = document.createElement('div'); t.style.cssText = 'font-weight:600;font-size:13px'; t.textContent = String(o.label);
-      var s2 = document.createElement('div'); s2.style.cssText = 'color:#9DDCF9;opacity:.9';
+      var s2 = document.createElement('div'); s2.style.cssText = 'color:#A6ABB3;opacity:.9';
       s2.textContent = '~' + info.width_ft + ' × ' + info.depth_ft + ' ft · ' + (known ? H + ' ft ceiling' : 'ceiling unknown') +
         (info.courts != null ? ' · ' + info.courts + ' court' + (info.courts === 1 ? '' : 's') : '') + ' · person = 6 ft';
       ov.appendChild(t); ov.appendChild(s2);
