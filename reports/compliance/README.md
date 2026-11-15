@@ -1,19 +1,81 @@
-# Standalone compliance triage v1
+# Compliance layer (building check, then business check)
 
-Functions: `preflight(context)` before recommendation; `check_business(context, business, search=None, requirements=None)` after a business is shortlisted. No UI or shared interfaces changed. Any of Asmit's registry labels can be passed; this version does NOT implement 26 sets of legal rules.
+Answers "who would permit this, what has to be checked, and is anything already a blocker?" for one
+property and one business. It never says a permit is approved: every legal item stays
+`needs_verification`, and nothing retrieved from the web can clear a gate.
 
-Context: `{property_id, scope, jurisdiction: {code, verified, evidence_url}, facts: {property_type, area_sqft, clear_height_ft, floors, parking_spaces, hvac_capacity, fire_inspection}, identity_conflict, measurements_match_scope}`. Use jurisdiction codes `houston`, `harris_unincorporated`, `los_angeles`, `la_unincorporated`. Caller must independently establish jurisdiction; an address/postal city is not a boundary lookup. Unknown jurisdiction stops legal research. `verified` is caller attestation, not this module's verification.
+Files (on `feat/compliance-engine`, PR #17):
 
-Output preserves the canvas evidence fields and adds gates, business handoff permission, trace, retrieval errors, and research excerpts. Residential/identity conflicts stop business research. Scope-matched numeric thresholds are screening constraints, not building codes. All legal checks remain needs_verification; no permit or inspection is asserted. Image evidence cannot certify HVAC, sprinklers, structural integrity or parking compliance.
+| File | What it does |
+|---|---|
+| `playground/jurisdiction.py` | lat/lon → `houston`, `harris_unincorporated`, `los_angeles`, `la_unincorporated`, or none, from Census official boundaries |
+| `playground/compliance_engine.py` | building check (`preflight`) and business check (`check_business`), Helix handoff adapter, kit adapter, cached official-source research |
+| `playground/test_jurisdiction.py`, `playground/test_compliance_engine.py` | 7 + 15 tests |
 
-CLI: `python3 playground/compliance_engine.py context.json --business 'indoor pickleball'`. Add `--live` to opt into Tavily with TAVILY_API_KEY. Two bounded searches are restricted to configured official authority domains; failure retains unknowns and hides exception details. Search excerpts are untrusted and cannot clear gates. Live authenticated Tavily has NOT been tested in this session.
+Needs **Python 3.10+** (the rest of `playground/` uses `X | None` types; macOS `/usr/bin/python3` is 3.9).
 
-Test: `python3 -m unittest discover -s playground -p test_compliance_engine.py -v` (8 passed). Tests cover all four authority configurations, residential and identity gates, unknown jurisdiction/height, scope mismatch, threshold failure, source spoofing and provider outage. Synthetic fixtures only; no claim of actual parcel compliance.
+## How it works
 
-Official references checked Nov 14, 2026:
-- https://permits.lacounty.gov/permits/building-and-safety/ — use service locator to establish responsible permitting office; county/city distinction.
-- https://oce.harriscountytx.gov/Services/Permits/Permits-A-to-Z/Commercial-Building — county commercial-building review.
-- https://www.houstontx.gov/business/plan/permits-inspections.html — existing team Houston process reference.
-- https://dbs.lacity.gov/services/search-online-building-records — existing team LA City records reference.
+1. **Jurisdiction.** If the context has no verified jurisdiction but has a pin, `resolve_jurisdiction(lat, lon)`
+   asks the Census geocoder (geographies by coordinates, no key) which incorporated place and county contain
+   the point. Another city inside a modeled county (Bellaire, Pico Rivera) gets **no** code, never the county.
+   Postal city is never used: 9721 Cypresswood Dr has a "Houston" address but is in unincorporated Harris County.
+2. **Building check (`preflight`).** Hard gates, in code:
+   - `jurisdiction_unverified`: no supported authority found (research is deferred)
+   - `identity_incomplete` / `identity_conflict`: property or scope unclear
+   - `commercial_conversion_unestablished`: CoStar says residential / multifamily: **stops** before any business research
+   It lists the building facts it was given (size, clear height, floors, parking, HVAC, fire) as evidence records,
+   the jurisdiction with its source, any flagged tour (e.g. Tanner's scan captioned 9750), and a 6-item
+   verification checklist (identity, occupancy, fire, accessibility, parking, MEP).
+3. **Business check (`check_business`).** Only if the building check allows it:
+   - requirements for the demo businesses come from the team's existing thresholds (`space_fit.USES`):
+     pickleball 30x60 ft per court and 18 ft clear (marked as unofficial guidance, not code); childcare 30 sq ft
+     indoor / 80 sq ft outdoor per child for Texas only (California childcare gets "verify CA licensing", not Texas
+     numbers); restaurant checklist
+   - building-level CoStar numbers are **not** treated as the suite's usable size or height
+     (`measurements_match_scope` stays false unless a caller measured the suite)
+   - two Tavily searches restricted to the authority's official domains, worded the way permit offices describe
+     the business ("assembly occupancy", "child care center", "food service establishment"); park and cannabis
+     pages and duplicates are dropped; each result is `applicability: unverified`
 
-Remaining: map actual Stage 2 intake and Asmit registry, authoritative parcel boundary lookup, business-specific official licensing rules, source freshness/cache policy, public GIS and Vexcel/Matterport adapters, and authenticated search validation. This is a working triage foundation, not the completed compliance engine.
+## Run it
+
+```bash
+set -a; source .env; set +a      # TAVILY_API_KEY for --live
+python3 playground/compliance_engine.py --property-id 23296 --suite A --business indoor_pickleball --live
+python3 playground/compliance_engine.py --property-id 13890701 --business childcare --live
+python3 playground/compliance_engine.py --property-id 966604 --business indoor_pickleball        # stops: residential
+python3 playground/compliance_engine.py --property-id 23296 --suite A --business indoor_pickleball --offline
+python3 playground/jurisdiction.py 29.8540 -95.5317
+```
+
+- `--live` saves every search to `playground/output/compliance/research/` and every jurisdiction lookup to
+  `playground/output/jurisdiction/` (both gitignored). `--offline` replays those with no network; anything not
+  cached comes back as unknown, never guessed.
+- A Helix Stage 1 handoff (`selected_listing` with `property_id`, `listing_id`, `space_id`, address, lat/lon) or a
+  hand-written context JSON also works: `python3 playground/compliance_engine.py context.json --business childcare`.
+
+## Results on real kit buildings (live, Nov 14)
+
+| Property | Jurisdiction | Building check | Business check |
+|---|---|---|---|
+| 9700 Tanner Rd, suite A (23296) | City of Houston | passes; tour captioned 9750 flagged, not used | pickleball: Houston Permitting Center process page + "start a business" pages (some only loosely related, e.g. a BYOB occupancy memo) |
+| 6855 Wynnwood Ln (13890701) | City of Houston | passes | childcare: Texas 30/80 sq ft per child; fire code + permit pages. Pickleball, restaurant: permit pages |
+| 9721 Cypresswood Dr (966604) | **unincorporated Harris County** | **stopped**: residential | not run |
+| 11040 W Pico Blvd, LA (1565338) | City of Los Angeles | passes | childcare: CA rules marked unverified; LADBS certificate-of-occupancy + license pages |
+
+## Limits (say these, don't hide them)
+
+- Search finds relevant official process pages, not rules confirmed for this parcel or suite.
+- Census boundaries update yearly and can lag annexations; confirm edge parcels with the city's GIS.
+- Only the four authorities above are modeled; other cities return "not modeled".
+- Requirements exist for three demo businesses, not all 26 categories in `neighborhood_industries.py`.
+- No imagery-based checks (parking, HVAC, fire equipment) yet; those stay unknown.
+- The Helix adapter follows Stage 1's `discovery.py` fields; it has not been run on a real Stage 1 handoff yet.
+
+Official references (checked Nov 14, 2026):
+- https://www.houstontx.gov/business/plan/permits-inspections.html (City of Houston)
+- https://oce.harriscountytx.gov/Services/Permits/Permits-A-to-Z/Commercial-Building (Harris County)
+- https://dbs.lacity.gov/services/search-online-building-records (City of LA)
+- https://permits.lacounty.gov/permits/building-and-safety/ (LA County)
+- https://geocoding.geo.census.gov/geocoder/ (jurisdiction lookup)
