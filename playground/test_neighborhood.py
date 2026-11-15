@@ -296,6 +296,121 @@ class Lookalike(unittest.TestCase):
             self.assertIn("not validated", out["signal"]["reason"])
 
 
+def step(agent, name, stance_value, value=None):
+    return {"agent": agent, "signal": {"name": name, "stance": stance_value, "value": value, "reason": name}}
+
+
+class Coordinator(unittest.TestCase):
+    def test_supported_needs_lookalike_and_total(self):
+        d = n.coordinate("indoor pickleball", [step("lookalike", "lookalike", 1, 80), step("residents", "population trend", 1),
+                                               step("competitors", "local supply", 0)])
+        self.assertEqual(d["verdict"], "supported")
+        self.assertEqual(d["reasons"][0]["signal"], "lookalike")
+
+    def test_weak_when_lookalike_is_low(self):
+        d = n.coordinate("indoor pickleball", [step("lookalike", "lookalike", -1, 20),
+                                               step("competitors", "local supply", 1)])
+        self.assertEqual(d["verdict"], "weak")
+        self.assertIn("Few competitors", d["insight"])
+
+    def test_unknown_without_validated_lookalike_or_enough_signals(self):
+        d = n.coordinate("indoor pickleball", [step("lookalike", "lookalike", None, 80),
+                                               step("residents", "population trend", 1),
+                                               step("competitors", "local supply", 1)])
+        self.assertEqual(d["verdict"], "unknown")
+        d = n.coordinate("indoor pickleball", [step("lookalike", "lookalike", 1, 80)])
+        self.assertEqual(d["verdict"], "unknown")
+
+    def test_mixed_and_gap_insight(self):
+        d = n.coordinate("fitness studio", [step("lookalike", "lookalike", 1, 75), step("competitors", "local supply", 1),
+                                            step("residents", "population trend", -1),
+                                            step("momentum", "business arrivals", -1)])
+        self.assertEqual(d["verdict"], "mixed")
+        self.assertTrue(d["insight"].startswith("Gap"))
+
+    def test_unmodelled_use_is_unknown_with_reason(self):
+        d = n.coordinate("warehouse / storage", [])
+        self.assertEqual(d["verdict"], "unknown")
+        self.assertIn("Business-to-business", d["headline"])
+
+
+class Site(unittest.TestCase):
+    def geocode(self, matches):
+        payload = {"result": {"addressMatches": matches}}
+        return lambda url, params=None, **k: (payload, {"url": "https://geocoding.test", "retrieved_at":
+                                                         "2026-11-14T00:00:00+00:00", "cached": True})
+
+    def test_address_geocodes_to_point(self):
+        match = {"matchedAddress": "1 MAIN ST, HOUSTON, TX", "coordinates": {"x": -95.40, "y": 29.80},
+                 "geographies": {"Census Tracts": [{"GEOID": "48201000100"}]}}
+        with FakeTables(), mock.patch.object(n, "fetch", self.geocode([match])):
+            out = n.site_agent(address="1 Main St, Houston, TX")
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["point"]["tract"], "48201000100")
+
+    def test_ambiguous_or_outside_is_unknown(self):
+        with FakeTables(), mock.patch.object(n, "fetch", self.geocode([])):
+            self.assertEqual(n.site_agent(address="nowhere")["status"], "unknown")
+        far = {"matchedAddress": "X", "coordinates": {"x": -80.0, "y": 25.0}, "geographies": {}}
+        with FakeTables(), mock.patch.object(n, "fetch", self.geocode([far])):
+            self.assertEqual(n.site_agent(address="Miami")["status"], "unknown")
+
+
+class Narrator(unittest.TestCase):
+    decision = {"use": "indoor pickleball", "verdict": "weak", "insight": None,
+                "reasons": [{"signal": "lookalike", "stance": -1, "reason": "22% of neighborhoods"}], "unknown": []}
+
+    def run_with_reply(self, text):
+        reply = mock.MagicMock()
+        reply.__enter__.return_value.read.return_value = json.dumps(
+            {"choices": [{"message": {"content": text}}]}).encode()
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(n, "CACHE", Path(tmp)), \
+                mock.patch.dict(os.environ, {"UPSTAGE_API_KEY": "test", "NEIGHBORHOOD_OFFLINE": ""}), \
+                mock.patch.object(n, "urlopen", return_value=reply):
+            return n.narrate([self.decision], "1 Main St")
+
+    def test_accepts_text_with_only_known_numbers(self):
+        text, step = self.run_with_reply("Weak: it resembles only 22% of neighborhoods with courts.")
+        self.assertIsNotNone(text)
+        self.assertTrue(step["computed_by"].startswith("llm"))
+
+    def test_rejects_invented_numbers(self):
+        text, step = self.run_with_reply("Weak, and about 5,000 players live nearby.")
+        self.assertIsNone(text)
+        self.assertEqual(step["status"], "rejected")
+
+    def test_no_key_means_no_summary(self):
+        with mock.patch.dict(os.environ, {"UPSTAGE_API_KEY": ""}), tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(n, "CACHE", Path(tmp)):
+            text, step = n.narrate([self.decision], "1 Main St")
+        self.assertIsNone(text)
+        self.assertEqual(step["status"], "unknown")
+
+
+class Pipeline(unittest.TestCase):
+    def test_investigate_suggest_ranks_and_traces(self):
+        def fake(name, stance_value, value=None):
+            return lambda **kw: {"summary": name, "findings": [n.record(name, 1, "computed", status="agrees")],
+                                 "signal": {"name": name, "stance": stance_value, "value": value, "reason": name}}
+        site = lambda **kw: {"point": {"lat": 29.8, "lon": -95.4, "label": "X"}, "findings": [], "summary": "X"}
+        with mock.patch.object(n, "site_agent", site), \
+                mock.patch.object(n, "residents_agent", fake("population trend", 1)), \
+                mock.patch.object(n, "competitors_agent", fake("local supply", 0)), \
+                mock.patch.object(n, "momentum_agent", fake("business arrivals", None)), \
+                mock.patch.object(n, "lookalike_agent", lambda lat, lon, use: fake(
+                    "lookalike", 1 if use == "fitness studio" else -1, 80 if use == "fitness studio" else 10)()):
+            report = n.investigate("suggest", address="X")
+        self.assertEqual(report["mode"], "suggest")
+        self.assertEqual(report["decisions"][0]["use"], "fitness studio")
+        self.assertEqual(report["decisions"][0]["verdict"], "supported")
+        self.assertEqual(report["decisions"][-1]["verdict"], "unknown")
+        agents = [s["agent"] for s in report["trace"]]
+        self.assertEqual(agents[:2], ["planner", "site"])
+        self.assertIn("coordinator", agents)
+        self.assertTrue(all("computed_by" in s and "handoff" in s for s in report["trace"]))
+        self.assertTrue(report["evidence"])
+
+
 class Planner(unittest.TestCase):
     def test_plan_for_modeled_and_unmodeled_uses(self):
         steps, _ = n.plan("indoor pickleball")

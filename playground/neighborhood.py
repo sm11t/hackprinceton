@@ -346,7 +346,7 @@ def plan(use):
         steps = ["site", "residents", "competitors", "momentum", "lookalike", "coordinator"]
         why = "Consumer-facing use: residents, local supply, business arrivals and a lookalike check all apply."
     else:
-        steps = ["site", "residents", "coordinator"]
+        steps = ["site", "coordinator"]
         why = NO_NEIGHBORHOOD_MODEL.get(use, "No neighborhood model for this use.")
     return steps, why
 
@@ -1006,6 +1006,271 @@ def lookalike_agent(lat, lon, use, radius=RADIUS_MI):
                        f"{VALIDATED_AUC})."}
 
 
+# --- Site, coordinator, narrator ----------------------------------------------------
+
+def site_agent(address=None, property_id=None, kit=None):
+    """Resolve the request to one point: a CoStar property pin, or a Census-geocoded address."""
+    if property_id:
+        from space_fit import load_property
+        kit = Path(kit) if kit else kit_path()
+        if not kit:
+            raise ValueError("CoStar kit not found; cannot look up the property id.")
+        password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+        prop = load_property(kit, int(property_id), password)
+        a = prop.get("primaryAddress") or {}
+        if a.get("latitude") is None:
+            raise ValueError("The CoStar record has no map pin.")
+        street = " ".join(str(a.get(k) or "") for k in ("streetNumber", "streetDirection", "streetName", "streetType"))
+        label = f"{' '.join(street.split())}, {a.get('city')}, {a.get('state')}"
+        point = {"lat": a["latitude"], "lon": a["longitude"], "label": label, "property_id": int(property_id)}
+        findings = [record("site_point", {"lat": point["lat"], "lon": point["lon"], "address": label}, "costar",
+                           f"property-{property_id}", None, 0.9, None, "agrees",
+                           note="CoStar property pin (primaryAddress latitude/longitude).")]
+        sources = [{"name": "CoStar hackathon kit: commercial property", "url": None, "retrieved_at": None,
+                    "cached": True, "note": f"Property {property_id}"}]
+    else:
+        if not address:
+            raise ValueError("Give an address or a CoStar property id.")
+        params = {"address": address, "benchmark": "Public_AR_Current", "vintage": "Current_Current", "format": "json"}
+        result, meta = fetch(GEOCODER, params)
+        matches = result["result"]["addressMatches"]
+        if len(matches) != 1:
+            return {"status": "unknown", "sources": [source("Census geocoder", meta)],
+                    "summary": f"The Census geocoder found {len(matches)} matches; the site is unknown.",
+                    "findings": [record("site_point", None, "public:census", "census-geocode", None, 0.0,
+                                        meta["url"], note=f"{len(matches)} matches. Use a full street address.")],
+                    "handoff": "Stop: without one verified point, every neighborhood number would be a guess."}
+        m = matches[0]
+        tract = (m["geographies"].get("Census Tracts") or [{}])[0].get("GEOID")
+        point = {"lat": m["coordinates"]["y"], "lon": m["coordinates"]["x"], "label": m["matchedAddress"],
+                 "tract": tract}
+        findings = [record("site_point", {"lat": point["lat"], "lon": point["lon"], "address": point["label"],
+                                          "tract": tract}, "public:census", "census-geocode",
+                           meta["retrieved_at"][:10], 0.9, meta["url"], "agrees",
+                           note="Census address-range geocode (interpolated along the street).")]
+        sources = [source("Census geocoder", meta)]
+    rows, _ = tract_table(2024)
+    inside = bool(near(rows, point["lat"], point["lon"], RADIUS_MI))
+    if not inside:
+        findings.append(record("site_in_coverage", False, "computed", "coverage", None, 0.9, None, "unknown",
+                               note=f"Outside the {AREA_NAME}: no comparison data."))
+    return {"sources": sources, "findings": findings, "point": point, "confidence": 0.9,
+            "status": "ok" if inside else "unknown",
+            "summary": f"{point['label']} ({point['lat']:.5f}, {point['lon']:.5f})"
+                       + ("" if inside else f": outside the {AREA_NAME}"),
+            "handoff": "Point to every specialist." if inside else "Stop: outside the area we have data for."}
+
+
+VERDICTS = {"supported": "The neighborhood supports this use", "mixed": "Mixed signals",
+            "weak": "The neighborhood does not look like it supports this use", "unknown": "Not enough evidence"}
+RULES = [
+    "Lookalike votes +1 at the 70th percentile or above, -1 at the 30th or below, and only if its spatial "
+    f"hold-out AUC is at least {VALIDATED_AUC}.",
+    "Population trend votes +1 if growth since 2015-19 beats the Houston area by 2+ points, -1 if it trails by 2+.",
+    "Local supply votes +1 at half the Houston-area facilities per resident or less (underserved), -1 at 2x or more.",
+    "Business arrivals vote +1 if more of this kind of business moved in than out over 3 years, -1 if fewer; "
+    "needs 2+ moves.",
+    "Supported: lookalike +1 and total +2 or more. Weak: lookalike -1, or total -2 or less. Unknown: lookalike "
+    "missing or fewer than 2 signals known. Otherwise mixed.",
+    "These cut-offs are our rules, set relative to the Houston-area distribution; they are not industry standards.",
+]
+
+
+def coordinate(use, steps):
+    """Coordinator: combine the specialists' signals into a verdict with the deciding reasons."""
+    signals = [st["signal"] | {"agent": st["agent"]} for st in steps if st.get("signal")]
+    known = [sg for sg in signals if sg["stance"] is not None]
+    look = next((sg for sg in signals if sg["name"] == "lookalike"), None)
+    total = sum(sg["stance"] for sg in known)
+    if use not in USES:
+        verdict = "unknown"
+    elif not look or look["stance"] is None or len(known) < 2:
+        verdict = "unknown"
+    elif look["stance"] == 1 and total >= 2:
+        verdict = "supported"
+    elif look["stance"] == -1 or total <= -2:
+        verdict = "weak"
+    else:
+        verdict = "mixed"
+    order = {"lookalike": 0, "local supply": 1, "population trend": 2, "business arrivals": 3}
+    deciding = sorted(known, key=lambda sg: (sg["stance"] == 0, order.get(sg["name"], 9)))
+    reasons = [{"signal": sg["name"], "stance": sg["stance"], "reason": sg["reason"]} for sg in deciding]
+    unknown = [{"signal": sg["name"], "reason": sg["reason"]} for sg in signals if sg["stance"] is None]
+    supply = next((sg for sg in signals if sg["name"] == "local supply"), None)
+    insight = None
+    if look and supply and look["stance"] == 1 and supply["stance"] == 1:
+        insight = "Gap: it looks like places that have this business, but has fewer of them than usual."
+    elif look and supply and look["stance"] == 1 and supply["stance"] == -1:
+        insight = "Proven but crowded: places like this have the business, and this one already has plenty."
+    elif look and supply and look["stance"] == -1 and supply["stance"] == 1:
+        insight = "Few competitors here, but the residents do not look like those near existing facilities."
+    if use not in USES:
+        headline = f"No neighborhood model for {use}: {NO_NEIGHBORHOOD_MODEL.get(use, 'not modelled')}"
+    else:
+        lead = reasons[0]["reason"] if reasons and verdict != "unknown" else ""
+        headline = VERDICTS[verdict] + (f": {lead[0].lower()}{lead[1:]}" if lead else "")
+    return {"use": use, "verdict": verdict, "headline": headline, "score": total, "insight": insight,
+            "reasons": reasons, "unknown": unknown, "rules": RULES,
+            "lookalike_percentile": look["value"] if look else None}
+
+
+NARRATOR_MODEL = os.environ.get("NEIGHBORHOOD_LLM_MODEL", "solar-mini4")
+NARRATOR_URL = "https://api.upstage.ai/v1/chat/completions"
+
+
+def numbers_in(text):
+    return {float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*\.?\d*", text)}
+
+
+def narrate(decisions, site_label):
+    """Optional plain-English summary by an LLM, from the coordinator output only.
+
+    The text is rejected if it contains any number that is not in its input, so the
+    model can explain but cannot invent figures. Returns (text, step).
+    """
+    facts = json.dumps({"site": site_label, "decisions": [{k: d[k] for k in
+                                                           ("use", "verdict", "insight", "reasons", "unknown")}
+                                                          for d in decisions]})
+    step = {"agent": "narrator", "role": "Writes a short plain-English summary from the coordinator's records",
+            "computed_by": f"llm ({NARRATOR_MODEL})", "inputs": {"records": "coordinator output only"},
+            "sources": [], "findings": [], "signal": None, "confidence": None, "status": "ok"}
+    key = os.environ.get("UPSTAGE_API_KEY")
+    cache = CACHE / "narration" / (hashlib.sha1((NARRATOR_MODEL + facts).encode()).hexdigest()[:20] + ".json")
+    started = time.perf_counter()
+    text = None
+    try:
+        if cache.exists():
+            text = json.loads(cache.read_text())["text"]
+        elif offline() or not key:
+            raise Offline("no cached narration" if key else "UPSTAGE_API_KEY is not set")
+        else:
+            body = json.dumps({"model": NARRATOR_MODEL, "temperature": 0, "max_tokens": 260, "messages": [
+                {"role": "system", "content": "You explain a site-selection verdict to a small-business owner in "
+                 "3 short sentences. Use only the facts given. Do not add any number that is not in the facts. "
+                 "Say plainly what is unknown. A stance of +1 supports the use, -1 counts against it, 0 is "
+                 "neutral (for local supply, 0 means about the Houston-area rate, not high)."},
+                {"role": "user", "content": facts}]}).encode()
+            request = Request(NARRATOR_URL, data=body, headers={"Authorization": f"Bearer {key}",
+                                                                "Content-Type": "application/json",
+                                                                "User-Agent": USER_AGENT})
+            with urlopen(request, timeout=25) as response:
+                text = json.loads(response.read())["choices"][0]["message"]["content"].strip()
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"text": text, "model": NARRATOR_MODEL, "created_at": now_iso()}))
+        invented = sorted(numbers_in(text) - numbers_in(facts))
+        if invented:
+            step.update(status="rejected", summary=f"Rejected: the text used numbers not in the records {invented[:5]}.")
+            text = None
+        else:
+            step["summary"] = "Summary written from the records; every number in it was checked against them."
+    except (Offline, OSError, HTTPError, URLError, KeyError, ValueError, TimeoutError) as error:
+        step.update(status="unknown", summary=f"No LLM summary ({type(error).__name__}: {error}).")
+        text = None
+    step["ms"] = round(1000 * (time.perf_counter() - started))
+    step["handoff"] = "Shown as LLM-written text above the code-computed verdict." if text else \
+        "The deterministic verdict stands on its own."
+    return text, step
+
+
+def investigate(use, address=None, property_id=None, kit=None, explain=False):
+    """Run the pipeline. use='suggest' ranks every use; otherwise validate one use. Returns a report with the trace."""
+    started = time.perf_counter()
+    trace = []
+    uses = list(USES) + list(NO_NEIGHBORHOOD_MODEL) if use == "suggest" else [use]
+    run_agent(trace, "planner", "Chooses which specialists run for each use (rule table, not an LLM)",
+              lambda: {"summary": "; ".join(f"{u}: {', '.join(plan(u)[0])}" for u in uses),
+                       "findings": [], "plan": {u: {"steps": plan(u)[0], "why": plan(u)[1]} for u in uses},
+                       "handoff": "Site agent first; each specialist then runs per use."}, {})
+    site = run_agent(trace, "site", "Resolves the address or CoStar property to one point",
+                     site_agent, {"address": address, "property_id": property_id, "kit": kit})
+    decisions = []
+    if site["status"] == "ok":
+        lat, lon = site["point"]["lat"], site["point"]["lon"]
+        agents = {
+            "residents": ("Who lives here: ACS residents, age mix, income and trend vs the Houston area",
+                          residents_agent, {}),
+            "competitors": ("Who already serves it: mapped facilities near the site (OpenStreetMap)",
+                            competitors_agent, {}),
+            "momentum": ("What is moving in: CoStar kit tenant arrivals and departures by category",
+                         momentum_agent, {"kit": kit}),
+            "lookalike": ("Does it look like places that already have this business? (held-out evaluated)",
+                          lookalike_agent, {}),
+        }
+        for u in uses:
+            steps = []
+            for name in plan(u)[0]:
+                if name in agents:
+                    role, fn, extra = agents[name]
+                    steps.append(run_agent(trace, name, role, fn, {"lat": lat, "lon": lon, "use": u, **extra}))
+                    steps[-1]["use"] = u
+            decision = coordinate(u, steps)
+            trace.append({"agent": "coordinator", "use": u, "role": "Combines the signals into a verdict",
+                          "computed_by": "code", "inputs": {"signals": [s["agent"] for s in steps]}, "sources": [],
+                          "findings": [], "signal": None, "status": "ok", "confidence": None, "ms": 0,
+                          "summary": f"{u}: {decision['verdict']} (signal total {decision['score']:+d})",
+                          "handoff": "Verdict and deciding reasons to the person."})
+            decisions.append(decision)
+    tiers = {"supported": 0, "mixed": 1, "weak": 2, "unknown": 3}
+    ranked = sorted(decisions, key=lambda d: (tiers[d["verdict"]], d["use"] not in USES,
+                                              -(d["lookalike_percentile"] or -1)))
+    narration = None
+    if explain and decisions:
+        narration, step = narrate(ranked, site["point"]["label"])
+        trace.append(step)
+    for step in trace:  # inputs are shown in the trace; keep them small and JSON-safe
+        step["inputs"] = {k: v for k, v in step["inputs"].items() if k != "kit"}
+    evidence = [r for st in trace for r in st.get("findings", [])]
+    return {
+        "mode": "suggest" if use == "suggest" else "validate",
+        "site": site.get("point"), "area": AREA_NAME, "radius_mi": RADIUS_MI,
+        "decisions": ranked, "narration": narration,
+        "narration_label": f"Written by an LLM ({NARRATOR_MODEL}) from the records below; numbers checked."
+        if narration else None,
+        "trace": trace, "evidence": evidence,
+        "offline": offline(), "elapsed_ms": round(1000 * (time.perf_counter() - started)),
+        "computed_by": "All numbers and verdicts are computed in code. Only the optional summary is LLM-written.",
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--address")
+    parser.add_argument("--property-id", type=int)
+    parser.add_argument("--use", default="indoor pickleball", help=f"one of {list(USES)} or 'suggest'")
+    parser.add_argument("--kit", type=Path)
+    parser.add_argument("--offline", action="store_true", help="use only cached responses")
+    parser.add_argument("--explain", action="store_true", help="add the optional LLM summary")
+    parser.add_argument("--evaluate", metavar="USE", help="run the held-out lookalike evaluation and save it")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    if args.offline:
+        os.environ["NEIGHBORHOOD_OFFLINE"] = "1"
+    if args.evaluate:
+        result = evaluate(args.evaluate)
+        evaluation_path(args.evaluate).parent.mkdir(parents=True, exist_ok=True)
+        evaluation_path(args.evaluate).write_text(json.dumps(result))
+        print(json.dumps({k: v for k, v in result.items() if k not in ("model", "background_logits")}, indent=2))
+        return
+    report = investigate(args.use, args.address, args.property_id, args.kit, args.explain)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return
+    print(f"Site: {(report['site'] or {}).get('label')}")
+    for step in report["trace"]:
+        print(f"  [{step['agent']}{' / ' + step['use'] if step.get('use') else ''}] {step['status']} "
+              f"({step.get('ms', 0)} ms, {step['computed_by']}): {step.get('summary', '')}")
+    for d in report["decisions"]:
+        print(f"\n{d['use']}: {d['verdict'].upper()} - {d['headline']}")
+        if d["insight"]:
+            print(f"  {d['insight']}")
+        for r in d["reasons"]:
+            print(f"  {r['stance']:+d} {r['signal']}: {r['reason']}")
+        for r in d["unknown"]:
+            print(f"   ? {r['signal']}: {r['reason']}")
+    if report["narration"]:
+        print(f"\n{report['narration_label']}\n{report['narration']}")
+
+
 @lru_cache(maxsize=None)
 def us_population_6_plus_record():
     """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""
@@ -1028,3 +1293,7 @@ def fmt_pct(value, signed=False, points=False):
     if points:
         return f"{value * 100:+.1f} pts"
     return f"{value:+.1%}" if signed else f"{value:.1%}"
+
+
+if __name__ == "__main__":
+    main()
