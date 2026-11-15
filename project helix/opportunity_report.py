@@ -100,7 +100,8 @@ def validate_sources(investigation_id, stage1, handoff, stage3):
     except (ValueError,TypeError): budget_matches=False
     if not _same(inputs.get('property_id'), listing.get('property_id')) or not budget_matches:
         raise ValueError('Stage 3 property or budget does not match the investigation.')
-    suite=listing.get('suite')
+    # Older Stage 1 records dropped the CoStar suite name; the raw space record still carries it.
+    suite=listing.get('suite') or (((listing.get('original_evidence') or {}).get('space') or {}).get('suite'))
     if suite is not None and str(suite).strip(): expected=str(suite).strip()
     else:
         try: expected=f"listing:{listing['listing_id']}:{float(listing['area_max_sqft']):g}"

@@ -47,6 +47,19 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn('untrusted old explanation',requests[0]['messages'][1]['content'])
         self.assertIn('s2:observation:0',output['evidence_index'])
 
+    def test_named_suite_matches_stage3_even_when_listing_dropped_it(self):
+        iid,stage1,handoff,stage3=fixture()
+        for record in (handoff['selected_listing'], stage1['report']['results'][0]):
+            record['original_evidence']={'space':{'id':19822761,'suite':'350'}}
+        stage3['inputs']['suite']='350'; stage3['shortlist'][0]['stage4_inputs']['suite']='350'
+        stage3['reproduce']['output_hash']=hashlib.sha256(json.dumps({k:v for k,v in stage3.items() if k not in ('generated_at','reproduce')},sort_keys=True,default=str).encode()).hexdigest()[:16]
+        self.assertEqual(report.validate_sources(iid,stage1,handoff,stage3)['stage3_suite'],'350')
+        handoff['selected_listing']['suite']='350'
+        self.assertEqual(report.validate_sources(iid,stage1,handoff,stage3)['stage3_suite'],'350')
+        stage3['inputs']['suite']='listing:38268171:7205'
+        stage3['reproduce']['output_hash']=hashlib.sha256(json.dumps({k:v for k,v in stage3.items() if k not in ('generated_at','reproduce')},sort_keys=True,default=str).encode()).hexdigest()[:16]
+        with self.assertRaisesRegex(ValueError,'suite'): report.validate_sources(iid,stage1,handoff,stage3)
+
     def test_missing_stage1_and_wrong_identity_fail_before_call(self):
         iid,stage1,handoff,stage3=fixture();calls=[]
         with self.assertRaisesRegex(ValueError,'complete Stage 1'):

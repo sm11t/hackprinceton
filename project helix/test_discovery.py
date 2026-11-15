@@ -46,6 +46,12 @@ def listing(stable_id="lease:1:1", transaction_type="lease", **overrides):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_costar_suite_name_is_carried_to_the_listing(self):
+        named = make_discovery_response(intake(500_000), [listing(suite="350")])["results"][0]
+        unnamed = make_discovery_response(intake(500_000), [listing()])["results"][0]
+        self.assertEqual(named["suite"], "350")
+        self.assertIsNone(unnamed["suite"])
+
     def test_sale_gate_threshold(self):
         low_la = policy_for_intake(intake(899_999, city="Los Angeles, CA"))
         self.assertEqual(low_la["transaction_types"], ["lease"])

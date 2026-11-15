@@ -310,6 +310,7 @@ def normalize_listing(raw: dict, intake: dict, retrieved_at: str | None = None) 
         "property_id": raw.get("property_id"),
         "listing_id": str(raw.get("listing_id")) if raw.get("listing_id") is not None else None,
         "space_id": str(raw.get("space_id")) if raw.get("space_id") is not None else None,
+        "suite": raw.get("suite"),
         "stable_id": str(raw.get("stable_id")),
         "address": props.get("address") or raw.get("address"),
         "city": props.get("city") or raw.get("city"),
