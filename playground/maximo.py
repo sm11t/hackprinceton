@@ -8,7 +8,7 @@ from alternatives import CATALOG, rank_alternatives
 from decision_context import attach_context
 from approvals_timeline import analyze_approvals, build_timeline
 from eligibility import evidence_overview, review_eligibility
-from deal import deal_facts, load_deal_data, rent_for_simulation
+from deal import deal_facts, load_deal_data, load_rent_estimates, rent_for_simulation
 from location_sources import record
 from money_runway import analyze_money
 from reconcile import load_tenancies, reconcile_evidence
@@ -114,7 +114,7 @@ def _review_property(kit, entry, use, suite, ownership, inputs, *, password=None
     if (blocked_scans or not listing or not listing.get("square_feet")) and fit["verdict"] == "supported":
         fit["verdict"] = "investigate"
     deal = deal_facts(property_id, deals, offers, comps, prop.get("grossBuildingAreaSquareFeet"),
-                      suite=unit)
+                      suite=unit, rent_estimates=load_rent_estimates())
     if ownership == "buy" and "upfront_cost" not in inputs:
         purchase_cost = next((row for row in deal["records"] if row["fact"] == "sale_asking_price"), None)
         if purchase_cost:
