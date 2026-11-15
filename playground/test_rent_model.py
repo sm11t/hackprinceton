@@ -39,6 +39,12 @@ class Ranges(unittest.TestCase):
         predict = baseline([row(8), row(10), row(12), row(30, use=1, service=7)])
         self.assertEqual(predict(row(None)), 10)
 
+    def test_recent_baseline_ignores_old_rents_when_recent_ones_exist(self):
+        rows = [row(5, year=2005.0)] * 9 + [row(20, year=2024.0), row(22, year=2024.0)]
+        self.assertEqual(baseline(rows)(row(None)), 5)  # all-years median, dragged down by old deals
+        self.assertEqual(baseline(rows, since=2019)(row(None)), 21)
+        self.assertEqual(baseline(rows, since=2030)(row(None)), 5)  # no recent pool: falls back to all years
+
     def test_conformal_width_reaches_the_target_coverage(self):
         rows = [row(10 * (1 + i / 100)) for i in range(100)]
         preds = [[9.5, 10, 10.5]] * 100
