@@ -436,7 +436,9 @@
       `<button class="btn ghost small" id="skip">Skip animation</button>`)}
       <div class="scan">
         <div class="panel"><div class="ph">Combinations left after each gate<span class="aside">Houston · lease</span></div><div class="funnel" id="funnel"><div class="loading"><span class="spinner"></span>Scanning…</div></div></div>
-        <div class="panel"><div class="ph">Agents<span class="aside">${agents.length} on this scan</span></div><div class="agents">${agents.map((a) => `<div class="agent" data-a="${a}">${agentImg(a)}<div class="name">${a[0].toUpperCase() + a.slice(1)}</div><div class="job">${esc(AGENT_JOBS[a])}</div></div>`).join("")}</div>
+        <div class="panel scan-map"><div class="ph">Houston, gate by gate<span class="aside" id="map-count"></span></div><div class="map" id="scan-map"></div>
+          <div class="map-legend"><span id="map-note">One dot per building with listed space</span><span>Green: passes every gate</span></div></div>
+        <div class="panel scan-agents"><div class="ph">Agents<span class="aside">${agents.length} on this scan</span></div><div class="agents">${agents.map((a) => `<div class="agent" data-a="${a}">${agentImg(a)}<div class="name">${a[0].toUpperCase() + a.slice(1)}</div><div class="job">${esc(AGENT_JOBS[a])}</div></div>`).join("")}</div>
           <div class="note-line">${ic("info", 14)}<span>Every number and gate is computed in code. No AI decides who passes.</span></div></div>
       </div>
       <div class="sticky-bar hidden" id="next-bar"><span id="next-note" class="muted small"></span><button class="btn primary" id="next">See what ${kmoney(i.budget - i.reserve)} can become${ic("right")}</button></div>`;
@@ -451,6 +453,20 @@
       [f.neighborhood_support, "The neighborhood supports it", "Residents, competitors, who's moving in, lookalike areas", "ACS · OSM · CoStar", ["residents", "competitors", "momentum", "lookalike", "coordinator"]],
     ];
     const max = Math.sqrt(f.combinations);
+    // The map: buildings drop out gate by gate (real per-building results from the same scan).
+    const M = o.map || { buildings: [], after_gate: [] };
+    let mapCtl = null;
+    if (has3d() && M.buildings.length) {
+      try { mapCtl = window.Suite3D.map(el.querySelector("#scan-map"), { pins: [], plain: true }); } catch { mapCtl = null; }
+      if (mapCtl) { state.ctrls.push(mapCtl); mapCtl.setDots(M.buildings); }
+    }
+    if (!mapCtl) el.querySelector(".scan-map").classList.add("hidden");
+    const GATE_FOR_ROW = [0, 0, 1, 2, 3], GATE_NAME = ["listed", "can host a business", "affordable for one", "neighborhood-supported"];
+    const mapGate = (k) => {
+      const g = GATE_FOR_ROW[k]; if (mapCtl) mapCtl.showGate(g);
+      const n = M.after_gate[g];
+      const c = el.querySelector("#map-count"); if (c && n != null) c.textContent = `${num(n)} of ${num(M.after_gate[0])} buildings ${GATE_NAME[g]}`;
+    };
     el.querySelector("#funnel").innerHTML = rows.map(([n, title, what, s], k) => `
       <div class="funnel-row" data-k="${k}"><div class="top"><span><span class="t">${esc(title)}</span>${src(s)}</span><b data-n="${n}">0</b></div>
         <div class="bar"><i data-w="${Math.max(2, 100 * Math.sqrt(n) / max)}"></i></div><div class="what">${esc(what)}</div></div>`).join("") +
@@ -464,7 +480,7 @@
     };
     const light = (k, instant) => {
       const row = el.querySelector(`.funnel-row[data-k="${k}"]`); if (!row || row.classList.contains("lit")) return;
-      row.classList.add("lit");
+      row.classList.add("lit"); mapGate(k);
       const bar = row.querySelector("i"); bar.style.width = bar.dataset.w + "%";
       const b = row.querySelector("b[data-n]");
       if (instant) b.textContent = num(+b.dataset.n); else count(b, +b.dataset.n);
@@ -472,7 +488,8 @@
       rows[k][4].forEach((a) => { const x = el.querySelector(`.agent[data-a="${a}"]`); if (x) x.classList.add("on", "done"); });
     };
     const finish = () => {
-      clearTimers(); rows.forEach((_, k) => light(k, true));
+      state.timers.forEach(clearTimeout); state.timers = []; // keep the map alive (clearTimers disposes 3D)
+      rows.forEach((_, k) => light(k, true));
       el.querySelectorAll(".agent").forEach((a) => { a.classList.remove("on"); a.classList.add("done"); });
       el.querySelector("#next-bar").classList.remove("hidden");
       el.querySelector("#next-note").innerHTML = `<b class="num">${num(f.neighborhood_support)}</b> combinations pass every gate, across <b class="num">${o.directions.length}</b> kinds of business.`;

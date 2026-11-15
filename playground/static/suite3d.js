@@ -534,7 +534,7 @@
     return m;
   }
 
-  function buildHouston(scene) {
+  function buildHouston(scene, plain) {
     var world = new THREE.Group(), rand = rng(7), i;
     scene.add(world);
     var G = 150;
@@ -572,6 +572,7 @@
     ];
     hw.forEach(function (p) { ribbon(world, p, 0.16, C.med, 0.3); });
 
+    if (plain) return world; // data maps: no decorative blocks that could be mistaken for data
     // city blocks: one instanced mesh
     var N = 520, blocks = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0),
       mat(0x16304f, { shine: 8 }), N);
@@ -602,7 +603,7 @@
     var scene = L.scene;
     lights(scene);
     scene.fog = new THREE.Fog(BG, 60, 160);
-    buildHouston(scene);
+    buildHouston(scene, o.plain);
     var pinGroup = new THREE.Group();
     scene.add(pinGroup);
     var pins = {}, hits = [], selected = null, hovered = null;
@@ -677,8 +678,49 @@
       hovered = pick(ndc);
       L.canvas.style.cursor = hovered != null ? 'pointer' : 'grab';
     };
+    // Gate dots: one instanced mesh per furthest gate reached, so a gate can drop a whole layer at once.
+    var dotLayers = [], gateShown = 0;
+    function setDots(list) {
+      dotLayers.forEach(function (m) { pinGroup.remove(m); m.geometry.dispose(); m.material.dispose(); });
+      dotLayers = [];
+      var minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9, by = [[], [], [], []];
+      (list || []).forEach(function (d) {
+        if (!d || !isFinite(d[0]) || !isFinite(d[1])) return;
+        var xz = proj(+d[0], +d[1]); by[Math.max(0, Math.min(3, d[2] | 0))].push(xz);
+        minX = Math.min(minX, xz.x); maxX = Math.max(maxX, xz.x); minZ = Math.min(minZ, xz.z); maxZ = Math.max(maxZ, xz.z);
+      });
+      var m4 = new THREE.Matrix4();
+      by.forEach(function (pts, stage) {
+        var color = stage === 3 ? 0x5DB98A : grey(C.light);
+        var mesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.16, 0.16, 1, 6).translate(0, 0.5, 0),
+          new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: stage === 3 ? 0.95 : 0.7 }), Math.max(1, pts.length));
+        pts.forEach(function (xz, i) { mesh.setMatrixAt(i, m4.makeTranslation(xz.x, 0.08, xz.z)); });
+        mesh.count = pts.length;
+        mesh.userData = { stage: stage, h: stage === 3 ? 2.2 : 0.9, k: 1, target: 1 };
+        mesh.instanceMatrix.needsUpdate = true;
+        mesh.scale.y = mesh.userData.h;
+        pinGroup.add(mesh); dotLayers.push(mesh);
+      });
+      if (minX < 1e9) {
+        var center = new THREE.Vector3((minX + maxX) / 2, 0, (minZ + maxZ) / 2);
+        L.frame(center, Math.max(10, Math.hypot(maxX - minX, maxZ - minZ) / 2) * 0.62);
+        scene.fog.near = 120; scene.fog.far = 260;
+      }
+      gateShown = 0;
+    }
+    function showGate(k) { // keep buildings that passed gate k (0 = all), animate the rest away
+      gateShown = k;
+      dotLayers.forEach(function (m) { m.userData.target = m.userData.stage >= k ? 1 : 0; });
+    }
     var top = new THREE.Vector3();
     L.onFrame = function (t) {
+      dotLayers.forEach(function (m) {
+        var u = m.userData; u.k += (u.target - u.k) * 0.12;
+        if (Math.abs(u.target - u.k) < 0.01) u.k = u.target;
+        m.visible = u.k > 0.02;
+        m.scale.y = Math.max(0.001, u.h * u.k);
+        m.material.opacity = (u.stage === 3 ? 0.95 : 0.7) * u.k;
+      });
       Object.keys(pins).forEach(function (id) {
         var P = pins[id], sel = selected != null && String(selected) === id;
         var k = sel ? 1 + 0.35 * (0.5 + 0.5 * Math.sin(t * 3)) : 1;
@@ -698,6 +740,8 @@
     var api = {
       setPins: safe(function (list) { setPins(list); }),
       select: safe(function (id) { selected = id == null ? null : String(id); styleAll(); }),
+      setDots: safe(function (list) { setDots(list); }),
+      showGate: safe(function (k) { showGate(k); }),
       dispose: safe(function () { L.dispose(); })
     };
     setPins(o.pins || []);

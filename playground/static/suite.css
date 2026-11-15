@@ -565,3 +565,8 @@ dialog.legend::backdrop { background: rgba(0, 0, 0, .6); }
 .findings .fs { margin-top: 3px; }
 .tours { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .tour { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px; }
+.scan-map { padding: 14px; align-self: stretch; display: flex; flex-direction: column; }
+.scan-map .map { height: auto; flex: 1; min-height: 360px; }
+.scan-agents { grid-column: 1 / -1; }
+.scan-agents .agents { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+@media (max-width: 560px) { .scan-map .map { height: 280px; } }

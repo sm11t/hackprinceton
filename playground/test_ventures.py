@@ -107,6 +107,10 @@ class Scan(unittest.TestCase):
         self.assertEqual(f["neighborhood_support"], 1)
         self.assertEqual(out["pairs"][0]["suite"], "A")
         self.assertEqual(out["directions"][0]["business"], "fitness_gym")
+        # the map: one dot per building, lit up to the furthest gate any pair there passed
+        self.assertEqual(len(out["map"]["buildings"]), 1)
+        self.assertEqual(out["map"]["buildings"][0][2], 3)
+        self.assertEqual(out["map"]["after_gate"], [1, 1, 1, 1])
 
     def test_radius_and_exclusions(self):
         with mock.patch.object(op, "load_index", lambda kit=None: market()), \

@@ -190,12 +190,14 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
     funnel = {"spaces": 0, "combinations": 0, "building_can_host": 0, "affordable": 0, "neighborhood_support": 0,
               "cost_not_estimated": 0, "rent_not_listed": 0}
     pairs, unpriced = [], {}
+    reach = {}  # building -> furthest gate any business x space there passed (0 none, 1 building, 2 cash, 3 neighborhood)
     for pid, b in market.items():
         if center and radius_mi and nb.miles(center[0], center[1], b["lat"], b["lon"]) > radius_mi:
             continue
         row = index.get(pid)
         if not row:
             continue
+        reach[pid] = 0
         for sp in b["spaces"]:
             funnel["spaces"] += 1
             rent = rent_for(sp)
@@ -205,6 +207,7 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                 if not fit or fit["status"] == "no":
                     continue
                 funnel["building_can_host"] += 1
+                reach[pid] = max(reach[pid], 1)
                 cost = cash_to_open(key, sp["sf"], rent["monthly"], budget=budget, reserve=reserve,
                                     building_type=b["facts"].get("type"))
                 if cost["affordability"] == "over":
@@ -219,10 +222,12 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                         u["places"] += 1
                     continue
                 funnel["affordable"] += 1
+                reach[pid] = max(reach[pid], 2)
                 funnel["rent_not_listed"] += cost["affordability"] == "rent_unknown"
                 if not demand or not promising(demand):
                     continue
                 funnel["neighborhood_support"] += 1
+                reach[pid] = 3
                 pairs.append({
                     "business": key, "label": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"],
                     "property_id": pid, "address": b["address"], "lat": b["lat"], "lon": b["lon"],
@@ -268,7 +273,12 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
         costs = sorted(d.pop("cash_to_open"))
         d["cash_to_open_range"] = [costs[0], costs[-1]] if costs else None
         d["why"] = (d["pairs"][0]["demand"]["reasons"] or ["Neighborhood signals are mixed"])[0]
+    dots = [[round(market[pid]["lat"], 4), round(market[pid]["lon"], 4), stage] for pid, stage in reach.items()
+            if market[pid].get("lat") is not None and market[pid].get("lon") is not None]
     return {"budget": budget, "reserve": reserve, "funnel": funnel, "directions": ranked,
+            "map": {"buildings": dots, "after_gate": [sum(1 for d in dots if d[2] >= k) for k in range(4)],
+                    "note": "One dot per building with listed space; it stays lit while any business x space there "
+                            "passes the gate."},
             "cost_not_estimated": sorted(unpriced.values(), key=lambda u: -u["places"]),
             "pairs": best[:top * 5], "excluded_groups": excluded_groups, "businesses_considered": len(keys),
             "elapsed_ms": round(1000 * (time.perf_counter() - started)),
