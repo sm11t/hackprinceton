@@ -160,6 +160,8 @@
       ["CoStar building area", facts.gross_building_area_sqft == null ? "Unknown" : `${Number(facts.gross_building_area_sqft).toLocaleString()} SF`],
       ["Stories reported", facts.stories ?? "Unknown"],
     ];
+    const separateFitout = handoff.intake?.separate_fitout_budget_usd;
+    if (separateFitout != null) factsOverview.push(["Separate fit-out budget", money.format(separateFitout)]);
     for (const [label, value] of factsOverview) {
       const card = text(overview, "div", undefined, "overview-fact"); text(card, "small", label); text(card, "strong", value);
     }
@@ -604,12 +606,26 @@
     verify.addEventListener("click", () => r.verification ? (verificationBox.hidden = !verificationBox.hidden) : verifyListing(false));
     refresh.addEventListener("click", () => verifyListing(true));
     investigate.addEventListener("click", async () => {
+      const fitoutInput = $("#fitout-amount");
+      const hasSeparateFitout = Number($("#allocation").value) === 100
+        && $('input[name="separate-fitout"]:checked')?.value === "yes";
+      const amount = fitoutInput.value.trim().replace(/^\$/, "").replace(/,/g, "");
+      const separateFitout = hasSeparateFitout ? Number(amount) : null;
+      if (hasSeparateFitout && (!/^\d+(\.\d{1,2})?$/.test(amount) || !Number.isFinite(separateFitout) || separateFitout <= 0)) {
+        fitoutInput.setCustomValidity("Enter a positive fit-out budget in USD with at most two decimal places.");
+        fitoutInput.reportValidity();
+        return;
+      }
       investigate.disabled = true; investigate.textContent = "Investigating…";
       setStage(2); window.scrollTo({ top: 0, behavior: "smooth" });
       const current = { status: "stage2_running", message: "Confirming the selected property, then gathering interior and exterior visual evidence.", progress: [{stage:"queued",message:"Investigation queued"}] };
       renderInvestigation(current);
       try {
-        let saved = await post("/api/investigate", { discovery_id: currentDiscovery.discovery_id, stable_id: r.stable_id });
+        let saved = await post("/api/investigate", {
+          discovery_id: currentDiscovery.discovery_id,
+          stable_id: r.stable_id,
+          separate_fitout_budget_usd: separateFitout,
+        });
         let handoff = saved.handoff;
         renderInvestigation(handoff);
         while (handoff?.status === "stage2_running") {
@@ -694,6 +710,10 @@
     try {
       const result = await post("/api/discovery", { intake });
       localStorage.removeItem("maximus.discovery.v1");
+      for (const option of document.querySelectorAll('input[name="separate-fitout"]')) option.checked = false;
+      $("#fitout-amount").value = "";
+      $("#fitout-amount").setCustomValidity("");
+      $("#fitout-amount-wrap").hidden = true;
       displayDiscovery(result);
     } catch (err) { status.textContent = `Discovery did not complete: ${err.message} Your intake is saved; retry when CoStar is available.`; }
     finally { button.disabled = false; button.innerHTML = 'Find Properties <span aria-hidden="true">→</span>'; }
@@ -703,6 +723,7 @@
   $("#horizon").addEventListener("change", scheduleReclassify);
   $("#allocation").addEventListener("input", scheduleReclassify);
   $("#fitout-question").addEventListener("change", event => { $("#fitout-amount-wrap").hidden = event.target.value !== "yes"; });
+  $("#fitout-amount").addEventListener("input", event => event.target.setCustomValidity(""));
   budget.addEventListener("blur", () => { const n = Number(budget.value.replace(/[,$\s]/g, "")); if (Number.isFinite(n) && n > 0) budget.value = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(n); });
   fillForm(JSON.parse(localStorage.getItem(intakeKey) || "null"));
   const savedInvestigation = new URLSearchParams(window.location.search).get("investigation");

@@ -701,9 +701,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Listing is not part of this discovery."}, status=404)
             return
         stable_id = str(record.get("stable_id", ""))
+        fitout = payload.get("separate_fitout_budget_usd")
+        if fitout is not None and (
+            type(fitout) not in (int, float) or not 0 < fitout < float("inf")
+            or round(fitout, 2) != fitout
+        ):
+            self.send_json({"error": "Enter a positive fit-out budget in USD with at most two decimal places."}, status=400)
+            return
         with DISCOVERY_LOCK:
             existing = next((item for item in INVESTIGATION_HANDOFFS.values()
                              if item.get("discovery_id") == discovery_id and item.get("selected_stable_id") == stable_id
+                             and (item.get("intake") or {}).get("separate_fitout_budget_usd") == fitout
                              and item.get("dossier")), None)
         if existing:
             self.send_json({"handoff": existing})
@@ -714,6 +722,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             with DISCOVERY_LOCK:
                 stage1_snapshot=json.loads(json.dumps(session['response'],ensure_ascii=False))
                 intake_snapshot=json.loads(json.dumps(session['intake'],ensure_ascii=False))
+            if fitout is not None:
+                intake_snapshot["separate_fitout_budget_usd"] = fitout
             record=next((r for r in stage1_snapshot['results'] if r.get('stable_id') == stable_id), None)
             if record is None:
                 raise ValueError('Selected listing is no longer present in the discovery snapshot.')

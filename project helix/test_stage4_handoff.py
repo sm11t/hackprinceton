@@ -63,6 +63,18 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual(record['reserve_status'], 'unavailable')
         self.assertEqual(record['stage3']['cash_to_open']['base'], 530432)
         self.assertEqual(record['stage3']['output_hash'], self.stage3['reproduce']['output_hash'])
+
+    def test_selection_preserves_separate_fitout_without_increasing_cash_budget(self):
+        intake = {**self.handoff['intake'], 'separate_fitout_budget_usd': 75000}
+        record = stage4.select(
+            self.iid, 'b0', self.report['report_id'],
+            **self.sources(
+                handoff={**self.handoff, 'intake': intake},
+                stage1={**self.stage1, 'intake': intake},
+            ),
+        )
+        self.assertEqual(record['budget'], 900000)
+        self.assertEqual(record['separate_fitout_budget_usd'], 75000)
         self.assertTrue(record['report_claims'])
         self.assertEqual(stage4.read(self.iid), record)
 

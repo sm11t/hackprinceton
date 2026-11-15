@@ -83,6 +83,7 @@ def build(investigation_id, business, report_id, *, stage1, handoff, stage3, rep
         'build_months': s4.get('build_months'),
         'budget': float(intake.get('total_budget_usd')),
         'budget_source': 'Stage 0 intake',
+        'separate_fitout_budget_usd': intake.get('separate_fitout_budget_usd'),
         'reserve': reserve,
         'reserve_status': 'provided' if reserve is not None else 'unavailable',
         'financing_intake': intake.get('financing'),
