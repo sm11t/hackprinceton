@@ -49,10 +49,79 @@ def tavily_search(query, domains):
         return json.load(response).get('results', [])
 
 
+def normalize_context(context):
+    """Accept Helix investigate handoff or its selected_listing; retain provenance.
+
+    Listing area ranges are not measured usable area. Never collapse them to a
+    single area for physical/legal capacity checks.
+    """
+    selected = context.get('selected_listing')
+    if selected is None and 'stable_id' in context:
+        selected = context
+    if selected is None:
+        return dict(context)
+    if not isinstance(selected, dict):
+        raise ValueError('selected_listing must be an object')
+    result = dict(context)
+    result.update(property_id=selected.get('property_id'), listing_id=selected.get('listing_id'),
+                  space_id=selected.get('space_id'), address=selected.get('address'),
+                  scope=('space:' + str(selected['space_id'])) if selected.get('space_id') else 'building',
+                  listing_evidence=selected)
+    result['facts'] = dict(context.get('facts') or {})
+    result['facts'].setdefault('property_type', selected.get('property_type') or 'unknown')
+    for key in ('lat', 'lon', 'jurisdiction'):
+        if key not in result and key in selected:
+            result[key] = selected[key]
+    result['listed_area_range_sqft'] = [selected.get('area_min_sqft'), selected.get('area_max_sqft')]
+    return result
+
+
+def resolve_context_jurisdiction(context):
+    context = normalize_context(context)
+    jurisdiction = context.get('jurisdiction') or {}
+    if jurisdiction.get('verified') is True and jurisdiction.get('evidence_url') and jurisdiction.get('code') in AUTHORITIES:
+        return context
+    if context.get('lat') is not None and context.get('lon') is not None:
+        try:
+            from jurisdiction import resolve_jurisdiction
+            context['jurisdiction'] = resolve_jurisdiction(context['lat'], context['lon'])
+        except Exception:
+            context['jurisdiction'] = dict(code=None, verified=False, evidence_url=None,
+                                          note='Jurisdiction resolver unavailable; no postal-city inference')
+    return context
+
+
+def cached_search(search, cache_dir, offline=False):
+    """Cache public research only; a missing offline entry raises into unknown.
+
+    Cache contains timestamps, never credentials. No cached source clears a gate.
+    """
+    import hashlib
+    from pathlib import Path
+    directory = Path(cache_dir)
+    def run(query, domains):
+        key = hashlib.sha256(json.dumps([query, sorted(domains)]).encode()).hexdigest()
+        path = directory / (key + '.json')
+        if path.exists():
+            payload = json.loads(path.read_text())
+            return payload['results']
+        if offline:
+            raise RuntimeError('Research not cached')
+        results = search(query, domains)
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = dict(retrieved_at=datetime.now(timezone.utc).isoformat(), results=results)
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(payload))
+        temporary.replace(path)
+        return results
+    return run
+
+
 def preflight(context):
     """Building stage; returns normalized scope, deterministic gates and handoff."""
     if not isinstance(context, dict):
         raise ValueError('context must be an object')
+    context = resolve_context_jurisdiction(context)
     facts = context.get('facts') or {}
     records = []
     gates = []
@@ -80,6 +149,32 @@ def preflight(context):
                 records=records, business_handoff_allowed=not any(g in gates for g in ('identity_conflict', 'commercial_conversion_unestablished')), legal_approval=False)
 
 
+def demo_requirements(business, jurisdiction_code):
+    """Reuse team thresholds; distinguish sport guidance from legal requirements.
+
+    California childcare must NOT inherit Texas area ratios.
+    """
+    from space_fit import USES, SOURCES
+    aliases = {'indoor_pickleball':'pickleball', 'indoor pickleball':'pickleball', 'childcare':'daycare', 'childcare/daycare':'daycare', 'restaurant':'restaurant'}
+    key = aliases.get(business.lower())
+    if key is None:
+        return None
+    spec = USES[key]
+    result = {'category':key, 'checks':list(spec.get('checks', [])), 'thresholds':{}, 'limitations':[]}
+    if key == 'pickleball':
+        result['thresholds'] = {'area_per_court_sqft':spec['area_per_unit_sf'], 'min_clear_height_ft':spec['min_clear_height_ft']}
+        result['source_url'] = SOURCES[spec['area_source']]
+        result['limitations'].append('Area is sport layout guidance, not proof of court geometry; ceiling threshold is unofficial guidance, not code.')
+    elif key == 'daycare':
+        if jurisdiction_code in ('houston','harris_unincorporated'):
+            result['thresholds'] = {'indoor_activity_sqft_per_child':spec['indoor_sf_per_child'], 'outdoor_activity_sqft_per_child':spec['outdoor_sf_per_child']}
+            result['source_url'] = SOURCES[spec['indoor_source']]
+        else:
+            result['checks'] = ['Confirm California childcare licensing, indoor/outdoor activity areas, fire clearance and age/capacity rules']
+            result['limitations'].append('Texas thresholds intentionally excluded; California requirements need official verification.')
+    return result
+
+
 def check_business(context, business, search=None, requirements=None):
     """Business stage accepts ANY registry key, avoiding a divergent 26-use catalog.
 
@@ -88,11 +183,14 @@ def check_business(context, business, search=None, requirements=None):
     """
     if not isinstance(business, str) or not business.strip():
         raise ValueError('business must be a nonempty registry key or label')
+    context = resolve_context_jurisdiction(context)
     report = preflight(context)
     report.update(stage='business', business=business, research=[], errors=[], trace=[])
     if not report['business_handoff_allowed']:
         report['trace'].append('Stopped before business research: unresolved building gate')
         return report
+    category = demo_requirements(business, (context.get('jurisdiction') or {}).get('code'))
+    report['category_requirements'] = category
     facts = context.get('facts') or {}
     for key, fact in [('min_area_sqft', 'area_sqft'), ('min_clear_height_ft', 'clear_height_ft')]:
         threshold = (requirements or {}).get(key)
@@ -116,7 +214,7 @@ def check_business(context, business, search=None, requirements=None):
     report['records'].append(record('official_process', url, url=url, note='General process reference, not parcel approval'))
     # Two bounded calls, not 26 independent loops. Evidence cannot execute instructions.
     for topic in ('change of use occupancy permits', 'parking HVAC fire accessibility business licensing'):
-        query = f'{authority} {business} {topic}'
+        query = f'{authority} {context.get("address", "")} property {context.get("property_id")} {business} {topic}'
         if search is None:
             report['trace'].append(dict(query=query, status='not_run'))
             continue

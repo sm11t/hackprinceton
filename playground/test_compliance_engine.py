@@ -45,4 +45,53 @@ class ComplianceTests(unittest.TestCase):
         c=self.context(); c['identity_conflict']=True
         self.assertEqual(preflight(c)['status'],'blocked')
 
+class HandoffTests(unittest.TestCase):
+    def test_helix_handoff_preserves_scope_without_guessing_area(self):
+        from compliance_engine import normalize_context
+        selected = dict(property_id=23296, listing_id='listing', space_id='A', stable_id='stable', property_type='Industrial', area_min_sqft=9000, area_max_sqft=10000)
+        result=normalize_context({'selected_listing':selected})
+        self.assertEqual(result['scope'],'space:A')
+        self.assertNotIn('area_sqft',result['facts'])
+        self.assertEqual(result['listing_evidence'],selected)
+
+    def test_calls_claude_resolver(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        resolver=Mock(return_value=dict(code='houston',verified=True,evidence_url='https://example.org/boundary'))
+        with patch.dict(sys.modules, jurisdiction=SimpleNamespace(resolve_jurisdiction=resolver)):
+            result=preflight(dict(property_id=23296,scope='A',lat=29.8,lon=-95.4))
+        resolver.assert_called_once_with(29.8,-95.4)
+        self.assertNotIn('jurisdiction_unverified',result['gates'])
+
+    def test_resolver_failure_stays_unknown(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        with patch.dict(sys.modules,jurisdiction=SimpleNamespace(resolve_jurisdiction=Mock(side_effect=RuntimeError('private')))):
+            result=preflight(dict(property_id=1,scope='building',lat=1,lon=2))
+        self.assertIn('jurisdiction_unverified',result['gates'])
+        self.assertNotIn('private',str(result))
+
+    def test_public_cache_offline(self):
+        import tempfile
+        from compliance_engine import cached_search
+        with tempfile.TemporaryDirectory() as directory:
+            online=cached_search(lambda q,d:[{'url':'https://houstontx.gov/test'}],directory)
+            expected=online('question',['houstontx.gov'])
+            offline=cached_search(None,directory,offline=True)
+            self.assertEqual(offline('question',['houstontx.gov']),expected)
+            with self.assertRaises(RuntimeError): offline('missing',['houstontx.gov'])
+
+class CategoryTests(unittest.TestCase):
+    def test_texas_ratios_not_applied_to_california(self):
+        from compliance_engine import demo_requirements
+        self.assertIn('indoor_activity_sqft_per_child',demo_requirements('childcare','houston')['thresholds'])
+        self.assertEqual(demo_requirements('childcare','los_angeles')['thresholds'],{})
+    def test_thresholds_reused(self):
+        from compliance_engine import demo_requirements
+        from space_fit import USES
+        self.assertEqual(demo_requirements('indoor_pickleball','houston')['thresholds']['area_per_court_sqft'],USES['pickleball']['area_per_unit_sf'])
+        self.assertEqual(demo_requirements('restaurant','houston')['thresholds'],{})
+
 if __name__ == '__main__': unittest.main()
