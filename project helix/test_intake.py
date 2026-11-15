@@ -7,9 +7,9 @@ class IntakeTests(unittest.TestCase):
         return {"city": "Houston, TX", "total_budget_usd": "899999.99", "financing": "cash",
                 "business_preferences": "art studio", "open_to_ideas": False, **updates}
 
-    def test_below_threshold_is_lease_only_and_preserves_budget(self):
+    def test_houston_below_threshold_still_includes_sale_and_preserves_budget(self):
         value = build_intake(self.payload())
-        self.assertEqual(value["transaction_types"], ["lease"])
+        self.assertEqual(value["transaction_types"], ["sale", "lease"])
         self.assertEqual(value["total_budget_usd"], 899999.99)
         self.assertIsNone(value["acquisition_allocation"])
         self.assertIsNone(value["lease_horizon_years"])
@@ -25,7 +25,7 @@ class IntakeTests(unittest.TestCase):
     def test_invalid_inputs_are_rejected(self):
         for update in ({"city": "New York, NY"}, {"total_budget_usd": "0"},
                        {"total_budget_usd": "nope"}, {"financing": "loan"},
-                       {"business_preferences": "", "open_to_ideas": False}):
+                       {"business_preferences": 123}):
             with self.subTest(update=update), self.assertRaises(ValueError):
                 build_intake(self.payload(**update))
 

@@ -17,6 +17,7 @@ from intake import build_intake  # noqa: E402
 from costar_service import CoStarService  # noqa: E402
 from discovery import nemotron_explanations  # noqa: E402
 from discovery import reconcile_verification  # noqa: E402
+from discovery import confidence_assessment  # noqa: E402
 
 
 def intake(budget=350_000, **updates):
@@ -68,8 +69,30 @@ class PolicyTests(unittest.TestCase):
         annual = normalize_rent(listing(rate_low=24, rate_high=24, rate_basis_code=2))
         self.assertEqual(annual.monthly_high_usd, 10_000)
         self.assertEqual(normalize_rent(listing(rate_basis_code=99)).status, "unknown")
+        self.assertEqual(normalize_rent(listing(monetary_unit=2)).status, "unknown")
+        self.assertEqual(normalize_rent(listing(area_min_sqft=None, area_max_sqft=None)).status, "unknown")
         self.assertEqual(normalized.total_occupancy_cost_status, "unknown")
         self.assertEqual(normalized.known_additional_charges, [])
+
+    def test_invalid_rent_ranges_remain_unknown(self):
+        for changes in ({"area_min_sqft": -5000, "area_max_sqft": -5000},
+                        {"area_min_sqft": 6000, "area_max_sqft": 5000},
+                        {"rate_low": 20, "rate_high": 2}):
+            with self.subTest(changes=changes):
+                normalized = normalize_rent(listing(**changes))
+                self.assertEqual(normalized.status, "unknown")
+                self.assertIsNone(normalized.monthly_low_usd)
+                self.assertIsNone(normalized.monthly_high_usd)
+
+    def test_confidence_uses_four_equal_factors_and_horizon(self):
+        raw = listing(source_updated_at="2026-11-01")
+        record = make_discovery_response(intake(500_000), [raw])["results"][0]
+        score = record["confidence"]
+        self.assertEqual(set(score["factor_weights_percent"].values()), {25})
+        values = [score[k]["score"] for k in ("source_reliability", "data_completeness_consistency", "budget_fit", "property_search_fit")]
+        self.assertEqual(score["overall_confidence"], round(sum(values) / 4))
+        revised = apply_allocation_and_horizon([record], intake(500_000), 100, 10)[0]
+        self.assertAlmostEqual(revised["confidence"]["budget_fit"]["score"], 100 * revised["monthly_rent_caps_usd"]["10"] / revised["rent_normalization"]["monthly_high_usd"], places=1)
 
     def test_duplicates_and_allocation(self):
         sale = listing("sale:22", "sale", space_id=None, rate_low=None, rate_high=None,
@@ -82,7 +105,9 @@ class PolicyTests(unittest.TestCase):
         sale_record = next(r for r in data["results"] if r["transaction_type"] == "sale")
         revised = apply_allocation_and_horizon([sale_record], intake(1_000_000), 80)
         self.assertEqual(revised[0]["sale_classification"], "over_budget")
-        self.assertIsNone(revised[0]["confidence"]["overall_confidence"])
+        factors = revised[0]["confidence"]
+        values = [factors[k]["score"] for k in ("source_reliability", "data_completeness_consistency", "budget_fit", "property_search_fit")]
+        self.assertEqual(factors["overall_confidence"], round(sum(values) / 4))
 
     def test_sale_is_gated_and_preferences_optional(self):
         low = make_discovery_response(intake(899_999, city="Los Angeles, CA"), [listing("sale:22", "sale")])
@@ -91,13 +116,19 @@ class PolicyTests(unittest.TestCase):
 
     def test_business_preferences_do_not_change_discovery_or_confidence(self):
         rows = [listing("lease:22:33"), listing("lease:22:34", space_id=34)]
-        preference = make_discovery_response(intake(500_000, business_preferences="movie theater", open_to_ideas=False), rows)
-        open_ended = make_discovery_response(intake(500_000, business_preferences="", open_to_ideas=True), rows)
+        responses = [make_discovery_response(intake(500_000, business_preferences=pref, open_to_ideas=open_ideas), rows)
+                     for pref, open_ideas in (("", False), ("movie theater", False), ("pickleball", False), ("", True))]
         signature = lambda response: [
             (r["stable_id"], r["budget_classification"], r["confidence"]["property_search_fit"], r["confidence"]["overall_confidence"])
             for r in response["results"]
         ]
-        self.assertEqual(signature(preference), signature(open_ended))
+        self.assertTrue(all(signature(responses[0]) == signature(response) for response in responses[1:]))
+
+    def test_ranking_ties_are_reproducible(self):
+        rows = [listing("lease:22:33"), listing("lease:23:34", property_id=12, listing_id=23, space_id=34)]
+        first = make_discovery_response(intake(500_000), rows)
+        second = make_discovery_response(intake(500_000), list(reversed(rows)))
+        self.assertEqual([r["stable_id"] for r in first["results"]], [r["stable_id"] for r in second["results"]])
 
     def test_real_costar_shape_spaces_malformed_and_inactive_rows(self):
         props = "PropertyId,Address,City,State,MatterportModelId\n100,1 Main St,Houston,TX,\n"
@@ -139,8 +170,10 @@ class PolicyTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): return False
             def read(self): return json.dumps(envelope).encode()
-        def fake_urlopen(*args, **kwargs):
+        sent = []
+        def fake_urlopen(req, **kwargs):
             calls.append(1)
+            sent.append(json.loads(req.data))
             return Response()
         with patch("discovery.urllib.request.urlopen", fake_urlopen):
             notes, trace = nemotron_explanations(
@@ -149,6 +182,33 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(list(notes), ["lease:22:33"])
         self.assertEqual(trace["model_calls"], 1)
+        serialized = json.dumps(sent[0])
+        self.assertNotIn("business_preferences", serialized)
+        self.assertNotIn("open_to_ideas", serialized)
+
+    def test_nemotron_empty_malformed_timeout_and_truncated_responses_fallback(self):
+        cases = [
+            (b"not-json", None),
+            (json.dumps({"choices": [{"finish_reason": "length", "message": {"content": None}}]}).encode(), None),
+            (json.dumps({"choices": [{"finish_reason": "stop", "message": {"content": ""}}]}).encode(), None),
+            (None, TimeoutError("timed out")),
+        ]
+        for body, error in cases:
+            class Response:
+                def __enter__(self): return self
+                def __exit__(self, *args): return False
+                def read(self): return body
+            def fake_urlopen(*args, **kwargs):
+                if error:
+                    raise error
+                return Response()
+            with self.subTest(body=body, error=error), patch("discovery.urllib.request.urlopen", fake_urlopen):
+                notes, trace = nemotron_explanations(
+                    [{"stable_id": "lease:22:33", "property_id": 11}], intake(),
+                    "test-key", "https://openrouter.ai/api/v1", "test-model")
+                self.assertEqual(notes, {})
+                self.assertEqual(trace["status"], "deterministic_fallback")
+                self.assertEqual(trace["model_calls"], 1)
 
     def test_verification_preserves_candidate_conflicting_values(self):
         record = {

@@ -146,9 +146,14 @@ def normalize_rent(raw: dict) -> RentNormalization:
     if currency is None:
         missing.append("currency not confirmed as USD")
     per_sf = basis_code in (1, 2)
-    if per_sf and (area_min is None or area_max is None):
-        missing.append("area required for per-square-foot rent")
-    if basis and flag is True and low is not None and high is not None and currency and (not per_sf or (area_min and area_max)):
+    valid_rate_range = low is not None and high is not None and 0 < low <= high
+    valid_area_range = (area_min is not None and area_max is not None
+                        and 0 < area_min <= area_max)
+    if low is not None and high is not None and not valid_rate_range:
+        missing.append("asking rent range is invalid")
+    if per_sf and not valid_area_range:
+        missing.append("positive, ordered area bounds required for per-square-foot rent")
+    if basis and flag is True and valid_rate_range and currency and (not per_sf or valid_area_range):
         if basis_code == 1:  # USD/SF/month
             monthly_low, monthly_high = low * area_min, high * area_max
         elif basis_code == 2:  # USD/SF/year
@@ -220,7 +225,7 @@ def _property_search_fit(record, intake):
         return {"score": None, "status": "eligibility_mismatch", "basis": "Listing city does not match the requested market."}
     if record.get("transaction_type") not in policy_for_intake(intake)["transaction_types"]:
         return {"score": None, "status": "eligibility_mismatch", "basis": "Transaction type is outside the server-authorized search."}
-    return {"score": None, "status": "unknown", "basis": "Market, active listing, and transaction eligibility are enforced as hard filters; no additional general property constraints were collected, so they are not double-counted as a score."}
+    return {"score": 100, "status": "matched", "basis": "The record matches the requested city and an authorized transaction type. No additional general property constraints were collected."}
 
 
 def confidence_assessment(record, intake, verified=None):
@@ -269,16 +274,14 @@ def confidence_assessment(record, intake, verified=None):
             budget_fit = round(min(100, cap / high * 100), 1)
             budget_basis = f"${cap:,.2f} monthly cap divided by normalized base rent; additional charges unknown."
     search_fit = _property_search_fit(record, intake)
-    evidence = round((reliability + completeness) / 2) if reliability is not None and completeness is not None else None
-    search_confidence = round((budget_fit + search_fit["score"]) / 2) if budget_fit is not None and search_fit["score"] is not None else None
-    overall = round((evidence + search_confidence) / 2) if evidence is not None and search_confidence is not None else None
+    factors = (reliability, completeness, budget_fit, search_fit["score"])
+    overall = round(sum(factors) / 4) if all(value is not None for value in factors) else None
     return {
         "source_reliability": {"score": reliability, "status": "scored" if reliability is not None else "unknown", "basis": reliability_reason},
         "data_completeness_consistency": {"score": completeness, "status": "scored" if completeness is not None else "insufficient_evidence", "basis": "Four required identity/status fields plus four completeness checks (area bounds, source update, price or normalized rent)."},
         "budget_fit": {"score": budget_fit, "status": "scored" if budget_fit is not None else "unknown", "basis": budget_basis},
         "property_search_fit": search_fit,
-        "evidence_confidence": evidence,
-        "property_search_confidence": search_confidence,
+        "factor_weights_percent": {"source_reliability": 25, "data_completeness_consistency": 25, "budget_fit": 25, "property_search_fit": 25},
         "overall_confidence": overall,
         "overall_status": "complete" if overall is not None else "incomplete_confidence",
         "is_probability": False,
@@ -348,7 +351,8 @@ def apply_allocation_and_horizon(records: list[dict], intake: dict, acquisition_
         raise ValueError("Acquisition/occupancy allocation must be between 0 and 100 percent.")
     if preferred_horizon not in (None, *LEASE_HORIZONS):
         raise ValueError("Lease horizon must be 3, 5, or 10 years.")
-    revised_intake = {**intake, "acquisition_allocation": acquisition_percent}
+    revised_intake = {**intake, "acquisition_allocation": acquisition_percent,
+                      "lease_horizon_years": preferred_horizon}
     budget = float(intake["total_budget_usd"])
     occupancy = budget * acquisition_percent / 100
     caps = {str(years): occupancy / (15 * years) for years in LEASE_HORIZONS}
@@ -382,7 +386,7 @@ def _diverse_order(records):
     priority = {"within_budget": 0, "stretch": 1, "unknown": 2, "over_budget": 3}
     records = sorted(records, key=lambda x: (
         priority.get(x["budget_classification"], 4),
-        -(x["confidence"].get("evidence_confidence") if x["confidence"].get("evidence_confidence") is not None else -1),
+        -(x["confidence"].get("source_reliability", {}).get("score") if x["confidence"].get("source_reliability", {}).get("score") is not None else -1),
         -(x["confidence"].get("data_completeness_consistency", {}).get("score") if x["confidence"].get("data_completeness_consistency", {}).get("score") is not None else -1),
         x.get("address") or "", x.get("stable_id") or "",
     ))
@@ -456,7 +460,7 @@ def nemotron_explanations(records, intake, api_key, base_url, model):
         "asking_price_usd", "sale_classification", "rent_raw", "rent_normalization",
         "lease_affordability", "budget_classification", "known_additional_charges",
         "source", "source_reference", "source_updated_at", "missing_fields")}
-        for r in records[:24]]
+        for r in records[:8]]
     body = {
         "model": model,
         "messages": [
@@ -474,8 +478,10 @@ def nemotron_explanations(records, intake, api_key, base_url, model):
         ],
         "stream": False,
         "temperature": 0,
-        "max_tokens": 1800,
-        "response_format": {"type": "json_object"},
+        # Nemotron's reasoning tokens count against max_tokens on OpenRouter.
+        # Reserve enough output budget for reasoning plus the bounded JSON answer.
+        "max_tokens": 4096,
+        "reasoning": {"effort": "low", "exclude": True},
     }
     req = urllib.request.Request(base_url.rstrip("/") + "/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
@@ -484,7 +490,12 @@ def nemotron_explanations(records, intake, api_key, base_url, model):
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode("utf-8"))
-        text = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+        choice = (data.get("choices") or [{}])[0]
+        finish_reason = choice.get("finish_reason")
+        text = (choice.get("message") or {}).get("content") or ""
+        if not text:
+            return {}, {"model_calls": 1, "status": "deterministic_fallback",
+                        "error": f"Nemotron returned no explanation content (finish_reason={finish_reason or 'unknown'})"}
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:

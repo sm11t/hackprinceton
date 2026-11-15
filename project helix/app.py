@@ -508,10 +508,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Listing is not part of this discovery."}, status=404)
             return
         handoff_id = uuid.uuid4().hex
+        try:
+            property_facts = costar.get_property(record["property_id"]) if costar else {}
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            property_facts = {}
+        property_facts_available = isinstance(property_facts, dict) and "error" not in property_facts
         handoff = {
             "handoff_id": handoff_id, "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "stage2_placeholder", "stage": 2,
             "intake": session["intake"], "selected_listing": record,
+            "property_facts": property_facts if property_facts_available else {},
+            "property_facts_status": "available" if property_facts_available else "unavailable",
             "message": "Selection saved for a future investigation stage. Stage 2 was not run.",
         }
         INVESTIGATION_HANDOFFS[handoff_id] = handoff
