@@ -95,8 +95,12 @@ class Scan(unittest.TestCase):
     def test_funnel_and_gates_in_order(self):
         with mock.patch.object(op, "load_index", lambda kit=None: market()), \
                 mock.patch.object(vc, "costs", lambda: FAKE), \
+                mock.patch.object(op, "jurisdiction_cached", lambda lat, lon: {"code": "houston", "verified": True,
+                                                                               "place": "Houston city"}), \
                 mock.patch.object(op, "INDUSTRIES", {k: nb.INDUSTRIES[k] for k in ("fitness_gym", "car_wash")}):
             out = op.scan(700000, 50000)
+            one = op.scan(700000, 50000, include=["car_wash"])
+            none = op.scan(700000, 50000, property_ids={999})
         f = out["funnel"]
         self.assertEqual((f["spaces"], f["combinations"], f["building_can_host"]), (2, 4, 3))
         # suite B (50,000 sq ft gym) is over budget; car wash has no comparable benchmark, so it is never
@@ -109,8 +113,13 @@ class Scan(unittest.TestCase):
         self.assertEqual(out["directions"][0]["business"], "fitness_gym")
         # the map: one dot per building, lit up to the furthest gate any pair there passed
         self.assertEqual(len(out["map"]["buildings"]), 1)
-        self.assertEqual(out["map"]["buildings"][0][2], 3)
-        self.assertEqual(out["map"]["after_gate"], [1, 1, 1, 1])
+        self.assertEqual(out["map"]["buildings"][0][2], 4)  # passed the compliance preflight (authority known)
+        self.assertEqual(out["map"]["after_gate"], [1, 1, 1, 1, 1])
+        self.assertEqual(out["funnel"]["compliance"]["houston"], 1)
+        self.assertEqual(out["pairs"][0]["jurisdiction"]["code"], "houston")
+        # filters: one business (I know what I want), one building (I have a space)
+        self.assertEqual(one["funnel"]["combinations"], 2)
+        self.assertEqual(none["funnel"]["spaces"], 0)
 
     def test_radius_and_exclusions(self):
         with mock.patch.object(op, "load_index", lambda kit=None: market()), \
@@ -292,3 +301,35 @@ class SignalGuide(unittest.TestCase):
         self.assertIsNone(g["rent_accuracy"])
         for s in g["signals"]:
             self.assertTrue(all(s[k] for k in ("measures", "source", "supports", "against", "unknown", "accuracy")))
+
+
+class SitePreflight(unittest.TestCase):
+    """'I have a space': Jayant's building preflight decides whether any business is suggested."""
+    def run_preflight(self, property_type, code, spaces=True):
+        import compliance_engine as ce
+        building, _ = market()
+        b = building[1]
+        context = {"property_id": 1, "address": "1 Test St", "lat": 29.7, "lon": -95.4, "scope": "building",
+                   "facts": {"property_type": property_type}, "evidence_records": [],
+                   "jurisdiction": {"code": code, "verified": code is not None, "evidence_url": "https://x.test",
+                                    "note": "n"}}
+        with mock.patch.object(ce, "context_from_kit", lambda *a, **k: dict(context)), \
+                mock.patch("opportunity.load_market", lambda kit=None: [b] if spaces else []):
+            return vr.site_preflight(1)
+
+    def test_commercial_building_continues(self):
+        out = self.run_preflight("Retail", "houston")
+        self.assertTrue(out["can_continue"])
+        self.assertTrue(out["spaces"])
+        self.assertFalse(out["legal_approval"])
+
+    def test_residential_stops_and_unincorporated_is_flagged(self):
+        out = self.run_preflight("Multifamily", "harris_unincorporated", spaces=False)
+        self.assertFalse(out["can_continue"])
+        self.assertIn("residential", out["stops"][0])
+        self.assertTrue(any("Harris County does" in c for c in out["checks"]))
+
+    def test_nothing_listed_stops(self):
+        out = self.run_preflight("Retail", "houston", spaces=False)
+        self.assertFalse(out["can_continue"])
+        self.assertIn("Nothing is listed", out["stops"][0])

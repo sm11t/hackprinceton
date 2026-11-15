@@ -467,8 +467,11 @@ def main():
                     if route.path == "/api/opportunities":
                         lat, lon, radius = number("lat"), number("lon"), number("radius")
                         exclude = [k for k in params.get("exclude", [""])[0].split(",") if k]
+                        include = [k for k in params.get("include", [""])[0].split(",") if k] or None
+                        pids = {int(x) for x in params.get("property_id", [""])[0].split(",") if x.isdigit()} or None
                         body = opportunity.scan(budget, reserve, args.kit, center=(lat, lon) if lat and lon else None,
-                                                radius_mi=radius, exclude=exclude, top=int(number("top", 8)))
+                                                radius_mi=radius, exclude=exclude, top=int(number("top", 8)),
+                                                include=include, property_ids=pids)
                     else:
                         property_id = params.get("property_id", [""])[0]
                         if not property_id.isdigit():
@@ -483,6 +486,30 @@ def main():
                 except (OSError, RuntimeError, KeyError):
                     self.send(b'{"error":"Opportunity data unavailable. Run opportunity.py --build once."}',
                               "application/json", 502)
+                return
+            if route.path == "/api/site/preflight":
+                try:
+                    property_id = params.get("property_id", [""])[0]
+                    if not property_id.isdigit():
+                        raise ValueError("Give a CoStar property_id.")
+                    body = venture_review.site_preflight(int(property_id), args.kit)
+                    self.send(json.dumps(body, default=str).encode(), "application/json")
+                except ValueError as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError, KeyError):
+                    self.send(b'{"error":"Building check unavailable. Check the kit."}', "application/json", 502)
+                return
+            if route.path == "/api/places":
+                q = params.get("q", [""])[0].strip()[:80]
+                listed = {b["property_id"]: b for b in opportunity.load_market(args.kit)}
+                rows = lookup(properties.values(), q) if len(q) >= 2 else []
+                out = []
+                for row in rows[:40]:
+                    pid = int(row["PropertyId"]) if row["PropertyId"].isdigit() else None
+                    b = listed.get(pid)
+                    out.append({"property_id": pid, "address": row["Address"], "listed_spaces": len(b["spaces"]) if b else 0})
+                out.sort(key=lambda r: -r["listed_spaces"])
+                self.send(json.dumps({"query": q, "places": out[:12], "matches": len(rows)}).encode(), "application/json")
                 return
             if route.path == "/api/signal-guide":
                 import signal_guide

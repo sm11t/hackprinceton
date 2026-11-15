@@ -659,3 +659,50 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
         "elapsed_ms": round(1000 * (time.perf_counter() - started)),
         "computed_by": "All numbers and verdicts are computed in code. Only the optional summary is LLM-written.",
     }
+
+
+GATE_TEXT = {
+    "commercial_conversion_unestablished": "CoStar records a residential building: commercial use is not established, "
+                                           "so no business is suggested here",
+    "identity_conflict": "The records disagree on which building or suite this is: confirm before any business check",
+    "identity_incomplete": "The building or suite identity is incomplete",
+    "jurisdiction_unverified": "Who permits this address isn't verified from the pin (Census boundary): confirm with "
+                               "the city or county",
+}
+
+
+def site_preflight(property_id, kit=None):
+    """'I have a space': the building check before any business (Jayant's compliance_engine.preflight, as is), plus
+    the listed spaces a business review can use. A residential building or an identity conflict stops here."""
+    import compliance_engine as ce
+    from opportunity import load_market
+    context = ce.context_from_kit(int(property_id), None, str(kit) if kit else None)
+    report = ce.preflight(context)
+    where = report.get("jurisdiction") or {}
+    building = next((b for b in load_market(kit) if b["property_id"] == int(property_id)), None)
+    spaces = [{"value": sp["value"], "suite": sp.get("suite"), "sf": sp.get("sf"),
+               "label": f"Suite {sp['suite']}" if sp.get("suite") else f"{sp['sf']:,.0f} sq ft space",
+               "monthly_rent": sp.get("monthly_rent"), "lease_basis": sp.get("lease_basis")}
+              for sp in (building or {}).get("spaces", [])]
+    stops = [GATE_TEXT.get(g, g) for g in report["gates"] if g in ("commercial_conversion_unestablished",
+                                                                   "identity_conflict")]
+    if not stops and not spaces:
+        stops.append("Nothing is listed for lease here in CoStar, so there is no space to price or review")
+    checks = [GATE_TEXT.get(g, g) for g in report["gates"] if g not in ("commercial_conversion_unestablished",
+                                                                        "identity_conflict")]
+    if where.get("code") == "harris_unincorporated":
+        checks.append("Outside Houston city limits (unincorporated Harris County): City of Houston permits don't "
+                      "apply; Harris County does")
+    authority = AUTHORITY.get(where.get("code"))
+    return {"property_id": int(property_id), "address": context.get("address"), "lat": context.get("lat"),
+            "lon": context.get("lon"), "facts": context.get("facts"),
+            "jurisdiction": {k: where.get(k) for k in ("code", "verified", "place", "county", "note", "evidence_url",
+                                                      "retrieved_at")},
+            "authority": {"name": authority[0], "url": authority[1]} if authority else None,
+            "gates": report["gates"], "status": report["status"], "stops": stops, "checks": checks,
+            "can_continue": not stops, "spaces": spaces, "tours": (building or {}).get("tours"),
+            "records": [r for r in report["records"] if r["fact"] in ("jurisdiction", "scan_address") or r["value"]
+                        is not None],
+            "to_verify": [r["note"] for r in report["records"] if r["fact"] in ce.TOPICS],
+            "legal_approval": False,
+            "computed_by": "Jayant's compliance engine (building preflight) and the CoStar kit; no approval is implied."}
