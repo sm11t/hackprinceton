@@ -49,3 +49,17 @@ The `research/` directory was already untracked and is intentionally not include
 6. A pre-existing hard-coded CoStar ZIP-password fallback remains in `project helix/costar_service.py` (verified during review). It was not changed, and its value is intentionally omitted here. Replace it with an environment-only configuration in a separately reviewed security change.
 
 No PR was opened, no changes were pushed or merged, no secrets were modified, and no legacy Maximo code was imported.
+
+## Customer-acceptance repair follow-up — 2026-11-15
+
+This follow-up supersedes the earlier “complete” wording above for customer acceptance. The original Stage 2 commit is `9560469`; the repair pass is on the same Stage 2 branch and remains local.
+
+- The Stage 2 screen is a separate investigation page with a return-to-properties action, live provider progress, a prominent Matterport frame, an actual Vexcel image gallery, grouped physical findings, and expandable technical handoff data. Per-image observations are grouped for the customer view; source-backed observations remain in the Stage 3 payload.
+- A real headless-browser journey submitted a valid LA intake, received 120 live Stage 1 CoStar results, selected the actual 1250 S Broadway listing, and used the normal `/api/investigate` and polling flow. The finished page showed all 5 extracted Vexcel images (aerial plus east, north, south, and west obliques) with capture dates and enlarged-image evidence actions. All 5 exterior image analyses completed.
+- The exact-address Matterport model was matched and its Showcase iframe was embedded. The parent page and Matterport endpoints returned HTTP 200, but the browser screenshot still showed “Connecting to the Matterport space”; the navigable 3D tour is therefore **not verified as working** and remains the primary acceptance blocker.
+- Default visual analysis ran without an enable flag. In that browser run, 27 of 28 Matterport panoramas produced findings and one remained unparseable after the then-current retry; 297 grounded visual observations were passed into the dossier, with 301 physical observations total. The Stage 3 handoff includes physical capabilities, visual evidence, physical unknowns, and source coverage. A third strict-JSON retry was added afterward and is covered by unit tests, but has not been revalidated against that panorama live.
+- Completion is reported as partial when a required component is incomplete. This run correctly ended `Partially complete` because one interior panorama failed. No provider evidence was replaced with fabricated results.
+- Browser screenshots from this real run: `/tmp/helix-stage2-real-browser-desktop.png` and `/tmp/helix-stage2-real-browser-mobile.png`. The mobile layout had no horizontal overflow at 390 px. The evidence view showed the Matterport loading state described above.
+- Final automated checks after the repair edits: Stage 2 **26 passed**, Stage 0/1 **43 passed**, JavaScript syntax, Python compilation, and `git diff --check` passed. No further live API/browser run was made after the final bounded retry and finding-filter edits.
+
+**Acceptance status: partial.** Vexcel imagery, automatic visual analysis, the grouped findings view, the handoff, and the browser journey work. The real Matterport Showcase never moved past its loading screen in the captured browser run, and the final retry refinement still needs one live verification. Do not present Stage 2 as fully accepted until those two items are resolved.

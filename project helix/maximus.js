@@ -21,12 +21,19 @@
     if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
     return data;
   }
+  async function get(path) {
+    const response = await fetch(path, { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+    return data;
+  }
   function setStage(stage) {
     intakeView.hidden = stage !== 0;
     discoveryView.hidden = stage !== 1;
-    $("#stage-indicator").textContent = stage === 0 ? "STAGE 0 · YOUR STARTING POINT" : "STAGE 1 · PROPERTY DISCOVERY";
-    $("#step-count").textContent = stage === 0 ? "01 / 03" : "02 / 03";
-    $("#progress").style.width = stage === 0 ? "12%" : "44%";
+    $("#stage2").hidden = stage !== 2;
+    $("#stage-indicator").textContent = stage === 0 ? "STAGE 0 · YOUR STARTING POINT" : stage === 1 ? "STAGE 1 · PROPERTY DISCOVERY" : "STAGE 2 · BUILDING INVESTIGATION";
+    $("#step-count").textContent = stage === 0 ? "01 / 03" : stage === 1 ? "02 / 03" : "03 / 03";
+    $("#progress").style.width = stage === 0 ? "12%" : stage === 1 ? "44%" : "76%";
   }
   function readForm() {
     return {
@@ -56,107 +63,173 @@
   }
   function clear(node) { node.replaceChildren(); }
   function sectionMessage(node, message) { clear(node); text(node, "p", message, "investigation-empty"); }
+  function humanize(value) {
+    return String(value || "").replace(/^vexcel_/, "").replaceAll("_", " ").replace(/\b\w/g, x => x.toUpperCase());
+  }
+  function dateLabel(value) {
+    if (!value) return "Capture date unavailable";
+    const date = new Date(value);
+    return Number.isNaN(date.valueOf()) ? String(value).slice(0, 10) : new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(date);
+  }
+  function imageDialog(src, title) {
+    let dialog = $("#evidence-image-dialog");
+    if (!dialog) {
+      dialog = document.createElement("dialog"); dialog.id = "evidence-image-dialog"; dialog.className = "evidence-image-dialog";
+      const close = text(dialog, "button", "Close", "secondary"); close.type = "button"; close.addEventListener("click", () => dialog.close());
+      text(dialog, "h3", "Evidence image", "evidence-dialog-title");
+      const img = text(dialog, "img", undefined, "evidence-dialog-image"); img.alt = "Property evidence image";
+      document.body.append(dialog);
+    }
+    $(".evidence-dialog-title", dialog).textContent = title;
+    $("img", dialog).src = src; dialog.showModal();
+  }
+  function renderProgress(handoff) {
+    const list = $("#investigation-progress"); clear(list);
+    const events = handoff?.progress || [];
+    const latest = new Map();
+    for (const event of events) latest.set(event.stage, event);
+    for (const event of [...latest.values()].slice(-7)) {
+      const item = text(list, "li", undefined, "progress-step complete");
+      text(item, "strong", event.message || humanize(event.stage));
+      if (event.completed != null && event.total != null) text(item, "span", `${event.completed} of ${event.total}`);
+    }
+    if (handoff?.status === "stage2_running") {
+      const item = text(list, "li", undefined, "progress-step active");
+      text(item, "strong", "Working through the remaining evidence…");
+    }
+    $("#investigation-state").textContent = handoff?.status === "stage2_complete" ? "Complete" : handoff?.status === "stage2_running" ? "In progress" : handoff?.status === "stage2_failed" ? "Could not finish" : "Partially complete";
+  }
   function renderInvestigation(handoff) {
+    renderProgress(handoff);
     const d = handoff?.dossier;
-    if (!d) return;
+    if (!d) {
+      $("#investigation-summary").textContent = handoff?.message || "Checking the selected property and gathering image evidence.";
+      return;
+    }
     const p = d.selected_property || {};
     const facts = d.reported_building_facts?.costar || {};
     $("#investigation-title").textContent = p.address || "Selected property";
-    $("#investigation-summary").textContent = `${p.city || ""}${p.state ? `, ${p.state}` : ""} · CoStar property ${p.property_id || "unknown"}${p.space_id ? ` · selected suite/space ${p.space_id}` : ""} · Listing ${p.listing_id || "unknown"}. This investigation describes reported evidence and unresolved questions; it does not certify compliance or safety.`;
-    $("#investigation-state").textContent = handoff.status === "stage2_complete" ? "Investigation complete" : "Partial investigation";
+    const listing = d.reported_building_facts?.listing_context || {};
+    $("#investigation-summary").textContent = `${p.city || ""}${p.state ? `, ${p.state}` : ""}${listing.suite ? ` · Suite ${listing.suite}` : p.space_id ? ` · Selected space ${p.space_id}` : ""}. This is a source-backed physical review, not an inspection or approval.`;
     const overview = $("#investigation-overview"); clear(overview);
     const factsOverview = [
-      ["Identity", d.identity_resolution?.status || "unknown"],
       ["Property type", facts.property_type || "Not recorded"],
-      ["Building area (CoStar)", facts.gross_building_area_sqft == null ? "Unknown" : `${Number(facts.gross_building_area_sqft).toLocaleString()} SF`],
-      ["Rentable area (CoStar)", facts.rentable_building_area_sqft == null ? "Unknown" : `${Number(facts.rentable_building_area_sqft).toLocaleString()} SF`],
-      ["Stories (CoStar)", facts.stories ?? "Unknown"],
-      ["Zoning label (CoStar)", facts.zoning_description || "Unknown"],
+      ["Selected suite", listing.suite || "Building-wide selection"],
+      ["Available area", listing.area_min_sqft == null ? "Not recorded" : `${Number(listing.area_min_sqft).toLocaleString()} SF`],
+      ["CoStar building area", facts.gross_building_area_sqft == null ? "Unknown" : `${Number(facts.gross_building_area_sqft).toLocaleString()} SF`],
+      ["Stories reported", facts.stories ?? "Unknown"],
     ];
     for (const [label, value] of factsOverview) {
-      const card = text(overview, "div", undefined, "overview-fact");
-      text(card, "small", label); text(card, "strong", value);
+      const card = text(overview, "div", undefined, "overview-fact"); text(card, "small", label); text(card, "strong", value);
     }
 
-    const sources = $("#investigation-sources"); clear(sources);
-    const statuses = d.source_status || {};
     const models = d.identity_resolution?.matterport_models || [];
-    for (const key of ["costar", "matterport", "vexcel"]) {
-      const item = statuses[key] || { status: "unknown" };
-      const card = text(sources, "article", undefined, "source-card");
-      const header = text(card, "div", undefined, "source-card-head");
-      text(header, "strong", key === "costar" ? "CoStar" : key === "matterport" ? "Matterport" : "Vexcel");
-      text(header, "span", item.status || "unknown", `source-status ${item.status || "unknown"}`);
-      if (item.reason) text(card, "p", item.reason);
-      if (item.error) text(card, "p", `Provider error: ${item.error}`);
-      if (key === "matterport" && models.length) {
-        for (const m of models) {
-          const line = text(card, "p", undefined, "source-detail");
-          text(line, "span", `${m.model_id} · ${m.status}${m.name ? ` · ${m.name}` : ""}`);
-          if (m.model_id && m.status === "matched") {
-            const a = text(line, "a", "Open Matterport model");
-            a.href = `https://my.matterport.com/show/?m=${encodeURIComponent(m.model_id)}`; a.target = "_blank"; a.rel = "noopener noreferrer";
-          }
-          if (m.floor_count != null) text(card, "p", `${m.floor_count} floors · ${m.room_count} rooms · ${m.available_panorama_count}/${m.panorama_count} panoramas with imagery`, "source-detail");
-        }
-      }
-      if (key === "matterport" && item.visual_analysis?.status) text(card, "p", `Image interpretation: ${item.visual_analysis.status}${item.visual_analysis.reason ? ` · ${item.visual_analysis.reason}` : ""}`, "source-detail");
-      if (key === "vexcel") {
-        const ops = item.operations || {};
-        for (const [name, result] of Object.entries(ops)) {
-          text(card, "p", `${name.replaceAll("_", " ")}: ${result.status || "unknown"}${result.feature_count != null ? ` · ${result.feature_count} records` : ""}`, "source-detail");
-        }
-        for (const s of item.selected_structure_candidates || [])
-          text(card, "p", `Vexcel structure ${s.structure_id}: ${s.identity_status}${s.footprint_area_sqft != null ? ` · ${Number(s.footprint_area_sqft).toLocaleString()} SF footprint` : ""} · capture estimate ${s.capture_estimate || "unknown"}`, "source-detail");
-        if (item.image_extraction) text(card, "p", item.image_extraction, "source-detail");
+    const matched = models.find(m => m.status === "matched" && m.showcase_url);
+    const viewerWrap = $("#matterport-viewer-wrap"), iframe = $("#matterport-frame");
+    if (matched) {
+      viewerWrap.hidden = false; $("#matterport-unavailable").hidden = true;
+      iframe.src = matched.showcase_url; $("#matterport-open").href = matched.showcase_url;
+      $("#matterport-open").setAttribute("aria-label", "Open full Matterport tour in a new tab");
+    } else {
+      viewerWrap.hidden = true; $("#matterport-unavailable").hidden = false;
+      $("#matterport-unavailable").textContent = models.some(m => m.status === "quarantined")
+        ? "A linked Matterport scan did not match this property's address, so it is not shown."
+        : "No address-matched Matterport tour is available for this property.";
+    }
+
+    const gallery = $("#vexcel-gallery"); clear(gallery);
+    text(gallery, "h4", "Exterior imagery", "gallery-heading");
+    const vx = d.source_status?.vexcel || {}, views = vx.imagery?.views || [];
+    if (!views.length) {
+      text(gallery, "p", vx.imagery?.status === "unauthorized" ? "Vexcel image access needs authorization." : "No Vexcel aerial or oblique images were retrieved for this property.", "investigation-empty");
+    } else {
+      const grid = text(gallery, "div", undefined, "vexcel-image-grid");
+      for (const view of views) {
+        const card = text(grid, "article", undefined, "vexcel-image-card");
+        const img = text(card, "img", undefined); img.src = view.image_url; img.alt = `${humanize(view.view)} exterior imagery of ${p.address || "the selected property"}`; img.loading = "lazy";
+        img.addEventListener("click", () => imageDialog(view.image_url, `${humanize(view.view)} · ${dateLabel(view.capture_date)}`));
+        text(card, "strong", view.view === "aerial" ? "Aerial view" : `${humanize(view.view)} view`);
+        text(card, "small", dateLabel(view.capture_date));
+        const detail = text(card, "details", undefined, "imagery-details"); text(detail, "summary", "Image details");
+        text(detail, "small", `Collection ${view.collection || "not supplied"} · ${view.width && view.height ? `${view.width} × ${view.height}` : "dimensions unavailable"}`);
+        const enlarge = text(card, "button", "Enlarge image", "secondary"); enlarge.type = "button"; enlarge.addEventListener("click", () => imageDialog(view.image_url, `${humanize(view.view)} · ${dateLabel(view.capture_date)}`));
       }
     }
 
     const physical = $("#investigation-physical"); clear(physical);
     const observations = d.physical_observations || [];
-    if (!observations.length) sectionMessage(physical, d.visual_analysis?.reason || "No physical observations were established from available data.");
-    else for (const item of observations) {
-      const row = text(physical, "article", undefined, "evidence-row");
-      text(row, "strong", `${item.fact || item.feature || item.kind || "Observation"}${item.value != null ? ` · ${item.value}${item.unit ? ` ${item.unit}` : ""}` : ""}`);
-      if (item.note || item.evidence) text(row, "p", item.note || item.evidence);
-      text(row, "small", `Evidence: ${(item.evidence_ids || [item.image_id]).filter(Boolean).join(", ") || "reference unavailable"}`);
-      if (item.bbox_xyxy_normalized) text(row, "small", `Image region (normalized): ${item.bbox_xyxy_normalized.join(", ")}`);
+    const primary = observations.filter(item => {
+      if (!(item.kind === "direct_visual_observation" || (item.kind === "provider_reported_physical_fact" && item.fact !== "structure_count" && item.value != null))) return false;
+      const label = `${item.feature || ""} ${item.fact || ""}`.toLowerCase();
+      if (label.includes("condition_score")) return false;
+      const exterior = item.provider === "Vexcel" || item.source === "vexcel";
+      return exterior
+        ? /roof|footprint|structure|building|parking|vehicle|car|loading|dock|driveway|entrance|entry door|access door|roll.?up door|gate/.test(label)
+        : /door|entrance|entry|access|roll.?up|shutter|opening|partition|circulation|hall|corridor|stair|column|ceiling|beam|duct|hvac|electrical|panel|pipe|sprinkler|fixture|light|conduit|floor drain|open space|open area|clear span/.test(label)
+          && !/shelv|ladder|box|chair|desk|flag|workbench|stacked materials|monitor|filing cabinet|document|work table|workstation/.test(label);
+    });
+    if (!primary.length) text(physical, "p", "No physical features were confirmed in the retrieved imagery.", "investigation-empty");
+    else {
+      const groups = new Map();
+      for (const item of primary) {
+        const label = `${item.feature || item.fact || "Other"}`.toLowerCase();
+        const exterior = item.provider === "Vexcel" || item.source === "vexcel";
+        const key = exterior
+          ? /parking|vehicle|car|drive|access|loading|dock|entrance|entry door|gate/.test(label) ? "Parking, loading and access" : "Roof and building form"
+          : /door|entrance|entry|access|roll.?up|shutter/.test(label) ? "Doors and access" : /circulation|hall|corridor|stair|partition|room|column|opening/.test(label) ? "Layout and circulation" : "Ceiling and visible utilities";
+        if (!groups.has(key)) groups.set(key, []); groups.get(key).push(item);
+      }
+      for (const [groupName, items] of groups) {
+        const group = text(physical, "article", undefined, "finding-summary");
+        text(group, "h4", groupName);
+        const distinctFeatures = [...new Map(items.map(item => { const value=humanize(item.feature || item.fact || "Observation"); return [value.toLowerCase(),value]; })).values()];
+        const locations = new Set(items.map(item => item.location_id || item.image_id).filter(Boolean));
+        text(group, "p", `${items.length} evidence observations${locations.size ? ` across ${locations.size} image views` : ""}. ${distinctFeatures.slice(0, 3).join(" · ")}${distinctFeatures.length > 3 ? ` · +${distinctFeatures.length - 3} more` : ""}.`);
+        const evidence = text(group, "details", undefined, "finding-evidence");
+        text(evidence, "summary", `Review image evidence (${items.length})`);
+        const list = text(evidence, "div", undefined, "finding-evidence-list");
+        for (const item of items) {
+          const row = text(list, "article", undefined, "finding-card");
+          text(row, "strong", item.feature ? humanize(item.feature) : humanize(item.fact));
+          text(row, "p", item.evidence || `${humanize(item.fact)} reported by ${item.source || item.provider || "source"}${item.value != null ? `: ${Number(item.value).toLocaleString()}${item.unit ? ` ${item.unit}` : ""}` : ""}.`);
+          text(row, "small", `${item.provider || item.source || "Source"}${item.capture_date ? ` · ${dateLabel(item.capture_date)}` : item.captured_at ? ` · ${dateLabel(item.captured_at)}` : ""}${item.panorama_face ? ` · Camera view ${item.panorama_face}` : ""}`);
+          const action = text(row, "button", item.image_url ? "View image" : "View inside tour", "text-action"); action.type = "button";
+          action.addEventListener("click", () => {
+            if (item.image_url) imageDialog(item.image_url, item.feature || "Exterior evidence");
+            else if (matched && item.location_id) {
+              const url = new URL(matched.showcase_url); url.searchParams.set("ss", item.location_id); iframe.src = url.toString();
+              $("#investigation-explore").scrollIntoView({ behavior: "smooth", block: "start" });
+            } else if (matched) { $("#investigation-explore").scrollIntoView({ behavior: "smooth", block: "start" }); }
+          });
+        }
+      }
     }
 
     const contradictions = $("#investigation-contradictions"); clear(contradictions);
     const all = [...(d.contradictions || []), ...(d.resolved_discrepancies || [])];
-    if (!all.length) sectionMessage(contradictions, "No comparable cross-source claims were available to reconcile. Missing evidence is treated as unknown, not as agreement.");
-    else for (const v of all) {
-      const row = text(contradictions, "article", undefined, `evidence-row verdict-${v.status}`);
-      text(row, "strong", `${v.status.replaceAll("_", " ")} · ${v.fact || "Evidence comparison"}`);
-      text(row, "p", v.reason || "Requires source review.");
-      text(row, "small", `Evidence IDs: ${(v.evidence_ids || []).filter(Boolean).join(", ") || "unavailable"}`);
+    if (!all.length) text(contradictions, "p", "The available sources did not produce a direct disagreement.", "investigation-empty");
+    else for (const item of all) {
+      const row = text(contradictions, "article", undefined, `evidence-row verdict-${item.status}`);
+      const label = item.status === "resolved_by_timeline" ? "Resolved by dates" : item.status === "possible_conflict" ? "Needs review" : "Conflicting evidence";
+      text(row, "strong", `${label} · ${humanize(item.fact)}`); text(row, "p", item.reason || "The sources differ and should be reviewed.");
     }
 
     const compliance = $("#investigation-compliance"); clear(compliance);
-    const preflight = d.property_compliance_preflight || {};
-    const report = preflight.report || {};
-    if (!report.schema_version) sectionMessage(compliance, preflight.note || "Property preflight is unavailable; jurisdiction and applicability remain unverified.");
+    const report = d.property_compliance_preflight?.report || {};
+    if (!report.jurisdiction) text(compliance, "p", "Property jurisdiction could not be confirmed from the available boundary lookup.", "investigation-empty");
     else {
-      const j = report.jurisdiction || {};
-      text(compliance, "p", `Jurisdiction: ${j.code || "unknown"}${j.place ? ` · ${j.place}` : ""}${j.county ? ` · ${j.county}` : ""}`, "evidence-row");
-      if (j.evidence_url) { const a = text(compliance, "a", "Census boundary lookup"); a.href = j.evidence_url; a.target = "_blank"; a.rel = "noopener noreferrer"; }
-      if (j.note) text(compliance, "p", j.note, "source-detail");
-      text(compliance, "p", `Preflight status: ${report.status || "unknown"} · Legal approval: never asserted`, "source-detail");
-      for (const gate of report.gates || []) text(compliance, "p", `Unresolved gate: ${gate}`, "caveat");
-      for (const r of (report.records || []).filter(x => x.fact !== "identity" && x.value != null).slice(0, 12))
-        text(compliance, "p", `${r.fact}: ${r.value}${r.note ? ` · ${r.note}` : ""}`, "source-detail");
+      const j = report.jurisdiction; text(compliance, "p", `${j.place || j.code || "Jurisdiction pending"}${j.county ? ` · ${j.county}` : ""}`, "jurisdiction-result");
+      if (j.evidence_url) { const a = text(compliance, "a", "View jurisdiction source"); a.href=j.evidence_url; a.target="_blank"; a.rel="noopener noreferrer"; }
+      const records = (report.records || []).filter(x => x.value != null && x.fact !== "identity");
+      for (const item of records) { const row=text(compliance,"p",undefined,"preflight-finding"); text(row,"strong",humanize(item.fact)); text(row,"span",String(item.value)); if(item.note) text(row,"small",item.note); }
+      if (!records.length && report.status === "needs_verification") text(compliance,"p","The jurisdiction is identified; property-level legal approval has not been established.","preflight-finding");
     }
 
     const unknowns = $("#investigation-unknowns"); clear(unknowns);
-    const todo = [...(d.unknowns || []), ...(d.verification_tasks || []).map(x => ({ topic: "Next step", note: x.task, status: "needs verification" }))];
-    if (!todo.length) sectionMessage(unknowns, "No additional tasks were generated.");
-    else for (const item of todo) {
-      const row = text(unknowns, "article", undefined, "evidence-row");
-      text(row, "strong", `${item.topic || "Unknown"} · ${item.status || "unknown"}`);
-      text(row, "p", item.note || item.task || "Requires verification.");
-    }
-    $("#investigation-handoff").textContent = JSON.stringify(d.stage3_handoff || {}, null, 2);
+    const todo = (d.verification_tasks || []).filter(x => x.task);
+    if (!todo.length) text(unknowns, "p", "No property-specific verification blocker was identified in the evidence retrieved.", "investigation-empty");
+    else for (const item of todo) text(unknowns, "p", item.task, "verification-question");
+    $("#investigation-handoff").textContent = JSON.stringify({ physical_capabilities: d.stage3_handoff?.physical_capabilities, visual_evidence: d.stage3_handoff?.visual_evidence, physical_unknowns: d.stage3_handoff?.physical_unknowns, stage3_handoff: d.stage3_handoff }, null, 2);
   }
   function classificationLabel(value) {
     return ({ within_budget: "Within budget", stretch: "Stretch", over_budget: "Over budget", unknown: "Unknown" })[value] || "Unknown";
@@ -284,15 +357,19 @@
     refresh.addEventListener("click", () => verifyListing(true));
     investigate.addEventListener("click", async () => {
       investigate.disabled = true; investigate.textContent = "Investigating…";
-      $("#stage2").hidden = false;
-      $("#investigation-summary").textContent = "Checking the selected property identity and gathering available CoStar, Matterport and Vexcel evidence…";
-      sectionMessage($("#investigation-sources"), "Checking evidence sources. This can take a moment.");
-      $("#stage2").scrollIntoView({ behavior: "smooth", block: "start" });
+      setStage(2); window.scrollTo({ top: 0, behavior: "smooth" });
+      const current = { status: "stage2_running", message: "Confirming the selected property, then gathering interior and exterior visual evidence.", progress: [{stage:"queued",message:"Investigation queued"}] };
+      renderInvestigation(current);
       try {
-        const saved = await post("/api/investigate", { discovery_id: currentDiscovery.discovery_id, stable_id: r.stable_id });
-        renderInvestigation(saved.handoff);
-        $("#stage2").scrollIntoView({ behavior: "smooth", block: "start" });
-      } catch (err) { text(card, "p", err.message, "caveat"); }
+        let saved = await post("/api/investigate", { discovery_id: currentDiscovery.discovery_id, stable_id: r.stable_id });
+        let handoff = saved.handoff;
+        renderInvestigation(handoff);
+        while (handoff?.status === "stage2_running") {
+          await new Promise(resolve => setTimeout(resolve, 1400));
+          saved = await get(`/api/investigation?id=${encodeURIComponent(handoff.handoff_id)}`);
+          handoff = saved.handoff; renderInvestigation(handoff);
+        }
+      } catch (err) { $("#investigation-state").textContent = "Request failed"; $("#investigation-summary").textContent = err.message; }
       finally { investigate.disabled = false; investigate.textContent = "Open investigation"; }
     });
     return card;
@@ -332,7 +409,6 @@
     displayLimit = 40;
     setStage(1);
     $("#discovery-error").textContent = "";
-    $("#stage2").hidden = true;
     $("#horizon").value = data.results?.[0]?.lease_horizon_years ? String(data.results[0].lease_horizon_years) : "";
     $("#allocation").value = String(data.policy?.acquisition_allocation_percent ?? 100);
     $("#allocation-value").textContent = `${$("#allocation").value}%`;
@@ -375,6 +451,7 @@
     finally { button.disabled = false; button.innerHTML = 'Find Properties <span aria-hidden="true">→</span>'; }
   });
   $("#edit-intake").addEventListener("click", () => { setStage(0); fillForm(currentIntake); status.textContent = "Editing intake will require a fresh discovery search."; window.scrollTo({ top: 0, behavior: "smooth" }); });
+  $("#investigation-back").addEventListener("click", () => { setStage(1); window.scrollTo({ top: 0, behavior: "smooth" }); });
   $("#horizon").addEventListener("change", scheduleReclassify);
   $("#allocation").addEventListener("input", scheduleReclassify);
   $("#fitout-question").addEventListener("change", event => { $("#fitout-amount-wrap").hidden = event.target.value !== "yes"; });

@@ -3,6 +3,7 @@
 !.env.example
 .verification-cache.json
 .stage2-handoffs.json
+.stage2-assets/
 *.json.tmp
 __pycache__/
 playground/output/

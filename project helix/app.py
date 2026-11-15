@@ -99,6 +99,33 @@ def write_json_store(path, data):
 VERIFY_CACHE = read_json_store(VERIFY_CACHE_PATH)
 INVESTIGATION_HANDOFFS = read_json_store(INVESTIGATION_PATH)
 
+def _run_stage2_job(handoff_id, source_handoff, discovery_id, stable_id):
+    def progress(stage, message, **details):
+        event={"stage":stage,"message":message,"at":datetime.now(timezone.utc).isoformat(),**details}
+        with DISCOVERY_LOCK:
+            item=INVESTIGATION_HANDOFFS.get(handoff_id)
+            if not item: return
+            item.setdefault("progress",[]).append(event)
+            item["current_stage"]=stage
+    try:
+        result=run_stage2_investigation(source_handoff,costar_service=costar,progress=progress)
+        with DISCOVERY_LOCK:
+            item=INVESTIGATION_HANDOFFS.get(handoff_id,{})
+            item.update({"discovery_id":discovery_id,"selected_stable_id":stable_id,
+                "status":"stage2_complete" if result["status"]=="complete" else "stage2_partial",
+                "dossier":result["dossier"],"message":"Property investigation finished with source coverage and analysis states."})
+            item["current_stage"]="complete" if result["status"]=="complete" else "partial"
+            INVESTIGATION_HANDOFFS[handoff_id]=item
+            write_json_store(INVESTIGATION_PATH,INVESTIGATION_HANDOFFS)
+    except Exception as error:
+        with DISCOVERY_LOCK:
+            item=INVESTIGATION_HANDOFFS.get(handoff_id,{})
+            item.update({"status":"stage2_failed","current_stage":"failed","error":type(error).__name__,
+                "message":"The investigation could not finish. Any completed source results remain available."})
+            INVESTIGATION_HANDOFFS[handoff_id]=item
+            try: write_json_store(INVESTIGATION_PATH,INVESTIGATION_HANDOFFS)
+            except OSError: pass
+
 
 def tavily_search(query: str, max_results: int = 5):
     """Perform a live web search using Tavily API."""
@@ -352,11 +379,26 @@ class ChatHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlsplit(self.path).query)
             handoff_id = (query.get("id") or [""])[0]
             handoff = INVESTIGATION_HANDOFFS.get(handoff_id)
-            if handoff and handoff.get("dossier"):
+            if handoff:
                 self.send_json({"handoff": handoff})
             else:
                 self.send_json({"error": "Investigation dossier not found."}, status=404)
             return
+
+        if urlsplit(self.path).path.startswith("/stage2-assets/"):
+            import re
+            asset_id=urlsplit(self.path).path.rsplit("/",1)[-1]
+            if not re.fullmatch(r"[a-f0-9]{64}\.(?:jpg|png)",asset_id):
+                self.send_error(404,"Image not found"); return
+            try: image=(BASE_DIR/".stage2-assets"/asset_id).read_bytes()
+            except OSError:
+                self.send_error(404,"Image not found"); return
+            self.send_response(200)
+            self.send_header("Content-Type","image/png" if asset_id.endswith(".png") else "image/jpeg")
+            self.send_header("Content-Length",str(len(image)))
+            self.send_header("Cache-Control","private, max-age=86400")
+            self.send_header("X-Content-Type-Options","nosniff")
+            self.end_headers(); self.wfile.write(image); return
 
         if self.path == "/api/config":
             self.send_json({
@@ -539,11 +581,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             "property_facts": property_facts if property_facts_available else {},
             "property_facts_status": "available" if property_facts_available else "unavailable",
         }
-        result = run_stage2_investigation(source_handoff, costar_service=costar)
-        handoff = {**source_handoff, "discovery_id": discovery_id, "selected_stable_id": stable_id,
-                   "status": "stage2_complete" if result["status"] == "complete" else "stage2_partial",
-                   "dossier": result["dossier"],
-                   "message": "Building investigation completed with source-backed facts and explicit unknowns."}
+        handoff = {**source_handoff,"discovery_id":discovery_id,"selected_stable_id":stable_id,
+                   "status":"stage2_running","current_stage":"queued",
+                   "progress":[{"stage":"queued","message":"Investigation queued","at":datetime.now(timezone.utc).isoformat()}],
+                   "dossier":None}
         INVESTIGATION_HANDOFFS[handoff_id] = handoff
         try:
             write_json_store(INVESTIGATION_PATH, INVESTIGATION_HANDOFFS)
@@ -551,7 +592,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             INVESTIGATION_HANDOFFS.pop(handoff_id, None)
             self.send_json({"error": f"Selection was not persisted: {type(exc).__name__}."}, status=500)
             return
-        self.send_json({"handoff": handoff})
+        threading.Thread(target=_run_stage2_job,args=(handoff_id,source_handoff,discovery_id,stable_id),
+                         daemon=True,name=f"stage2-{handoff_id[:8]}").start()
+        self.send_json({"handoff": handoff},status=202)
 
     def execute_tool(self, name: str, args: dict):
         """Dispatch tool calls to CoStar or Tavily."""

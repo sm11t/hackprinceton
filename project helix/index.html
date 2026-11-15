@@ -41,17 +41,25 @@
         <div id="fitout-question" class="fitout-question" hidden><strong>Do you have a separate fit-out budget?</strong><label><input type="radio" name="separate-fitout" value="yes"> Yes</label><label><input type="radio" name="separate-fitout" value="no"> No</label><label id="fitout-amount-wrap" hidden>Separate amount (USD)<input id="fitout-amount" class="control" inputmode="decimal" placeholder="Optional amount"></label></div>
       </div>
       <div class="result-meta" id="result-meta" role="status"></div><div id="results" class="cards"></div>
-      <section class="investigation" id="stage2" hidden aria-live="polite">
-        <div class="investigation-head"><div><div class="eyebrow">Stage 2 · Building investigation</div><h2 id="investigation-title">Property intelligence</h2><p id="investigation-summary" class="intro"></p></div><span class="investigation-state" id="investigation-state"></span></div>
-        <div id="investigation-overview" class="investigation-grid"></div>
-        <section class="investigation-section"><h3>Source availability</h3><div id="investigation-sources" class="source-grid"></div></section>
-        <section class="investigation-section"><h3>Physical intelligence</h3><div id="investigation-physical"></div></section>
-        <section class="investigation-section"><h3>Contradiction review</h3><div id="investigation-contradictions"></div></section>
-        <section class="investigation-section"><h3>Property compliance preflight</h3><div id="investigation-compliance"></div></section>
-        <section class="investigation-section"><h3>Unknowns and verification tasks</h3><div id="investigation-unknowns"></div></section>
-        <details class="handoff-details"><summary>Stage 3 handoff data</summary><pre id="investigation-handoff"></pre></details>
-      </section>
       <p class="status" id="discovery-error" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="content wide investigation-page" id="stage2" hidden aria-live="polite">
+      <button class="secondary investigation-back" id="investigation-back" type="button">← Back to properties</button>
+      <header class="investigation-head"><div><div class="eyebrow">Stage 2 · Building investigation</div><h2 id="investigation-title">Property intelligence</h2><p id="investigation-summary" class="intro"></p></div><span class="investigation-state" id="investigation-state">Preparing investigation</span></header>
+      <section class="investigation-progress" id="investigation-progress-wrap"><h3>Investigation activity</h3><ol id="investigation-progress"></ol></section>
+      <section class="investigation-section"><h3>Property overview</h3><div id="investigation-overview" class="investigation-grid"></div></section>
+      <section class="investigation-section investigation-explore" id="investigation-explore">
+        <div><div class="eyebrow">Explore the property</div><h3>Inside and around the building</h3></div>
+        <div id="matterport-viewer-wrap" class="matterport-viewer-wrap" hidden><div class="viewer-title"><strong>Interactive Matterport tour</strong><a id="matterport-open" target="_blank" rel="noopener noreferrer">Open full tour ↗</a></div><iframe id="matterport-frame" title="Interactive Matterport property tour" allow="fullscreen; xr-spatial-tracking; gyroscope; accelerometer" allowfullscreen loading="lazy"></iframe></div>
+        <p id="matterport-unavailable" class="investigation-empty" hidden></p>
+        <div id="vexcel-gallery" class="vexcel-gallery"></div>
+      </section>
+      <section class="investigation-section"><h3>What we found</h3><div id="investigation-physical"></div></section>
+      <section class="investigation-section"><h3>Evidence disagreements</h3><div id="investigation-contradictions"></div></section>
+      <section class="investigation-section"><h3>Property compliance preflight</h3><div id="investigation-compliance"></div></section>
+      <section class="investigation-section" id="investigation-next-section"><h3>Open property questions</h3><div id="investigation-unknowns"></div></section>
+      <details class="handoff-details"><summary>Technical evidence and Stage 3 handoff</summary><p class="hint">Source records and machine-readable data are provided for review. Provider data may be incomplete or dated.</p><pre id="investigation-handoff"></pre></details>
     </section>
   </main>
 </div>

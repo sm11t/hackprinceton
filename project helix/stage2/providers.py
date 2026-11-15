@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
 import os
 import re
 import time
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.parse import urlparse
@@ -139,7 +142,7 @@ def _canonical_address(value):
 class MatterportAdapter:
     QUERY = """query($id: ID!) { model(id: $id) { id name state visibility created modified description address { streetAddressLines locality administrativeArea postalCode countryCode } floors { id label dimensions(units: imperial) { areaFloor height units } rooms { id label dimensions(units: imperial) { areaFloor height units } } } rooms { id label dimensions(units: imperial) { areaFloor height units } } locations { id label position { x y z } floor { id label } room { id } panos { id skybox(resolution: \"high\") { id status format children } } } } }"""
 
-    def __init__(self, opener=urlopen): self.opener = opener
+    def __init__(self, opener=urlopen, *, progress=None): self.opener = opener; self.progress=progress or (lambda *a, **k: None)
 
     def _query(self, model_id, key, secret):
         auth = base64.b64encode(f"{key}:{secret}".encode()).decode()
@@ -148,6 +151,16 @@ class MatterportAdapter:
         with self.opener(request,timeout=25) as response:
             return response.status, json.loads(response.read())
 
+    def _download_face(self, frame):
+        parsed_url=urlparse(frame or "")
+        host=parsed_url.hostname or ""
+        if parsed_url.scheme!="https" or not (host=="matterport.com" or host.endswith(".matterport.com")):
+            raise ValueError("unsupported_source_host")
+        with self.opener(Request(frame,headers={"User-Agent":"Helix Stage 2 evidence viewer"}),timeout=30) as response:
+            blob=response.read(8*1024*1024+1); content_type=response.headers.get("Content-Type","").split(";")[0]
+        if len(blob)>8*1024*1024: raise ValueError("image_too_large")
+        return blob,content_type
+
     def collect(self, handoff):
         ids=(handoff.get("property_facts") or {}).get("matterport_model_ids") or []
         if not ids:
@@ -155,8 +168,8 @@ class MatterportAdapter:
         key,secret=os.environ.get("MATTERPORT_API_KEY"),os.environ.get("MATTERPORT_API_TOKEN")
         if not key or not secret:
             return {"status":"unknown","reason":"Matterport API credentials are not configured.","models":[],"claims":[]}
-        models=[]; claims=[]; statuses=[]; visual={"status":"not_run","reason":"Visual analysis is disabled.","observations":[]}
-        for model_id in list(dict.fromkeys(str(v) for v in ids))[:3]:
+        models=[]; claims=[]; statuses=[]; all_observations=[]; visual_runs=[]
+        for model_id in list(dict.fromkeys(str(v) for v in ids)):
             try:
                 code,payload=self._query(model_id,key,secret)
             except HTTPError as error:
@@ -185,68 +198,83 @@ class MatterportAdapter:
             identity="matched" if street_match and city_match and state_match else "quarantined"
             floors=model.get("floors") or []; rooms=model.get("rooms") or []; locations=model.get("locations") or []
             panoramas=[p for loc in locations for p in (loc.get("panos") or [])]
-            # Keep a small, useful room sample in the browser dossier; counts preserve
-            # the inventory without shipping every panorama reference.
-            images=[]; seen_rooms=set()
+            images=[]; panorama_jobs=[]
             for loc in locations:
                 room_id=(loc.get("room") or {}).get("id")
-                if room_id in seen_rooms or len(images)>=4: continue
                 for pano in loc.get("panos") or []:
                     if (pano.get("skybox") or {}).get("status") != "available": continue
-                    images.append({"model_id":model_id,"location_id":loc.get("id"),"panorama_id":pano.get("id"),
+                    children=(pano.get("skybox") or {}).get("children") or []
+                    ref={"model_id":model_id,"location_id":loc.get("id"),"panorama_id":pano.get("id"),
                         "floor_id":(loc.get("floor") or {}).get("id"),"room_id":room_id,
                         "skybox_status":"available","capture_date":None,"retrieved_at":utcnow(),
-                        "coordinate_system":"Matterport-local; API response does not declare geographic CRS"})
-                    seen_rooms.add(room_id); break
+                        "coordinate_system":"Matterport-local; API response does not declare geographic CRS"}
+                    images.append(ref)
+                    if len(children)==6:
+                        panorama_jobs.append((loc,pano,children,ref))
             safe_model={"model_id":model_id,"name":model.get("name"),"visibility":model.get("visibility"),"state":model.get("state"),
                 "created":model.get("created"),"modified":model.get("modified"),"timestamps_interpretation":"API model timestamps are not camera capture dates",
                 "identity_status":identity,"identity_note":"Exact normalized street-address label match required; nearby coordinates are not used to match.",
                 "floor_count":len(floors),"room_count":len(rooms),"panorama_count":len(panoramas),
                 "available_panorama_count":sum((p.get("skybox") or {}).get("status")=="available" for p in panoramas),
                 "rooms":[{"room_id":r.get("id"),"label":r.get("label"),"area":(r.get("dimensions") or {}).get("areaFloor"),
-                           "height":(r.get("dimensions") or {}).get("height"),"unit":(r.get("dimensions") or {}).get("units"),"scope":"room"} for r in rooms],
+                           "height":(r.get("dimensions") or {}).get("height"),"unit":"sqft" if (r.get("dimensions") or {}).get("units")=="imperial" else None,"scope":"room"} for r in rooms],
                 "images":images}
+            sdk_key=os.environ.get("MATTERPORT_SDK_KEY")
+            if identity=="matched" and model.get("visibility")=="public":
+                safe_model["showcase_url"]="https://my.matterport.com/show/?"+urlencode({"m":model_id,"play":"1",**({"applicationKey":sdk_key} if sdk_key else {})})
+                safe_model["embed_status"]="configured"
+            else:
+                safe_model["showcase_url"]=None
+                safe_model["embed_status"]="identity_mismatch" if identity!="matched" else "requires_authorization"
             models.append(safe_model); statuses.append("available")
-            if identity=="matched" and not visual.get("observations") and os.environ.get("HELIX_STAGE2_VISION_ENABLED")=="1":
-                # One frame from one explicit CoStar-linked, public Matterport model; never crawl a tour.
-                candidate=next(((loc,p,p.get("skybox") or {}) for loc in locations for p in (loc.get("panos") or [])
-                                if (p.get("skybox") or {}).get("status")=="available"
-                                and (p.get("skybox") or {}).get("children")),None)
-                if candidate:
-                    loc,pano,skybox=candidate; frame=(skybox.get("children") or [None])[0]
+            if identity=="matched":
+                self.progress("matterport_analysis","Analyzing all available Matterport panorama locations",source="Matterport",total=len(panorama_jobs))
+                from .vision import MODEL, analyze_matterport_panorama
+                def analyze_job(job):
+                    loc,pano,children,ref=job
                     try:
-                        parsed_url=urlparse(frame or "")
-                        if parsed_url.scheme!="https" or not (parsed_url.hostname or "").endswith("matterport.com"):
-                            raise ValueError("unsupported_source_host")
-                        with self.opener(Request(frame,headers={"User-Agent":"Helix Stage 2 evidence viewer"}),timeout=30) as image_response:
-                            blob=image_response.read(8*1024*1024+1); content_type=image_response.headers.get("Content-Type","").split(";")[0]
-                        from .vision import analyze_one_image
-                        dimensions=None
-                        try:
-                            from PIL import Image
-                            from io import BytesIO
-                            with Image.open(BytesIO(blob)) as image:
-                                dimensions={"width":image.width,"height":image.height}
-                        except Exception:
-                            pass
-                        visual=analyze_one_image(blob,content_type,{"image_id":f"{model_id}:{loc.get('id')}:{pano.get('id')}:face0",
-                            "model_id":model_id,"location_id":loc.get("id"),"evidence_ref":f"Matterport model {model_id} panorama {pano.get('id')} face 0",
-                            "captured_at":None,"retrieved_at":utcnow()},opener=self.opener)
-                        visual["image_metadata"]={"content_type":content_type,"dimensions":dimensions,"bytes":len(blob),
-                            "permissions_context":model.get("visibility"),"source":"authorized CoStar-linked Matterport model"}
+                        faces=[self._download_face(uri) for uri in children]
+                        image_ref={"image_id":f"{model_id}:{loc.get('id')}:{pano.get('id')}","model_id":model_id,
+                          "location_id":loc.get("id"),"panorama_id":pano.get("id"),"room_id":ref.get("room_id"),
+                          "floor_id":ref.get("floor_id"),"evidence_ref":f"Matterport {model_id}, room {ref.get('room_id') or 'unlabeled'}, panorama {pano.get('id')}",
+                          "captured_at":None,"retrieved_at":utcnow()}
+                        result=analyze_matterport_panorama(faces,image_ref,opener=self.opener)
+                        return {"location_id":loc.get("id"),"panorama_id":pano.get("id"),"room_id":ref.get("room_id"),**result}
                     except Exception as error:
-                        visual={"status":"temporarily_unavailable","error":type(error).__name__,"observations":[]}
+                        return {"location_id":loc.get("id"),"panorama_id":pano.get("id"),"room_id":ref.get("room_id"),
+                          "status":"temporarily_unavailable","error":type(error).__name__,"observations":[]}
+                results=[]
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures=[executor.submit(analyze_job,job) for job in panorama_jobs]
+                    for future in as_completed(futures):
+                        result=future.result(); results.append(result); all_observations.extend(result.get("observations") or [])
+                        self.progress("matterport_analysis","Analyzed a Matterport panorama",source="Matterport",completed=len(results),total=len(panorama_jobs))
+                visual_runs.extend(results)
             if identity=="matched":
                 claims += [evidence_claim(claim_id=f"matterport:{model_id}:room:{r['room_id']}:area",fact="room_area",value=r["area"],unit=r["unit"],source="matterport",source_record_id=f"{model_id}:{r['room_id']}",scope_type="room",scope_id=r["room_id"],semantics="Matterport dimension estimate",observed_at=None,retrieved_at=utcnow(),evidence_ref=f"Matterport model {model_id} room {r['room_id']}",quality="model_reported",identity_key=f"costar-property:{handoff['selected_listing']['property_id']}") for r in safe_model["rooms"]]
         state= "available" if any(s=="available" for s in statuses) else (statuses[0] if statuses else "unknown")
         if len(models)>1 and sum(m["identity_status"]=="matched" for m in models)!=1:
             state="unknown"
+        matched=[m for m in models if m.get("identity_status")=="matched"]
+        analyzed=sum(r.get("status")=="available" for r in visual_runs)
+        failed=sum(r.get("status")!="available" for r in visual_runs)
+        # Available panoramas without six retrievable cube faces are explicitly incomplete.
+        eligible=sum(m.get("available_panorama_count",0) for m in matched)
+        uncovered=max(0,eligible-len(visual_runs))
+        failed+=uncovered
+        visual_status=("complete" if visual_runs and not failed else "partially_complete" if analyzed else "unavailable" if matched else "not_applicable")
+        visual={"status":visual_status,"model":MODEL if visual_runs else None,"panoramas_total":len(visual_runs),
+          "panoramas_analyzed":analyzed,"panoramas_failed":failed,"observations":all_observations,"panorama_results":visual_runs,
+          "reason":None if visual_runs and not failed else "Some authorized Matterport images could not be analyzed." if analyzed else "No eligible authorized panorama images were analyzed."}
         return {"status":state,"retrieved_at":utcnow(),"models":models,"claims":claims,"visual_analysis":visual,
                 "reason":None if any(m["identity_status"]=="matched" for m in models) else "No exact-address model match; model measurements are quarantined."}
 
 
 class VexcelAdapter:
-    def __init__(self, opener=urlopen): self.opener=opener
+    def __init__(self, opener=urlopen, *, asset_dir=None, progress=None):
+        self.opener=opener
+        self.asset_dir=Path(asset_dir) if asset_dir else Path(__file__).resolve().parents[1]/".stage2-assets"
+        self.progress=progress or (lambda *a, **k: None)
 
     def _get(self,key,path,params):
         req=Request(VEXCEL_BASE+path+"?"+urlencode(params),headers={"X-API-KEY":key,"Accept":"application/json"})
@@ -263,6 +291,44 @@ class VexcelAdapter:
                     continue
                 raise
         raise last
+
+    def _post_image(self,key,path,body):
+        req=Request(VEXCEL_BASE+path,data=json.dumps(body).encode(),headers={"X-API-KEY":key,"Accept":"image/jpeg,image/png","Content-Type":"application/json"},method="POST")
+        with self.opener(req,timeout=120) as response:
+            blob=response.read(30*1024*1024+1); content_type=response.headers.get("Content-Type","").split(";")[0].lower()
+            if len(blob)>30*1024*1024: raise ValueError("Vexcel image exceeded 30 MB transfer limit.")
+            if not content_type.startswith("image/"):
+                raise ValueError("Vexcel extract returned non-image content.")
+            return response.status,content_type,blob
+
+    @staticmethod
+    def _geometry_wkt(geometry):
+        if isinstance(geometry,str): return geometry if geometry.strip().upper().endswith(")") else None
+        if not isinstance(geometry,dict): return None
+        kind=geometry.get("type"); coords=geometry.get("coordinates")
+        def ring(points): return "("+",".join(f"{float(p[0]):.8f} {float(p[1]):.8f}" for p in points)+")"
+        def polygon(rings): return "("+",".join(ring(r) for r in rings)+")"
+        try:
+            if kind=="Polygon": return "POLYGON"+polygon(coords)
+            if kind=="MultiPolygon": return "MULTIPOLYGON("+",".join(polygon(poly) for poly in coords)+")"
+        except (TypeError,ValueError,IndexError): return None
+        return None
+
+    def _store_image(self,property_id,view,collection,capture,mime,blob):
+        digest=hashlib.sha256(f"{property_id}|{view}|{collection}|{capture}".encode()).hexdigest()
+        ext="png" if mime=="image/png" else "jpg"
+        self.asset_dir.mkdir(parents=True,exist_ok=True)
+        path=self.asset_dir/f"{digest}.{ext}"
+        if not path.exists(): path.write_bytes(blob)
+        width=height=None
+        try:
+            from PIL import Image
+            from io import BytesIO
+            with Image.open(BytesIO(blob)) as image: width,height=image.size
+        except Exception: pass
+        return {"asset_id":f"{digest}.{ext}","image_url":f"/stage2-assets/{digest}.{ext}","view":view,
+            "collection":collection,"capture_date":capture,"content_type":mime,"width":width,"height":height,
+            "bytes":len(blob),"retrieved_at":utcnow()}
 
     @staticmethod
     def _rings(wkt):
@@ -322,7 +388,7 @@ class VexcelAdapter:
             return {"status":"unknown","reason":"VEXCEL_API_KEY is not configured.","collections":[],"claims":[]}
         if lat is None or lon is None:
             return {"status":"unknown","reason":"Selected CoStar property coordinates are unavailable.","collections":[],"claims":[]}
-        point=f"POINT({lon} {lat})"; common={"wkt":point,"srid":"4326"}; results={}; statuses=[]
+        point=f"POINT({lon} {lat})"; common={"wkt":point,"srid":"4326"}; results={}; statuses=[]; property_features=[]
         for name,path,params in (
             ("property_extract","property/extract",{**common,"layer":"urban,urban-r,wide-area,urban-g","latest":"true","include":"precomputed","unit-system":"imperial"}),
             ("oriented_coverage","oriented/collections",{**common,"layer":"urban","product-type":"oblique","include":"product-type,collection,last-capture-date"}),
@@ -342,6 +408,7 @@ class VexcelAdapter:
             if name != "ortho_dates":
                 results[name]["feature_count"]=len(fs)
             if name=="property_extract":
+                property_features=fs
                 safe=[]
                 for index,f in enumerate(fs[:20]):
                     props=f.get("properties") or {}
@@ -356,6 +423,74 @@ class VexcelAdapter:
                 results[name]["images"]=[{k:(f.get("properties") or {}).get(k) for k in ("image-name","capture-date","collection","product-type","first-publish-date","last-publish-date") if (f.get("properties") or {}).get(k) is not None} for f in fs[:100]]
             elif name=="ortho_dates":
                 results[name]["dates"]=body if isinstance(body,dict) else None
+        # The hackathon key is documented for these selected-property extracts.
+        # Use the returned parcel geometry and correct WGS84/lon-lat WKT ordering.
+        parcel_wkt=self._geometry_wkt((property_features[0].get("geometry") if property_features else None))
+        views=[]; image_status="not_covered"; image_errors=[]
+        if parcel_wkt:
+            self.progress("vexcel_images","Retrieving the selected property's aerial and available oblique views",source="Vexcel")
+            ortho_rows=results.get("ortho_coverage",{}).get("collections",[])
+            ortho_row=max(ortho_rows,key=lambda x:x.get("last-capture-date") or "") if ortho_rows else {}
+            extract_specs=[]
+            if ortho_row:
+                extract_specs.append(("aerial","ortho/extract",{"wkt":parcel_wkt,"srid":4326,
+                    "layer":"urban,urban-r,wide-area,urban-g","buffer-meter":10,"crop":"bounding_box","image-format":"jpeg"},
+                    ortho_row.get("collection"),ortho_row.get("last-capture-date")))
+            direction_rows=results.get("oriented_coverage",{}).get("collections",[])
+            latest_by_direction={}
+            for row in direction_rows:
+                direction=row.get("product-type"); stamp=row.get("last-capture-date") or ""
+                if direction and (direction not in latest_by_direction or stamp>(latest_by_direction[direction].get("last-capture-date") or "")):
+                    latest_by_direction[direction]=row
+            for direction,row in sorted(latest_by_direction.items()):
+                if direction not in ("oblique-north","oblique-south","oblique-east","oblique-west"): continue
+                extract_specs.append((direction,"oriented/extract",{"wkt":parcel_wkt,"srid":4326,"layer":"urban",
+                    "product-type":direction,"rotation":"natural","buffer-meter":10,"crop":"bbox","image-format":"jpeg/png"},
+                    row.get("collection"),row.get("last-capture-date")))
+            for view,path,body,collection,capture in extract_specs:
+                try:
+                    code,mime,blob=self._post_image(key,path,body)
+                    image=self._store_image(handoff["selected_listing"]["property_id"],view,collection,capture,mime,blob)
+                    image.update({"http_status":code,"source":"Vexcel","source_record_id":f"vexcel:{collection}:{view}",
+                        "coordinate_system":"WGS84 / EPSG:4326; request WKT coordinates are longitude latitude"})
+                    views.append(image)
+                    self.progress("vexcel_images",f"Retrieved Vexcel {view.replace('-', ' ')} imagery",source="Vexcel",completed=len(views),total=len(extract_specs))
+                except HTTPError as error:
+                    image_errors.append({"view":view,"status":_status(error.code),"http_status":error.code})
+                    try: error.close()
+                    except Exception: pass
+                except (URLError,TimeoutError,OSError,ValueError) as error:
+                    image_errors.append({"view":view,"status":"temporarily_unavailable","error":type(error).__name__})
+            if views:
+                from .vision import EXTERIOR_PROMPT, analyze_one_image
+                def analyze_view(view):
+                    try:
+                        blob=(self.asset_dir/view["asset_id"]).read_bytes()
+                        ref={"image_id":view["source_record_id"],"evidence_ref":view["source_record_id"],"source":"vexcel",
+                          "view":view["view"],"capture_date":view.get("capture_date"),"retrieved_at":view.get("retrieved_at"),
+                          "image_metadata":{"width":view.get("width"),"height":view.get("height"),"content_type":view["content_type"]}}
+                        return analyze_one_image(blob,view["content_type"],ref,opener=self.opener,prompt=EXTERIOR_PROMPT)
+                    except Exception as error: return {"status":"temporarily_unavailable","error":type(error).__name__,"observations":[]}
+                results_analysis=[]
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures=[executor.submit(analyze_view,v) for v in views]
+                    for future in as_completed(futures):
+                        result=future.result(); results_analysis.append(result)
+                        self.progress("vexcel_analysis","Analyzed an available Vexcel exterior view",source="Vexcel",completed=len(results_analysis),total=len(views))
+                for result in results_analysis:
+                    for observation in result.get("observations",[]):
+                        observation["provider"]="Vexcel"; observation["scope_type"]="parcel_image"
+                exterior_observations=[o for result in results_analysis for o in result.get("observations",[])]
+                image_status="complete" if len(views)>0 and len(results_analysis)==len(views) and all(r.get("status")=="available" for r in results_analysis) else "partially_complete"
+                results["imagery_visual_analysis"]={"status":image_status,"model":"qwen/qwen3.8-flash",
+                    "views_analyzed":len(results_analysis),"observations":exterior_observations}
+            else:
+                image_status="unauthorized" if any(e.get("status")=="unauthorized" for e in image_errors) else "unavailable" if image_errors else "not_covered"
+        else:
+            image_errors.append({"status":"unknown","reason":"Vexcel did not return usable parcel geometry for image clipping."})
+        results["imagery"]={"status":image_status,"views":views,"errors":image_errors,
+            "extraction_method":"documented Vexcel ortho/extract and oriented/extract endpoints",
+            "parcel_geometry_source":"Vexcel property/extract parcel feature" if parcel_wkt else None}
         useful=sum(results[n]["feature_count"] for n in ("property_extract","oriented_coverage","oriented_metadata","ortho_coverage"))
         state="available" if useful else ("unauthorized" if "unauthorized" in statuses else "not_covered" if statuses and all(s=="not_covered" for s in statuses) else "temporarily_unavailable" if "temporarily_unavailable" in statuses else "unknown")
         claims=[]
@@ -386,4 +521,4 @@ class VexcelAdapter:
             item["structures"]=[]  # never return full footprint geometry/property response to the browser
         results["property_extract"]["structures_at_pin"]=selected_structures
         return {"status":state,"retrieved_at":utcnow(),"coordinates_wgs84":{"latitude":lat,"longitude":lon},"operations":results,"claims":claims,
-                "image_extraction":"disabled: selected-property discovery uses metadata only until extraction terms/scope are confirmed"}
+                "image_extraction":image_status}
