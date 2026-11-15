@@ -12,8 +12,9 @@ single-property review uses, then returns a short, explained list:
                same editable allowances as /maximo; not quotes
   evidence     reconcile address and size conflicts are surfaced and ranked down, never hidden
 
-Ranking (no synthetic score): physical-fit verdict, then within budget, then no evidence
-conflict, then asking rent known, then lowest planning cash to open. One space per building.
+Ranking (no synthetic score): physical-fit verdict, then budget (within / unknown because no rent
+is listed / over), then no evidence flag, then lowest planning cash to open. One space per building.
+The build-out allowance is scaled by size (the review's lump sum is sized for 10,000 sq ft).
 
 Usage:
   python3 playground/market_rank.py --kit ~/Downloads/costar-hackathon-kit.zip --use "indoor pickleball" --capital 500000
@@ -26,9 +27,10 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
-from advisor_money import advisor_cash
+from advisor_money import advisor_cash, plan_inputs
 from alternatives import CATALOG
 from deal import SERVICE, monthly_rent
+from money_runway import DEFAULTS
 from eligibility import DWELLING_CAPTION, DWELLING_TYPES, PROPERTY_TYPES
 from reconcile import MARKETS, check_identity, check_size, costar_address, kit_password, unique_scans
 from space_fit import space_fit
@@ -41,6 +43,10 @@ TOP = 5
 # floor below which a space is an office cubicle rather than a business premises.
 MIN_SF = {"indoor pickleball": 3 * 1800, "fitness studio": 1500}
 DEFAULT_MIN_SF = 1000
+# The review's default build-out allowance is a lump sum sized for the Tanner pilot's 10,000 sq ft suite
+# ($200k, i.e. $20/sq ft; warehouse $25k). Ranking compares spaces of very different sizes, so the same
+# allowance is scaled per sq ft; a lump sum would make a 48,600 sq ft space look as cheap as a 6,000 one.
+REFERENCE_SF = 10000
 
 
 def load_market(kit_path, market, password=None):
@@ -145,32 +151,46 @@ def screen_space(prop, space, use, min_sf=None, max_sf=None):
         "monthly_rent": monthly, "rent_per_sf_year": per_sf_year, "lease_basis": basis,
         "rent_source": "CoStar asking rent" if monthly else "not listed; default assumption used",
         "verdict": verdict, "fit_reason": deciding_reason(fit), "evidence_flags": flags,
+        "build_cost": build_allowance(use, space["square_feet"]),
         "tour_count": len(unique_scans(prop)),
     }
 
 
+def build_allowance(use, square_feet):
+    """The review's default build-out allowance for this use, scaled from 10,000 sq ft to this space."""
+    lump = plan_inputs({}, use).get("build_cost", DEFAULTS["build_cost"])
+    return round(lump * square_feet / REFERENCE_SF, -2)
+
+
 def space_key(row):
-    """Best space within one building. Planning cash to open rises with rent, so lowest rent = lowest cash."""
-    return (VERDICT_ORDER[row["verdict"]], bool(row["evidence_flags"]), row["monthly_rent"] is None,
-            row["monthly_rent"] or 0)
+    """Best space within one building. Approximates planning cash to open (build-out + contingency, deposit
+    and pre-opening rent) so the full cash model only runs once per building."""
+    upfront = 1.15 * row["build_cost"] + 5 * (row["monthly_rent"] or 0)
+    return (VERDICT_ORDER[row["verdict"]], bool(row["evidence_flags"]), row["monthly_rent"] is None, upfront)
+
+
+BUDGET_ORDER = {True: 0, None: 1, False: 2}  # within budget, unknown (no asking rent), over budget
 
 
 def add_cash(row, use, capital, reserve):
-    inputs = {"starting_cash": capital, "reserve": reserve}
+    inputs = {"starting_cash": capital, "reserve": reserve, "build_cost": row["build_cost"]}
     if row["monthly_rent"] is not None:
         inputs["monthly_rent"] = row["monthly_rent"]
     cash = advisor_cash(inputs, use, "lease", area=row["square_feet"],
                         rent_source="CoStar asking rent" if row["monthly_rent"] else "Editable assumption")
     totals = cash["costs"]["totals"]["base"]
     gap = ((cash.get("money") or {}).get("conversion") or {}).get("extra_funding_needed") or 0
+    fits = not totals["shortfall"] and not gap
+    # Without a listed rent the cash figure rests on the default rent, so budget fit is not established.
     row.update(cash_to_open=totals["cash_required"], shortfall=totals["shortfall"] or 0, reserve_gap=gap,
-               within_budget=not totals["shortfall"] and not gap)
+               within_budget=fits if row["monthly_rent"] is not None else None,
+               assumed_rent=None if row["monthly_rent"] is not None else DEFAULTS["monthly_rent"])
     return row
 
 
 def rank_key(row):
-    return (VERDICT_ORDER[row["verdict"]], not row["within_budget"], bool(row["evidence_flags"]),
-            row["monthly_rent"] is None, row["cash_to_open"] if row["cash_to_open"] is not None else float("inf"))
+    return (VERDICT_ORDER[row["verdict"]], BUDGET_ORDER[row["within_budget"]], bool(row["evidence_flags"]),
+            row["cash_to_open"] if row["cash_to_open"] is not None else float("inf"))
 
 
 def why(row):
@@ -179,9 +199,13 @@ def why(row):
         parts.append(f"${row['monthly_rent']:,}/mo asking ({row['lease_basis']})")
     else:
         parts.append("no asking rent listed")
+    parts.append(f"${row['build_cost']:,.0f} build-out allowance")
     parts.append(f"~${row['cash_to_open']:,.0f} to open incl. reserve" if row["cash_to_open"] is not None
                  else "cash to open incomplete")
-    parts.append("within budget" if row["within_budget"] else "over budget under planning allowances")
+    if row["within_budget"] is None:
+        parts.append(f"budget fit unknown until the broker quotes a rent (cash assumes ${row['assumed_rent']:,.0f}/mo)")
+    else:
+        parts.append("within budget" if row["within_budget"] else "over budget under planning allowances")
     return ", ".join(parts) + "."
 
 
@@ -211,13 +235,15 @@ def rank_market(candidates, use, capital, reserve, top=TOP, min_sf=None, max_sf=
     return {
         "use": use, "capital": capital, "reserve": reserve, "ownership": "lease", "min_sf": min_sf, "max_sf": max_sf,
         "spaces_screened": screened, "buildings_screened": len(candidates), "buildings_passing": len(rows),
-        "by_verdict": counts, "within_budget": sum(r["within_budget"] for r in rows),
+        "by_verdict": counts, "within_budget": sum(r["within_budget"] is True for r in rows),
+        "budget_unknown": sum(r["within_budget"] is None for r in rows),
         "results": rows[:top],
-        "ranking_basis": ("Physical-fit verdict from CoStar facts first, then within budget, then no evidence "
-                          "conflict, then a listed asking rent, then the lowest planning cash to open. One space per "
-                          "building. No numeric score."),
+        "ranking_basis": ("Physical-fit verdict from CoStar facts first, then budget (within, then unknown because "
+                          "no rent is listed, then over), then no evidence flag, then the lowest planning cash to open. "
+                          "One space per building. No numeric score."),
         "limits": ("CoStar data only: no per-building aerial or scan measurements, so most spaces are 'investigate'. "
-                   "Cash to open uses the same unverified planning allowances as the full review, not quotes. "
+                   "Cash to open uses the review's unverified planning allowances, with the build-out scaled by size "
+                   f"(${build_allowance(use, REFERENCE_SF) / REFERENCE_SF:g}/sq ft); not quotes. "
                    "Lease only. Demand and permission are not screened. Open a result for the full review."),
     }
 
