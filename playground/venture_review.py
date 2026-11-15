@@ -348,7 +348,30 @@ def cash_months(cost, rent, budget, reserve, months=12, delay=3, extra_bills=Non
                        "first_month_below_reserve": run["first_month_below_reserve"],
                        "first_month_below_zero": next((r["month"] for r in run["rows"] if r["cash"] < 0), None),
                        "opens": run["opening_month"], "opens_if_delayed": late["opening_month"]}
+    # Finance option (Jayant's nessie_loan): if cash alone can't cover opening + reserve, borrow the gap and rerun.
+    loan = None
+    try:
+        import nessie_loan
+        need = cost["cash_to_open"]["base"]
+        option = nessie_loan.plan(need, budget, reserve)
+        if option["needed"]:
+            funded = nessie_loan.with_loan(buyer, option)
+            runs = {}
+            for case in ("low", "base", "high"):
+                upfront = cost["cash_to_open"][case] - (building[case] if building else 0)
+                scenario = {"name": case, "upfront_cost": upfront, "permit_months": build_months, "build_months": 0,
+                            "build_cost": 0, "monthly_income": 0}
+                run = simulate(scenario, funded, months, reserve)
+                runs[case] = {"cash": [budget + option["amount"]] + [r["cash"] for r in run["rows"]],
+                              "first_month_below_reserve": run["first_month_below_reserve"],
+                              "first_month_below_zero": next((r["month"] for r in run["rows"] if r["cash"] < 0), None),
+                              "opens": run["opening_month"]}
+            loan = {k: option[k] for k in ("amount", "apr", "term_months", "monthly_payment", "first_year_interest",
+                                           "label")} | {"cases": runs, "engine": "nessie_loan.plan + with_loan (Jayant)"}
+    except ImportError:
+        loan = None
     return {"months": months, "reserve": reserve, "budget": budget, "monthly_rent": monthly, "delay": delay,
+            "loan": loan,
             "other_bills": buyer["recurring_bills"][1:], "cash_source": buyer["source"],
             "cases": cases, "engine": "nessie_pilot.simulate (Jayant's Nessie pilot), zero revenue",
             "note": "Zero revenue: only base rent is charged after the opening costs. No payroll, utilities or "

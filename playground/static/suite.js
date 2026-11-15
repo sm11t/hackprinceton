@@ -340,7 +340,7 @@
     }).join("");
     return `<div class="glass vhead">
         <div class="vhead-main"><input id="vname" class="vname" value="${esc(v.name)}" aria-label="Venture name" maxlength="80">
-          <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>${esc(KIND_LABEL[kindOf()])}</span><span class="saved">${savedText()}</span></div></div>
+          <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>${esc(KIND_LABEL[kindOf()])}</span><span class="saved">${savedText()}</span><a class="link-btn" href="/flow?v=${encodeURIComponent(v.id)}">Open as a story ↗</a></div></div>
         <dl class="facts">
           <div><dt>Budget</dt><dd>${kmoney(i.budget)}${i.nessie && i.nessie.balance === i.budget ? src("Nessie") : ""}</dd></div>
           <div><dt>Reserve</dt><dd>${kmoney(i.reserve)}</dd></div>

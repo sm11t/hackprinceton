@@ -378,3 +378,16 @@ class NessieMoney(unittest.TestCase):
     def setUp(self):
         import tempfile
         self.tmp = tempfile.mkdtemp()
+
+
+class LoanOption(unittest.TestCase):
+    def test_gap_is_borrowed_and_rerun(self):
+        cost = {"cash_to_open": {"low": 450000, "base": 520000, "high": 600000}, "build_months": 3,
+                "lines": [{"label": "Equipment", "low": 1, "base": 1, "high": 1}]}
+        out = vr.cash_months(cost, {"monthly": 8000}, 500000, 50000)
+        self.assertEqual(out["loan"]["amount"], 70000)          # 520k + 50k reserve - 500k
+        self.assertGreater(out["loan"]["monthly_payment"], 0)
+        self.assertEqual(out["loan"]["cases"]["base"]["cash"][0], 570000)
+        self.assertIn("not a credit offer", out["loan"]["label"])
+        rich = vr.cash_months(cost, {"monthly": 8000}, 900000, 50000)
+        self.assertIsNone(rich["loan"])

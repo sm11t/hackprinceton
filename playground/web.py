@@ -434,6 +434,9 @@ def main():
             if route.path == "/maximo":
                 self.send((ROOT / "static/maximo.html").read_bytes(), "text/html; charset=utf-8")
                 return
+            if route.path == "/flow":
+                self.send((ROOT / "static/flow.html").read_bytes(), "text/html; charset=utf-8")
+                return
             if route.path == "/suite":
                 self.send((ROOT / "static/suite.html").read_bytes(), "text/html; charset=utf-8")
                 return
@@ -574,9 +577,12 @@ def main():
                       "/static/maximo.css": "text/css", "/static/market-rank.js": "text/javascript",
                       "/static/neighborhood.js": "text/javascript", "/static/neighborhood.css": "text/css",
                       "/static/suite.css": "text/css", "/static/suite.js": "text/javascript",
-                      "/static/suite3d.js": "text/javascript"}
+                      "/static/suite3d.js": "text/javascript",
+                      "/static/flow.css": "text/css", "/static/flow.js": "text/javascript",
+                      "/static/vendor/gsap.min.js": "text/javascript", "/static/vendor/ScrollTrigger.min.js": "text/javascript",
+                      "/static/vendor/lenis.min.js": "text/javascript", "/static/vendor/three.min.js": "text/javascript"}
             if route.path in assets:
-                self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
+                self.send((ROOT / route.path.lstrip("/")).read_bytes(), assets[route.path])  # whitelisted paths only
                 return
             if route.path == "/api/location/tanner":
                 try:
