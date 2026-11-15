@@ -24,6 +24,9 @@ from maximo import REVIEW_USES, project_cash, review_property, suite_options
 from market_rank import load_market, rank_market
 from deal import load_deal_data, load_rent_estimates, rent_for_simulation, run_deal
 import neighborhood
+import opportunity
+import venture_review
+import ventures
 from space_fit import REQUIREMENTS, USES, run as space_fit_run, run_rank as space_fit_rank
 
 
@@ -117,6 +120,7 @@ def main():
     if args.offline:  # the neighborhood check then reads only its cached public data
         os.environ.setdefault("NEIGHBORHOOD_OFFLINE", "1")
     Thread(target=neighborhood.warm, args=(args.kit,), daemon=True).start()
+    Thread(target=opportunity.warm, args=(args.kit,), daemon=True).start()
     buyer = buyer_from_nessie(args.nessie_account) if args.nessie_account else None
     password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
     location_properties = {}
@@ -364,8 +368,41 @@ def main():
             except (OSError, RuntimeError):
                 self.send(b'{"error":"Property review unavailable. Check local kit and provider settings."}', "application/json", 502)
 
+        def ventures_request(self, method):
+            """GET /api/ventures?user= | POST /api/ventures {user, kind, name} |
+            GET /api/ventures/<id>?user= | POST /api/ventures/<id>?user= {changes}"""
+            route = urlsplit(self.path)
+            params = parse_qs(route.query)
+            parts = route.path.strip("/").split("/")
+            try:
+                body = {}
+                if method == "POST":
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= ventures.MAX_BYTES:
+                        raise ValueError("Invalid request size.")
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError("Expected a JSON object.")
+                user = params.get("user", [body.get("user", "demo")])[0] or "demo"
+                if len(parts) == 2 and method == "GET":
+                    result = ventures.all_for(user)
+                elif len(parts) == 2:
+                    result = ventures.create(user, body.get("kind", "budget"), body.get("name"))
+                elif method == "GET":
+                    result = ventures.get(user, parts[2])
+                else:
+                    result = ventures.update(user, parts[2], {k: v for k, v in body.items() if k != "user"})
+                self.send(json.dumps(result).encode(), "application/json")
+            except KeyError:
+                self.send(b'{"error":"Venture not found."}', "application/json", 404)
+            except ValueError as error:
+                self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+
         def do_POST(self):
             route = urlsplit(self.path).path
+            if route == "/api/ventures" or route.startswith("/api/ventures/"):
+                self.ventures_request("POST")
+                return
             if route in ("/api/maximo/run", "/api/maximo/cash", "/api/maximo/estimate"):
                 self.maximo_request(route)
                 return
@@ -414,6 +451,35 @@ def main():
                     self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
                 except (OSError, RuntimeError, KeyError):
                     self.send(b'{"error":"Market ranking unavailable. Check the local kit."}', "application/json", 502)
+                return
+            if route.path == "/api/ventures" or route.path.startswith("/api/ventures/"):
+                self.ventures_request("GET")
+                return
+            if route.path in ("/api/opportunities", "/api/venture/review"):
+                try:
+                    number = lambda name, default=None: float(params[name][0]) if params.get(name, [""])[0] else default  # noqa: E731
+                    budget, reserve = number("budget"), number("reserve", 0)
+                    if budget is None or not (0 < budget <= 1e9 and 0 <= reserve <= budget):
+                        raise ValueError("Give a budget between 0 and 1,000,000,000 and a reserve below it.")
+                    if route.path == "/api/opportunities":
+                        lat, lon, radius = number("lat"), number("lon"), number("radius")
+                        exclude = [k for k in params.get("exclude", [""])[0].split(",") if k]
+                        body = opportunity.scan(budget, reserve, args.kit, center=(lat, lon) if lat and lon else None,
+                                                radius_mi=radius, exclude=exclude, top=int(number("top", 8)))
+                    else:
+                        property_id = params.get("property_id", [""])[0]
+                        if not property_id.isdigit():
+                            raise ValueError("Give a CoStar property_id.")
+                        body = venture_review.review(params.get("business", [""])[0], int(property_id),
+                                                     params.get("suite", [""])[0] or None, budget, reserve, args.kit,
+                                                     delay_months=int(number("delay", 0)),
+                                                     explain=params.get("explain", ["0"])[0] == "1")
+                    self.send(json.dumps(body, default=str).encode(), "application/json")
+                except ValueError as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError, KeyError):
+                    self.send(b'{"error":"Opportunity data unavailable. Run opportunity.py --build once."}',
+                              "application/json", 502)
                 return
             if route.path == "/api/neighborhood/industries":
                 self.send(json.dumps(neighborhood.industry_catalog()).encode(), "application/json")

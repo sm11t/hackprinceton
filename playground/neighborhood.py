@@ -1420,6 +1420,16 @@ def building_facts(property_id, kit=""):
 
 
 FIT_ORDER = {"fits": 0, "check": 1, "no": 2}
+# CoStar FloorName codes (kit schemas/enums.json) that are at street level.
+STREET_LEVEL_FLOORS = {21: "plaza", 22: "lobby", 23: "ground floor", 24: "first floor", 152: "ground/garden level"}
+UNKNOWN_FLOORS = {None, 0, 1}
+
+
+def floor_label(code):
+    if code in STREET_LEVEL_FLOORS:
+        return STREET_LEVEL_FLOORS[code]
+    return {18: "lower level", 19: "concourse", 20: "basement", 25: "second floor", 26: "mezzanine",
+            27: "third floor"}.get(code, f"floor code {code}")
 
 
 def building_fit(key, facts, suite=None):
@@ -1454,6 +1464,28 @@ def building_fit(key, facts, suite=None):
              else "the chosen listed space" if candidates else None)
     if not candidates and facts["listed"]:
         candidates, scope = facts["listed"], "listed spaces"
+        # Executive-suite offices are not standalone premises; only consider them if nothing else is listed.
+        standalone = [sp for sp in candidates if not sp.get("executive_suite")]
+        if standalone:
+            candidates = standalone
+    if candidates and all(sp.get("executive_suite") for sp in candidates):
+        fail("Executive-suite office (a furnished office inside a shared suite), not a standalone premises")
+    if need.get("prefers_street_level") and candidates and status != "no":
+        floors = {sp.get("floor") for sp in candidates}
+        if floors <= set(STREET_LEVEL_FLOORS):
+            reasons.append(f"Street level ({floor_label(next(iter(floors)))}, CoStar)")
+        elif not floors & set(STREET_LEVEL_FLOORS):
+            known = [f for f in floors if f not in UNKNOWN_FLOORS]
+            unknowns.append((f"Listed on the {floor_label(known[0])}" if known else "Floor not recorded")
+                            + ": walk-in businesses usually need street-level visibility")
+    if need.get("ground_floor") and candidates and status != "no":
+        floors = {sp.get("floor") for sp in candidates}
+        if floors <= set(STREET_LEVEL_FLOORS):
+            reasons.append(f"Street level ({floor_label(next(iter(floors)))}, CoStar)")
+        elif not floors & (set(STREET_LEVEL_FLOORS) | UNKNOWN_FLOORS):
+            fail(f"Listed on the {floor_label(next(iter(floors)))}; this business needs street-level space")
+        else:
+            candidates = [sp for sp in candidates if sp.get("floor") in set(STREET_LEVEL_FLOORS) | UNKNOWN_FLOORS]
     if not candidates:
         candidates, scope = [{"sf": facts["gba"]}], "whole building"
         unknowns.append("No space is listed for lease in CoStar: availability unknown, sizes use the whole building")
@@ -1484,7 +1516,8 @@ def building_fit(key, facts, suite=None):
             fail(f"CoStar ceiling {facts['ceiling_ft']:g} ft is below the {need['min_clear_ft']} ft needed")
         else:
             reasons.append(f"CoStar ceiling {facts['ceiling_ft']:g} ft meets the {need['min_clear_ft']} ft needed")
-    if need.get("ground_floor") and (facts["stories"] or 1) > 1 and scope != "whole building":
+    if (need.get("ground_floor") and status != "no" and (facts["stories"] or 1) > 1 and scope != "whole building"
+            and not any(sp.get("floor") in STREET_LEVEL_FLOORS for sp in candidates)):
         unknowns.append(f"Needs ground-floor space; the building has {facts['stories']} stories, confirm the floor")
     if need.get("drive_in") and not facts["drive_in_bays"]:
         unknowns.append("No grade-level drive-in bays recorded")

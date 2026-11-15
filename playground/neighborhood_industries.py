@@ -397,6 +397,7 @@ SPACE = {
     "veterinary": {"types": {"6", "7", "13", "9"}, "subtypes": {"25"}, "min_sf": 2000, "max_sf": 8000,
                    "checks": ["Kennel ventilation and noise", "X-ray shielding"]},
     "salon_barber": {"types": STOREFRONT | {"5"}, "subtypes": set(), "min_sf": 500, "max_sf": 3000,
+                     "prefers_street_level": True,
                      "checks": ["Shampoo-bowl plumbing", "Ventilation for chemicals"]},
     "laundromat": {"types": STOREFRONT, "subtypes": set(), "min_sf": 1500, "max_sf": 5000, "ground_floor": True,
                    "checks": ["Water supply, large drains and gas or 3-phase power for dryers", "Venting"]},

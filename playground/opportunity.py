@@ -1,0 +1,313 @@
+"""Opportunity scan: "I have a budget; what could I open, and where?"
+
+Every active for-lease space in the Houston market x every business in the registry, narrowed by
+hard gates in order and then ranked by neighborhood demand:
+
+  1 building   can this building (and this listed space) host the business?   neighborhood.building_fit
+  2 money      does cash to open + the user's reserve fit the budget?          venture_costs.cash_to_open
+  3 demand     does the neighborhood support the business?                     neighborhood.investigate
+
+Efficiency. The expensive parts do not depend on the budget, so they are built once into an index
+(gitignored, under playground/output/neighborhood/): one pass over the kit for the listed spaces, then
+the 26-business neighborhood check and the building gate for every listed building. A budget query is
+then arithmetic over the index (well under a second for ~2,400 spaces x 26 businesses).
+
+Usage (from the repo root):
+  python3.12 playground/with_env.py python3.12 playground/opportunity.py --build
+  python3.12 playground/with_env.py python3.12 playground/opportunity.py --budget 500000 --reserve 50000
+"""
+import argparse
+import csv
+import io
+import json
+import os
+import time
+from functools import lru_cache
+from pathlib import Path
+
+import neighborhood as nb
+from neighborhood_industries import INDUSTRIES
+
+INDEX_VERSION = 2
+MARKET_ID = 14  # Houston (reconcile.MARKETS)
+LOW_RENT_PER_SF_YEAR = 3.0  # below this an asking rent is more likely a data-entry error (market_rank)
+
+
+def password():
+    return os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+
+
+def kit_file(kit=None):
+    path = Path(kit) if kit else nb.kit_path()
+    if not path:
+        raise ValueError("CoStar kit not found. Set COSTAR_KIT or pass --kit.")
+    return path
+
+
+def market_path(kit=None):
+    return nb.CACHE / "market-houston-v2.json"  # derived from the kit; same data whether zip or folder
+
+
+def load_market(kit=None):
+    """Houston buildings with active lease listings, reduced to what the scan needs. One kit pass, cached."""
+    from deal import SERVICE, monthly_rent
+    from reconcile import costar_ceiling_ft, unique_scans
+    from space_fit import building_numbers, kit_lines
+    from market_rank import evidence_flags
+    kit = kit_file(kit)
+    path = market_path(kit)
+    if path.exists():
+        return json.loads(path.read_text())
+    pw = password()
+    reviewable = {int(row["PropertyId"]) for row in csv.DictReader(io.StringIO("".join(
+        kit_lines(kit, "commercial-properties.csv", pw)).lstrip("﻿"))) if row["PropertyId"].isdigit()}
+    spaces = {}
+    for line in kit_lines(kit, "data/commercial-listing-summary.jsonl", pw):
+        listing = json.loads(line)
+        if listing.get("listingStatus") != 1:
+            continue
+        for sp in (listing.get("forLeaseSummary") or {}).get("spaces") or []:
+            pid = sp.get("propertyId")
+            if pid not in reviewable or not sp.get("squareFeetMax"):
+                continue
+            monthly, per_year = monthly_rent(sp)
+            if per_year is not None and per_year < LOW_RENT_PER_SF_YEAR:
+                monthly = per_year = None  # implausible asking rent: treat as not listed
+            basis = SERVICE.get(sp.get("serviceType"), ("basis not recorded", ""))[0]
+            row = {"listing_id": listing["id"], "space_id": sp.get("id"), "suite": sp.get("suite"),
+                   "floor": sp.get("floorName"), "executive_suite": bool(sp.get("isExecutiveSuite")),
+                   "space_use": sp.get("spaceUse"),
+                   "sf": sp.get("squareFeetMax"), "monthly_rent": monthly, "rent_psf_year": per_year,
+                   "lease_basis": basis, "available_on": (sp.get("availableOnDate") or "")[:10] or None,
+                   "lease_pending": bool(sp.get("isLeasePending"))}
+            row["value"] = nb.space_value({**row, "square_feet": row["sf"]})
+            spaces.setdefault(pid, {})[row["value"]] = row  # one row per suite value
+    buildings = []
+    for line in kit_lines(kit, "data/commercial-property.jsonl", pw):
+        prop = json.loads(line)
+        a = prop.get("primaryAddress") or {}
+        if prop["id"] not in spaces or a.get("researchMarketId") != MARKET_ID or a.get("latitude") is None:
+            continue
+        ceiling, ceiling_source = costar_ceiling_ft(prop)
+        numbers = building_numbers(prop)
+        street = " ".join(str(a.get(k) or "") for k in ("streetNumber", "streetDirection", "streetName", "streetType"))
+        buildings.append({
+            "property_id": prop["id"], "address": f"{' '.join(street.split())}, {a.get('city')}, {a.get('state')}",
+            "lat": a["latitude"], "lon": a["longitude"], "primary_address": a,
+            "facts": {"property_id": prop["id"], "type": str(prop.get("propertyType") or ""),
+                      "subtype": str(prop.get("propertySubtype") or ""), "gba": prop.get("grossBuildingAreaSquareFeet"),
+                      "stories": prop.get("numStoriesAboveGrade"), "ceiling_ft": ceiling,
+                      "ceiling_source": ceiling_source, "drive_in_bays": numbers.get("drive_in_bays"),
+                      "docks": numbers.get("docks"),
+                      "listed": [{"value": v, "suite": s["suite"], "sf": s["sf"], "floor": s["floor"],
+                                  "executive_suite": s["executive_suite"]} for v, s in spaces[prop["id"]].items()]},
+            "spaces": list(spaces[prop["id"]].values()),
+            "evidence_flags": evidence_flags(prop), "tours": len(unique_scans(prop)),
+        })
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(buildings))
+    return buildings
+
+
+def write_seed(buildings):
+    """Bulk-write property pins and building facts into the neighborhood caches (one write each)."""
+    pins_path, facts_path = nb.CACHE / "property-pins.json", nb.CACHE / "building-facts.json"
+    pins = json.loads(pins_path.read_text()) if pins_path.exists() else {}
+    facts = json.loads(facts_path.read_text()) if facts_path.exists() else {}
+    for b in buildings:
+        pins.setdefault(str(b["property_id"]), b["primary_address"])
+        facts[str(b["property_id"])] = b["facts"]  # the listing pass is the freshest view of listed spaces
+    pins_path.parent.mkdir(parents=True, exist_ok=True)
+    pins_path.write_text(json.dumps(pins))
+    facts_path.write_text(json.dumps(facts))
+    nb.property_pin.cache_clear()
+    nb.building_facts.cache_clear()
+
+
+def index_path(kit=None):
+    return nb.CACHE / f"opportunity-index-v{INDEX_VERSION}.json"
+
+
+def build_index(kit=None, log=print):
+    """Neighborhood decisions (26 businesses) and building fit for every listed space. Budget-independent."""
+    kit = kit_file(kit)
+    started = time.perf_counter()
+    buildings = load_market(kit)
+    log(f"market: {len(buildings)} buildings, {sum(len(b['spaces']) for b in buildings)} listed spaces "
+        f"({time.perf_counter() - started:.1f}s)")
+    write_seed(buildings)
+    out = []
+    t = time.perf_counter()
+    for i, b in enumerate(buildings):
+        report = nb.investigate("suggest", property_id=b["property_id"], kit=kit)
+        demand = {}
+        for d in report["decisions"]:
+            demand[d["industry"]] = {
+                "verdict": d["verdict"], "score": d["score"], "insight": d["insight"], "basis": d["basis"],
+                "reasons": [r["reason"] for r in d["reasons"] if r["stance"]][:3],
+                "lookalike": d["lookalike_percentile"], "validated": d["lookalike_validated"]}
+        fits = {}
+        for sp in b["spaces"]:
+            fits[sp["value"]] = {}
+            for key in INDUSTRIES:
+                f = nb.building_fit(key, b["facts"], sp["value"])
+                fits[sp["value"]][key] = {"status": f["status"], "capacity": f["capacity"],
+                                          "reasons": f["reasons"], "unknowns": f["unknowns"]}
+        out.append({"property_id": b["property_id"], "demand": demand, "fits": fits})
+        if (i + 1) % 50 == 0:
+            log(f"  {i + 1}/{len(buildings)} buildings ({time.perf_counter() - t:.1f}s)")
+    path = index_path(kit)
+    path.write_text(json.dumps({"version": INDEX_VERSION, "built_at": nb.now_iso(), "buildings": out}))
+    log(f"index: {len(out)} buildings x {len(INDUSTRIES)} businesses in {time.perf_counter() - started:.1f}s")
+    return out
+
+
+@lru_cache(maxsize=2)
+def load_index(kit=None):
+    kit = kit_file(kit)
+    path = index_path(kit)
+    if not path.exists():
+        if nb.offline():
+            raise nb.Offline("No opportunity index; run opportunity.py --build online first.")
+        build_index(kit, log=lambda *_: None)
+    index = {row["property_id"]: row for row in json.loads(path.read_text())["buildings"]}
+    market = {b["property_id"]: b for b in load_market(kit)}
+    return market, index
+
+
+def promising(demand):
+    return demand["verdict"] == "supported" or (demand["verdict"] == "mixed" and demand["score"] > 0)
+
+
+def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), include=None, top=8):
+    """Every listed space x every business through the gates; returns the funnel, directions and best pairs."""
+    from venture_costs import cash_to_open, rent_for
+    started = time.perf_counter()
+    market, index = load_index(kit)
+    budget, reserve = float(budget), float(reserve or 0)
+    keys = [k for k in INDUSTRIES if k not in set(exclude) and (not include or k in set(include))]
+    excluded_groups = sorted({INDUSTRIES[k]["group"] for k in INDUSTRIES if k not in keys})
+    funnel = {"spaces": 0, "combinations": 0, "building_can_host": 0, "affordable": 0, "neighborhood_support": 0,
+              "cost_not_estimated": 0, "rent_not_listed": 0}
+    pairs, unpriced = [], {}
+    for pid, b in market.items():
+        if center and radius_mi and nb.miles(center[0], center[1], b["lat"], b["lon"]) > radius_mi:
+            continue
+        row = index.get(pid)
+        if not row:
+            continue
+        for sp in b["spaces"]:
+            funnel["spaces"] += 1
+            rent = rent_for(sp)
+            for key in keys:
+                funnel["combinations"] += 1
+                fit = row["fits"].get(sp["value"], {}).get(key)
+                if not fit or fit["status"] == "no":
+                    continue
+                funnel["building_can_host"] += 1
+                cost = cash_to_open(key, sp["sf"], rent["monthly"], budget=budget, reserve=reserve,
+                                    building_type=b["facts"].get("type"))
+                if cost["affordability"] == "over":
+                    continue
+                demand = row["demand"].get(key)
+                if cost["affordability"] == "unknown":
+                    # No cash figure (no comparable benchmark, or no rent): never counted as affordable.
+                    funnel["cost_not_estimated"] += 1
+                    if demand and promising(demand):
+                        u = unpriced.setdefault(key, {"business": key, "label": INDUSTRIES[key]["label"], "places": 0,
+                                                      "why": cost["note"]})
+                        u["places"] += 1
+                    continue
+                funnel["affordable"] += 1
+                funnel["rent_not_listed"] += cost["affordability"] == "rent_unknown"
+                if not demand or not promising(demand):
+                    continue
+                funnel["neighborhood_support"] += 1
+                pairs.append({
+                    "business": key, "label": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"],
+                    "property_id": pid, "address": b["address"], "lat": b["lat"], "lon": b["lon"],
+                    "suite": sp["value"], "suite_label": f"Suite {sp['suite']}" if sp.get("suite") else f"{sp['sf']:,.0f} sq ft space",
+                    "sf": sp["sf"], "rent": rent, "building": fit, "demand": demand,
+                    "cost": {k: cost.get(k) for k in ("affordability", "cash_to_open", "required", "headroom",
+                                                       "months_of_rent_after_opening", "basis_quality", "excludes",
+                                                       "note")},
+                    "evidence_flags": b["evidence_flags"], "tours": b["tours"],
+                })
+    tier = {"supported": 0, "mixed": 1}
+    afford = {"within": 0, "stretch": 1, "rent_unknown": 2}
+    pairs.sort(key=lambda p: (tier[p["demand"]["verdict"]], afford[p["cost"]["affordability"]],
+                              p["building"]["status"] != "fits", -p["demand"]["score"], bool(p["evidence_flags"]),
+                              -(p["cost"]["headroom"] or -1e12)))
+    # One best space per building per business keeps the shortlist diverse.
+    best, seen = [], set()
+    for p in pairs:
+        if (p["business"], p["property_id"]) in seen:
+            continue
+        seen.add((p["business"], p["property_id"]))
+        best.append(p)
+    directions = {}
+    for p in best:
+        d = directions.setdefault(p["business"], {"business": p["business"], "label": p["label"], "group": p["group"],
+                                                  "places": 0, "supported": 0, "within_budget": 0,
+                                                  "only_low_case": 0, "rent_not_listed": 0, "cash_to_open": [],
+                                                  "pairs": [],
+                                                  "excludes": p["cost"].get("excludes"),
+                                                  "cost_basis": p["cost"]["basis_quality"]})
+        d["places"] += 1
+        d["supported"] += p["demand"]["verdict"] == "supported"
+        d["within_budget"] += p["cost"]["affordability"] == "within"
+        d["only_low_case"] += p["cost"]["affordability"] == "stretch"
+        d["rent_not_listed"] += p["cost"]["affordability"] == "rent_unknown"
+        if p["cost"]["cash_to_open"]["base"] is not None and p["cost"]["affordability"] != "rent_unknown":
+            d["cash_to_open"].append(p["cost"]["cash_to_open"]["base"])
+        if len(d["pairs"]) < 3:
+            d["pairs"].append(p)
+    ranked = sorted(directions.values(), key=lambda d: (-min(d["supported"], d["within_budget"]), -d["supported"],
+                                                        -d["within_budget"], -d["places"]))
+    for d in ranked:
+        costs = sorted(d.pop("cash_to_open"))
+        d["cash_to_open_range"] = [costs[0], costs[-1]] if costs else None
+        d["why"] = (d["pairs"][0]["demand"]["reasons"] or ["Neighborhood signals are mixed"])[0]
+    return {"budget": budget, "reserve": reserve, "funnel": funnel, "directions": ranked,
+            "cost_not_estimated": sorted(unpriced.values(), key=lambda u: -u["places"]),
+            "pairs": best[:top * 5], "excluded_groups": excluded_groups, "businesses_considered": len(keys),
+            "elapsed_ms": round(1000 * (time.perf_counter() - started)),
+            "basis": ("Gates in order: the building can host the business (CoStar facts vs space needs), cash to open "
+                      "plus your reserve fits the budget (sourced opening-cost benchmarks, labelled; where the listing "
+                      "has no rent, the cost before rent must fit and the pair is labelled), and the "
+                      "neighborhood supports it (supported, or mixed with a positive total). Lease only. One best "
+                      "space per building per business.")}
+
+
+def warm(kit=None):
+    """Load the market and index in the background so the first scan is quick."""
+    try:
+        load_index(kit)
+    except (nb.Offline, RuntimeError, OSError, ValueError, KeyError):
+        pass
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--kit", type=Path)
+    parser.add_argument("--build", action="store_true", help="build the market index (once per laptop)")
+    parser.add_argument("--budget", type=float)
+    parser.add_argument("--reserve", type=float, default=0)
+    parser.add_argument("--exclude", default="", help="comma-separated business keys to leave out")
+    args = parser.parse_args()
+    if args.build:
+        build_index(args.kit)
+        return
+    result = scan(args.budget or 500000, args.reserve, args.kit,
+                  exclude=[k for k in args.exclude.split(",") if k])
+    print(json.dumps(result["funnel"]), f"{result['elapsed_ms']} ms")
+    for d in result["directions"][:12]:
+        print(f"{d['label']:32} {d['places']:3} places, {d['supported']} supported, {d['within_budget']} within budget "
+              f"(+{d['only_low_case']} low case, +{d['rent_not_listed']} rent not listed) cash {d['cash_to_open_range']}"
+              + (f" excl. {d['excludes']}" if d["excludes"] else "") + f" | {d['why'][:60]}")
+    for u in result["cost_not_estimated"]:
+        print(f"  cost not estimated: {u['label']} ({u['places']} places with neighborhood support)")
+
+
+if __name__ == "__main__":
+    main()
