@@ -71,7 +71,8 @@ def _property(handoff, stage3):
     rent = listing.get('rent_normalization') or {}
     views = (((dossier.get('source_status') or {}).get('vexcel') or {}).get('imagery') or {}).get('views') or []
     models = (dossier.get('identity_resolution') or {}).get('matterport_models') or []
-    tour = next((m.get('showcase_url') for m in models if m.get('status') == 'matched' and m.get('showcase_url')), None)
+    model = next((m.get('model_id') for m in models if m.get('status') == 'matched' and m.get('showcase_url')), None)
+    tour = f'https://my.matterport.com/show/?m={model}' if model else None  # plain Showcase link, no SDK key
     return {
         'address': listing.get('address'), 'city': listing.get('city'), 'state': listing.get('state'),
         'property_id': listing.get('property_id'), 'listing_id': listing.get('listing_id'), 'space_id': listing.get('space_id'),

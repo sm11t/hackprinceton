@@ -47,3 +47,5 @@ body{background:var(--paper)}
 .key-gap{margin:12px 0 0;padding:11px 13px;border:1px dashed #cfc8b9;border-radius:8px;background:#fbf9f4;font-size:13.5px}
 .finding-all{margin-top:6px;border-top:1px solid var(--line);padding-top:10px}
 .finding-all>summary{cursor:pointer;font-weight:650;color:var(--green)}
+.replay-badge{order:9;margin-top:10px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#0f1720;background:#9fc3e4;border-radius:6px;padding:6px 9px;align-self:flex-start}
+.property-card.replay-pick{border:2px solid var(--green)}.replay-tag{display:inline-block;margin-bottom:8px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#fff;background:var(--green);border-radius:4px;padding:3px 8px}

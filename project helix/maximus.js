@@ -652,7 +652,19 @@
     const verifiedCount = currentDiscovery?.results?.filter(r => r.verification).length || 0;
     $("#result-meta").textContent = `${currentDiscovery?.qualifying_count ?? 0} qualifying opportunities · ${currentDiscovery?.excluded_count ?? 0} outside budget · ${trace.source_listing_count ?? 0} source records${trace.inventory_truncated ? " (bounded inventory; not exhaustive)" : ""} · CoStar ${trace.transaction_types_searched?.join(" + ") || "unavailable"}${trace.nemotron?.status === "deterministic_fallback" ? " · Deterministic explanation fallback" : ""} · ${verifiedCount ? `${verifiedCount} listing(s) verified on request` : "No Tavily requests yet"}.`;
   }
+  get("/api/config").then(cfg => {
+    if (!cfg.demo_replay) return;
+    const badge = document.createElement("div"); badge.className = "replay-badge";
+    badge.textContent = "Demo replay · saved investigations load instantly";
+    document.querySelector(".aside")?.append(badge);
+  }).catch(() => {});
   function displayDiscovery(data) {
+    const pick = data.replay?.selected_stable_id;
+    if (pick && Array.isArray(data.results)) {
+      // Demo replay: put the saved investigation's listing first so it is easy to open.
+      const i = data.results.findIndex(r => r.stable_id === pick);
+      if (i > 0) data.results.unshift(...data.results.splice(i, 1));
+    }
     currentDiscovery = data;
     displayLimit = 40;
     setStage(1);
@@ -661,6 +673,11 @@
     $("#allocation").value = String(data.policy?.acquisition_allocation_percent ?? 100);
     $("#allocation-value").textContent = `${$("#allocation").value}%`;
     updateSummary(); renderResults(); updateAllocationText();
+    if (pick) {
+      const card = document.querySelector(`[data-stable-id="${CSS.escape(pick)}"]`);
+      if (card) { card.classList.add("replay-pick"); const tag = document.createElement("div"); tag.className = "replay-tag"; tag.textContent = "Saved investigation · opens instantly"; card.prepend(tag); }
+      $("#result-meta").textContent += ` · Demo replay of the discovery saved ${new Date(data.replay.saved_at).toLocaleString()}`;
+    }
   }
   function updateAllocationText() {
     const p = Number($("#allocation").value);

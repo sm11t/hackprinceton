@@ -59,6 +59,7 @@ from stage3_engine import adapter as stage3_adapter
 import opportunity_report
 import stage4_handoff
 import final_report
+import demo_replay
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -421,6 +422,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 if listing.get('transaction_type') != 'lease': raise ValueError('Stage 3 currently supports selected lease spaces only.')
                 reserve=(query.get('reserve') or [intake.get('reserve')])[0]
                 if reserve == '': reserve=None
+                saved=demo_replay.saved_stage3(handoff['handoff_id'],reserve,read_json_store(STAGE3_RESULTS_PATH))
+                if saved is not None:
+                    self.send_json(saved); return
                 result=stage3_adapter.run(listing.get('property_id'), intake.get('total_budget_usd'), reserve=reserve,
                     listing_id=listing.get('listing_id'), space_id=listing.get('space_id'), kit=costar.kit_path, kit_password=costar.password)
                 with DISCOVERY_LOCK:
@@ -544,7 +548,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "model": MODEL,
                 "has_openrouter": bool(OPENROUTER_API_KEY),
                 "has_tavily": bool(TAVILY_API_KEY),
-                "has_costar": has_costar
+                "has_costar": has_costar,
+                "demo_replay": demo_replay.enabled()
             })
             return
 
@@ -584,6 +589,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             return
         try:
             intake = build_intake(payload.get("intake", payload))
+            replay = demo_replay.discovery_response(intake, INVESTIGATION_HANDOFFS, read_json_store(STAGE3_RESULTS_PATH))
+            if replay:
+                response = replay["response"]
+                with DISCOVERY_LOCK:
+                    DISCOVERY_SESSIONS[response["discovery_id"]] = {
+                        "intake": replay["intake"], "raw_records": None, "model_explanations": None,
+                        "response": response, "replay": replay["investigation_id"]}
+                self.send_json(response)
+                return
             policy = policy_for_intake(intake)
             city_name, state = CITY_CODES[intake["city"]]
             # One bounded city-inventory read. The deterministic budget gate is applied
@@ -630,6 +644,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         discovery_id, session = self.get_discovery_session(payload)
         if not session:
             self.send_json({"error": "Discovery session expired. Run Find Properties again."}, status=404)
+            return
+        if session.get("replay"):
+            self.send_json({**session["response"], "replay_note": "Budget allocation is fixed in demo replay."})
             return
         try:
             percent = payload.get("acquisition_allocation_percent", 100)
@@ -701,6 +718,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Listing is not part of this discovery."}, status=404)
             return
         stable_id = str(record.get("stable_id", ""))
+        replay_id = session.get("replay")
+        if replay_id and (INVESTIGATION_HANDOFFS.get(replay_id) or {}).get("selected_stable_id") == stable_id:
+            self.send_json({"handoff": INVESTIGATION_HANDOFFS[replay_id]})
+            return
         with DISCOVERY_LOCK:
             existing = next((item for item in INVESTIGATION_HANDOFFS.values()
                              if item.get("discovery_id") == discovery_id and item.get("selected_stable_id") == stable_id
