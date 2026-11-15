@@ -1,29 +1,35 @@
 """Neighborhood demand and trends: does the area around an address support a business?
 
 A small team of specialist agents investigates, and every step is recorded in a
-trace (inputs -> sources -> findings with confidence -> hand-off):
+trace (inputs -> sources -> findings with confidence -> hand-off). Each specialist
+runs once per site and covers every industry asked about:
 
-  planner      picks the signals that apply to the use (rule table, code)
-  site         resolves the address or CoStar property to a point and Census tract
+  planner      maps the request to industries (registry + synonyms, code; an LLM can be layered on)
+  site         resolves the address or CoStar property to a point
   residents    "Who lives here": ACS 2020-2024 vs 2015-2019 around the site
   competitors  "Who already serves it": OpenStreetMap facilities within the radius
-  momentum     "What is moving in": CoStar kit tenancy move-ins / move-outs by category
+  momentum     "What is moving in": CoStar kit tenant arrivals / departures by industry
   lookalike    "Does it look like places that already have this business?"
-               (logistic model, measured on held-out real facilities)
-  coordinator  verdict per use from the signals, with the deciding reasons
-  narrator     optional plain-English summary written by an LLM from the records
+               (logistic model, measured on held-out real facilities per industry)
+  coordinator  verdict per industry from the signals, with the deciding reasons
+  narrator     optional plain-English summary written by an LLM from the coordinator output
 
-Numbers are computed in code. The LLM only writes the optional summary, and that
-text is labelled as LLM-written. Missing data stays "unknown"; nothing is guessed.
+Industries live in neighborhood_industries.py. Numbers are computed in code; the LLM
+only writes the optional summary (labelled, and rejected if it adds a number).
 
-Every external response is cached under playground/output/neighborhood/ (gitignored).
-Set NEIGHBORHOOD_OFFLINE=1 (or pass --offline) to use only the cache.
+Efficiency: everything heavy is prepared once and cached under
+playground/output/neighborhood/ (gitignored): Census and Overpass responses, the
+Houston-area reference profiles, kit tenancies, and one evaluated model per industry
+(`--prepare`). A request is then in-memory math over grid indexes.
+NEIGHBORHOOD_OFFLINE=1 (or --offline) reads only the cache.
 
-Usage:
-  python3.12 playground/with_env.py python3.12 playground/neighborhood.py \
-      --kit costar-hackathon-kit --property-id 13890701 --use "indoor pickleball"
-  ... --address "9700 Tanner Rd, Houston, TX 77041" --use suggest
-  ... --evaluate "indoor pickleball"     # held-out evaluation of the lookalike score
+Usage (from the repo root):
+  python3.12 playground/with_env.py python3.12 playground/neighborhood.py --prepare all
+  ... playground/neighborhood.py --property-id 13890701 --use "indoor pickleball"
+  ... playground/neighborhood.py --address "9700 Tanner Rd, Houston, TX 77041" --use suggest
+  ... playground/neighborhood.py --property-id 13890701 --use "bouldering gym" --explain
+  ... playground/neighborhood.py --report        # evaluation table for every industry
+  ... playground/neighborhood.py --bench         # cold and warm request timings
 """
 import argparse
 import hashlib
@@ -33,6 +39,7 @@ import os
 import random
 import re
 import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -40,11 +47,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from neighborhood_industries import INDUSTRIES, NOT_RESIDENT_DRIVEN, industries_for_tenant, resolve
 from reconcile import record
 
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "output" / "neighborhood"
-USER_AGENT = "hackprinceton-neighborhood-demand/0.1 (research prototype)"
+USER_AGENT = "hackprinceton-neighborhood-demand/0.2 (research prototype)"
 
 # Houston area = the five core Houston-metro counties (Census FIPS, Texas = 48).
 STATE = "48"
@@ -52,9 +60,12 @@ COUNTIES = {"201": "Harris", "157": "Fort Bend", "339": "Montgomery", "039": "Br
 AREA_NAME = "Houston area (Harris, Fort Bend, Montgomery, Brazoria, Galveston counties)"
 BBOX = (28.9, -96.1, 30.65, -94.35)  # south, west, north, east around those counties
 RADIUS_MI = 3.0
+MOMENTUM_RADIUS_MI = 5.0  # wider than the residents radius: the kit is a sample of buildings
+MIN_FACILITIES = 30       # fewer mapped facilities than this: no lookalike model for the industry
+VALIDATED_AUC = 0.6       # below this on the spatial hold-out, the lookalike is shown but does not vote
+MAX_TRAINING_POSITIVES = 600  # subsample big industries (restaurants): same signal, bounded training time
 
 ACS = "https://api.census.gov/data/{year}/acs/acs5"
-ACS_PAGE = "https://www.census.gov/programs-surveys/acs"
 GAZETTEER = {  # tract internal points; ACS 2015-2019 uses 2010 tracts, 2020-2024 uses 2020 tracts
     2024: "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2024_Gazetteer/2024_gaz_tracts_48.txt",
     2019: "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2019_Gazetteer/2019_gaz_tracts_48.txt",
@@ -67,8 +78,10 @@ AGE_BANDS = {
     "under_5": [3], "age_5_17": [4, 5, 6], "age_18_24": [7, 8, 9, 10], "age_25_34": [11, 12],
     "age_35_54": [13, 14, 15, 16], "age_55_64": [17, 18, 19], "age_65_plus": [20, 21, 22, 23, 24, 25],
 }
+BAND_LABEL = {"under_5": "Under-5", "age_5_17": "School-age (5-17)", None: "Population"}
 AGE_VARS = [f"B01001_{n + offset:03d}E" for band in AGE_BANDS.values() for n in band for offset in (0, 24)]
-BASE_VARS = ["B01003_001E", "B01003_001M", "B11001_001E", "B19013_001E"]
+# population (+MOE), households, median household income, occupied units, renter-occupied units
+BASE_VARS = ["B01003_001E", "B01003_001M", "B11001_001E", "B19013_001E", "B25003_001E", "B25003_003E"]
 
 
 class Offline(RuntimeError):
@@ -83,6 +96,14 @@ def now_iso():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def fmt_pct(value, signed=False, points=False):
+    if value is None:
+        return "unknown"
+    if points:
+        return f"{value * 100:+.1f} pts"
+    return f"{value:+.1%}" if signed else f"{value:.1%}"
+
+
 # --- Cached fetching -----------------------------------------------------------
 
 def public_url(url, params=None):
@@ -91,7 +112,7 @@ def public_url(url, params=None):
     return url + ("?" + urlencode(shown) if shown else "")
 
 
-def fetch(url, params=None, form=None, kind="json", timeout=90):
+def fetch(url, params=None, form=None, kind="json", timeout=180):
     """GET/POST with a disk cache. Returns (payload, meta). The key never enters the cache key."""
     shown = public_url(url, params)
     digest = hashlib.sha1((shown + "|" + json.dumps(form, sort_keys=True)).encode()).hexdigest()[:20]
@@ -100,11 +121,11 @@ def fetch(url, params=None, form=None, kind="json", timeout=90):
         saved = json.loads(path.read_text())
         return saved["payload"], {"url": shown, "retrieved_at": saved["retrieved_at"], "cached": True}
     if offline():
-        raise Offline(f"Offline mode and no cached response for {shown}")
+        raise Offline(f"Offline mode and no cached response for {shown[:160]}")
     full = url + ("?" + urlencode(params) if params else "")
     body = urlencode(form).encode() if form else None
     last = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with urlopen(Request(full, data=body, headers={"User-Agent": USER_AGENT}), timeout=timeout) as response:
                 raw = response.read().decode("utf-8", "replace")
@@ -115,7 +136,7 @@ def fetch(url, params=None, form=None, kind="json", timeout=90):
                 raise last from None
         except (URLError, TimeoutError) as error:
             last = RuntimeError(f"Could not reach {url}: {getattr(error, 'reason', error)}")
-        time.sleep(2 * (attempt + 1))
+        time.sleep(5 * (attempt + 1))
     else:
         raise last
     payload = json.loads(raw) if kind == "json" else raw
@@ -126,8 +147,8 @@ def fetch(url, params=None, form=None, kind="json", timeout=90):
 
 
 def source(name, meta, note=""):
-    return {"name": name, "url": meta["url"], "retrieved_at": meta["retrieved_at"],
-            "cached": meta["cached"], "note": note}
+    return {"name": name, "url": meta.get("url"), "retrieved_at": meta.get("retrieved_at"),
+            "cached": meta.get("cached", True), "note": note}
 
 
 # --- Geometry ------------------------------------------------------------------
@@ -140,17 +161,38 @@ def miles(lat1, lon1, lat2, lon2):
     return 3958.8 * 2 * math.asin(math.sqrt(a))
 
 
+class GridIndex:
+    """Rows bucketed into 0.05-degree cells (~3.5 miles) so radius queries touch only nearby cells."""
+    CELL = 0.05
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.cells = {}
+        for row in self.rows:
+            self.cells.setdefault(self.key(row["lat"], row["lon"]), []).append(row)
+
+    def key(self, lat, lon):
+        return math.floor(lat / self.CELL), math.floor(lon / self.CELL)
+
+    def near(self, lat, lon, radius):
+        """[(distance, row)] within `radius` miles."""
+        dlat = radius / 69.0
+        dlon = radius / (69.0 * math.cos(math.radians(lat)))
+        (a, b), (c, d) = self.key(lat - dlat, lon - dlon), self.key(lat + dlat, lon + dlon)
+        out = []
+        for i in range(a, c + 1):
+            for j in range(b, d + 1):
+                for row in self.cells.get((i, j), ()):
+                    if abs(row["lat"] - lat) <= dlat and abs(row["lon"] - lon) <= dlon:
+                        dist = miles(lat, lon, row["lat"], row["lon"])
+                        if dist <= radius:
+                            out.append((dist, row))
+        return out
+
+
 def near(rows, lat, lon, radius):
-    """Rows (with lat/lon) within radius miles; cheap box prefilter before the exact distance."""
-    dlat = radius / 69.0
-    dlon = radius / (69.0 * math.cos(math.radians(lat)))
-    out = []
-    for row in rows:
-        if abs(row["lat"] - lat) <= dlat and abs(row["lon"] - lon) <= dlon:
-            d = miles(lat, lon, row["lat"], row["lon"])
-            if d <= radius:
-                out.append((d, row))
-    return out
+    """Rows within radius miles (builds a throwaway index; use GridIndex for repeated queries)."""
+    return GridIndex(rows).near(lat, lon, radius)
 
 
 # --- Census tables -------------------------------------------------------------
@@ -178,27 +220,31 @@ def number(value):
     return n if n >= 0 else None
 
 
+def census_key_params(query):
+    key = os.environ.get("CENSUS_API_KEY")
+    return {**query, "key": key} if key else query
+
+
 @lru_cache(maxsize=None)
 def acs(year):
     """{GEOID: {variable: value}} for every Houston-area tract in the ACS 5-year release ending `year`."""
-    key = os.environ.get("CENSUS_API_KEY")
     table, metas = {}, []
     for variables in (BASE_VARS, AGE_VARS):
-        query = {"get": ",".join(variables), "for": "tract:*", "in": f"state:{STATE} county:{','.join(COUNTIES)}"}
-        if key:
-            query["key"] = key
+        query = census_key_params({"get": ",".join(variables), "for": "tract:*",
+                                   "in": f"state:{STATE} county:{','.join(COUNTIES)}"})
         rows, meta = fetch(ACS.format(year=year), query)
         metas.append(meta)
         header = rows[0]
         for row in rows[1:]:
             cells = dict(zip(header, row))
             geoid = cells["state"] + cells["county"] + cells["tract"]
-            table.setdefault(geoid, {}).update({v: number(cells[v]) for v in variables})
+            table.setdefault(geoid, {}).update({v: number(cells.get(v)) for v in variables})
     return table, metas
 
 
-def tract_rows(year):
-    """Tracts joined to their ACS values, ready for radius queries."""
+@lru_cache(maxsize=None)
+def tract_table(year):
+    """Tracts joined to their ACS values (tuple of rows, tuple of source metas)."""
     points, gaz_meta = tracts(year)
     values, acs_metas = acs(year)
     rows = []
@@ -209,23 +255,24 @@ def tract_rows(year):
         bands = {band: sum((v.get(f"B01001_{n:03d}E") or 0) + (v.get(f"B01001_{n + 24:03d}E") or 0) for n in cells)
                  for band, cells in AGE_BANDS.items()}
         rows.append({**point, "pop": v["B01003_001E"], "pop_moe": v.get("B01003_001M"),
-                     "households": v.get("B11001_001E"), "income": v.get("B19013_001E"), **bands})
-    return rows, [gaz_meta, *acs_metas]
+                     "households": v.get("B11001_001E"), "income": v.get("B19013_001E"),
+                     "occupied": v.get("B25003_001E"), "renters": v.get("B25003_003E"), **bands})
+    return tuple(rows), tuple(tuple(sorted(m.items())) for m in [gaz_meta, *acs_metas])
 
 
 @lru_cache(maxsize=None)
-def tract_table(year):
-    rows, metas = tract_rows(year)
-    return tuple(rows), tuple(tuple(sorted(m.items())) for m in metas)
+def tract_index(year):
+    return GridIndex(tract_table(year)[0])
 
 
 def census_sources(year):
     _, metas = tract_table(year)
-    names = ["Census Gazetteer tract points", f"ACS {year - 4}-{year} 5-year (population, households, income)",
+    names = ["Census Gazetteer tract points", f"ACS {year - 4}-{year} 5-year (population, households, income, tenure)",
              f"ACS {year - 4}-{year} 5-year (sex by age, B01001)"]
     return [source(n, dict(m)) for n, m in zip(names, metas)]
 
 
+@lru_cache(maxsize=65536)
 def area_profile(lat, lon, radius=RADIUS_MI):
     """Residents of the Census tracts whose internal point lies within `radius` miles.
 
@@ -233,31 +280,32 @@ def area_profile(lat, lon, radius=RADIUS_MI):
     income is the household-weighted mean of tract medians (medians do not add up
     exactly), and is labelled that way wherever it is shown.
     """
-    rows, _ = tract_table(2024)
-    hits = [row for _, row in near(rows, lat, lon, radius)]
+    hits = [row for _, row in tract_index(2024).near(lat, lon, radius)]
     if not hits:
         return None
     pop = sum(r["pop"] for r in hits)
     land = sum(r["land_sqmi"] for r in hits)
     weighted = [(r["income"], r["households"] or 0) for r in hits if r["income"] is not None]
     hh_weight = sum(w for _, w in weighted)
+    occupied = sum(r["occupied"] or 0 for r in hits)
     out = {
         "tracts": len(hits), "population": pop,
         "population_moe": round(math.sqrt(sum((r["pop_moe"] or 0) ** 2 for r in hits))),
         "households": sum(r["households"] or 0 for r in hits),
         "land_sqmi": round(land, 2), "density_per_sqmi": round(pop / land) if land else None,
         "median_income_approx": round(sum(i * w for i, w in weighted) / hh_weight) if hh_weight else None,
+        "share_renters": round(sum(r["renters"] or 0 for r in hits) / occupied, 4) if occupied else None,
     }
     for band in AGE_BANDS:
-        out[f"share_{band}"] = round(sum(r[band] for r in hits) / pop, 4) if pop else None
-    old_rows, _ = tract_table(2019)
-    old = [row for _, row in near(old_rows, lat, lon, radius)]
+        out[band] = sum(r[band] for r in hits)
+        out[f"share_{band}"] = round(out[band] / pop, 4) if pop else None
+    old = [row for _, row in tract_index(2019).near(lat, lon, radius)]
     old_pop = sum(r["pop"] for r in old)
     out["population_2019"] = old_pop or None
     out["growth"] = round(pop / old_pop - 1, 4) if old_pop else None
-    old_under5 = sum(r["under_5"] for r in old)
-    out["under_5"] = sum(r["under_5"] for r in hits)
-    out["under_5_growth"] = round(out["under_5"] / old_under5 - 1, 4) if old_under5 else None
+    for band in ("under_5", "age_5_17"):
+        before = sum(r[band] for r in old)
+        out[f"{band}_growth"] = round(out[band] / before - 1, 4) if before else None
     return out
 
 
@@ -266,16 +314,19 @@ def area_totals():
     """Whole Houston-area totals (county sums are comparable across tract vintages)."""
     new, _ = tract_table(2024)
     old, _ = tract_table(2019)
-    pop, old_pop = sum(r["pop"] for r in new), sum(r["pop"] for r in old)
-    under5, old_under5 = sum(r["under_5"] for r in new), sum(r["under_5"] for r in old)
-    return {"population": pop, "population_2019": old_pop, "growth": round(pop / old_pop - 1, 4),
-            "under_5": under5, "under_5_growth": round(under5 / old_under5 - 1, 4)}
+    out = {"population": sum(r["pop"] for r in new), "population_2019": sum(r["pop"] for r in old)}
+    out["growth"] = round(out["population"] / out["population_2019"] - 1, 4)
+    for band in ("under_5", "age_5_17"):
+        now_, before = sum(r[band] for r in new), sum(r[band] for r in old)
+        out[band] = now_
+        out[f"{band}_growth"] = round(now_ / before - 1, 4)
+    return out
 
 
 @lru_cache(maxsize=None)
 def reference_profiles(radius=RADIUS_MI):
     """The same profile around every Houston-area tract point: the distribution a site is compared to."""
-    path = CACHE / f"reference-profiles-{radius}.json"
+    path = CACHE / f"reference-profiles-v2-{radius}.json"
     if path.exists():
         return json.loads(path.read_text())
     rows, _ = tract_table(2024)
@@ -284,6 +335,11 @@ def reference_profiles(radius=RADIUS_MI):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out))
     return out
+
+
+@lru_cache(maxsize=None)
+def reference_values(field, radius=RADIUS_MI):
+    return tuple(sorted(p[field] for p in reference_profiles(radius) if p.get(field) is not None))
 
 
 def percentile(value, population):
@@ -297,163 +353,20 @@ def percentile(value, population):
 
 
 def houston_percentile(field, value, radius=RADIUS_MI):
-    return percentile(value, [p.get(field) for p in reference_profiles(radius)])
+    return percentile(value, reference_values(field, radius))
 
 
-# --- Uses and signal plans ------------------------------------------------------
-
-USES = {
-    "indoor pickleball": {
-        "osm": ['nwr["sport"~"pickleball"]'],
-        "facility_word": "pickleball facilities",
-        "kit_category": "fitness_recreation",
-        "participation": {
-            "fact": "US pickleball players, 2025 (ages 6+)", "value": 24_300_000, "core_players": 7_500_000,
-            "source": "public:sfia", "url": "https://www.sfia.org/u-s-pickleball-participation",
-            "note": ("SFIA Topline Participation: 24.3M players in 2025 (+479% since 2020), 7.5M core (8+ times a "
-                     "year), 42.9% female; ages 13-24 have the highest participation rate. SFIA does not publish "
-                     "age-specific rates on this page, so no age weighting is applied."),
-        },
-        "age_focus": None,
-    },
-    "fitness studio": {
-        "osm": ['nwr["leisure"="fitness_centre"]', 'nwr["sport"~"^(fitness|yoga|crossfit|pilates|boxing|martial_arts)$"]["leisure"]'],
-        "facility_word": "gyms and fitness studios",
-        "kit_category": "fitness_recreation",
-        "participation": None,
-        "age_focus": None,
-    },
-    "childcare": {
-        "osm": ['nwr["amenity"~"^(childcare|kindergarten)$"]'],
-        "facility_word": "childcare centres",
-        "kit_category": "childcare",
-        "participation": None,
-        "age_focus": "under_5",
-    },
-}
-# Catalog uses (alternatives.CATALOG) whose demand is not driven by nearby residents.
-NO_NEIGHBORHOOD_MODEL = {
-    "warehouse / storage": "Business-to-business demand (logistics, contractors); residents nearby do not drive it.",
-    "flex workspace": "Business-to-business demand; residents nearby do not drive it.",
-    "office / service": "Demand depends on firms and workers, which ACS residence data does not measure.",
-    "retail / showroom": "Too broad to model as one use; it depends on the specific store type.",
-}
-
-
-def plan(use):
-    """Planner agent: which specialists run for this use, and why (a rule table, not an LLM)."""
-    if use in USES:
-        steps = ["site", "residents", "competitors", "momentum", "lookalike", "coordinator"]
-        why = "Consumer-facing use: residents, local supply, business arrivals and a lookalike check all apply."
-    else:
-        steps = ["site", "coordinator"]
-        why = NO_NEIGHBORHOOD_MODEL.get(use, "No neighborhood model for this use.")
-    return steps, why
-
-
-# --- Trace ---------------------------------------------------------------------
-
-def run_agent(trace, agent, role, fn, inputs):
-    """Run one specialist and record its step: inputs, sources, findings, confidence, hand-off."""
-    started = time.perf_counter()
-    step = {"agent": agent, "role": role, "computed_by": "code", "inputs": inputs,
-            "sources": [], "findings": [], "summary": "", "confidence": None,
-            "handoff": "", "signal": None, "status": "ok"}
-    try:
-        step.update(fn(**inputs) or {})
-    except Offline as error:
-        step.update(status="unknown", summary=f"Offline and not cached: {error}",
-                    handoff="Signal stays unknown; nothing was guessed.")
-    except (RuntimeError, OSError, ValueError, KeyError) as error:
-        step.update(status="error", summary=f"{type(error).__name__}: {error}",
-                    handoff="Signal stays unknown; nothing was guessed.")
-    step["ms"] = round(1000 * (time.perf_counter() - started))
-    trace.append(step)
-    return step
-
-
-def stance(value, *, plus, minus, higher_is_better=True):
-    """+1 / -1 / 0 from a percentile-style value; None stays unknown."""
-    if value is None:
-        return None
-    if not higher_is_better:
-        value = -value
-        plus, minus = -plus, -minus
-    return 1 if value >= plus else -1 if value <= minus else 0
-
-
-# --- Agents --------------------------------------------------------------------
-
-def residents_agent(lat, lon, use, radius=RADIUS_MI):
-    """Who lives here: size, age mix, income and growth around the site vs the Houston area."""
-    profile = area_profile(lat, lon, radius)
-    sources = census_sources(2024) + census_sources(2019)
-    if not profile:
-        return {"sources": sources, "status": "unknown",
-                "summary": "No Census tract point lies inside the radius; residents are unknown.",
-                "findings": [record("residents_population", None, "public:acs", note="No tracts in radius.")]}
-    totals = area_totals()
-    acs_url = sources[1]["url"]
-    note_area = (f"Sum of the {profile['tracts']} Census tracts whose internal point is within {radius:g} miles. "
-                 "Tract edges make the area approximate.")
-    pct = {f: houston_percentile(f, profile.get(f), radius) for f in
-           ("population", "density_per_sqmi", "median_income_approx", "growth",
-            "share_age_25_34", "share_age_35_54", "share_age_55_64", "share_age_65_plus", "share_under_5")}
-    findings = [
-        record("residents_population", profile["population"], "public:acs", "acs-2020-2024-tracts",
-               "2020-2024", 0.9, acs_url, "agrees",
-               note=f"{note_area} Margin of error about ±{profile['population_moe']:,} (90%). "
-                    f"Houston-area percentile of 3-mile areas: {pct['population']}."),
-        record("residents_density_per_sqmi", profile["density_per_sqmi"], "public:acs", "acs-2020-2024-tracts",
-               "2020-2024", 0.85, acs_url, "agrees", note=f"Houston-area percentile: {pct['density_per_sqmi']}."),
-        record("residents_median_income_approx", profile["median_income_approx"], "public:acs",
-               "acs-2020-2024-B19013", "2020-2024", 0.7, acs_url, "agrees",
-               note="Household-weighted mean of tract median household incomes (2024 dollars); an approximation, "
-                    f"since medians do not add. Houston-area percentile: {pct['median_income_approx']}."),
-        record("residents_growth_2019_to_2024", profile["growth"], "public:acs", "acs-2015-2019-vs-2020-2024",
-               "2015-2019 vs 2020-2024", 0.6, acs_url, "agrees" if profile["growth"] is not None else "unknown",
-               note=(f"Population {profile['population_2019']:,.0f} -> {profile['population']:,.0f} using each "
-                     f"vintage's own tracts (2010 vs 2020 boundaries) within the same radius. Houston area overall: "
-                     f"{totals['growth']:+.1%}. Overlapping 5-year samples, so this is a trend, not a yearly rate."
-                     if profile["population_2019"] else "No 2015-2019 tracts in radius.")),
-        record("residents_age_mix", {k[6:]: profile[k] for k in profile if k.startswith("share_")},
-               "public:acs", "acs-2020-2024-B01001", "2020-2024", 0.85, sources[2]["url"], "agrees",
-               note="Shares of residents by age band (ACS sex-by-age table B01001). Houston-area percentiles: "
-                    + ", ".join(f"{k.removeprefix('share_')} {v}" for k, v in pct.items() if k.startswith("share_"))),
-    ]
-    spec = USES.get(use) or {}
-    if spec.get("age_focus") == "under_5":
-        findings.append(record(
-            "residents_under_5", profile["under_5"], "public:acs", "acs-B01001-under-5", "2020-2024", 0.8, acs_url,
-            "agrees", note=f"Children under 5 (ACS B01001) within {radius:g} miles; change since 2015-2019: "
-                           f"{fmt_pct(profile['under_5_growth'])} (Houston area {totals['under_5_growth']:+.1%})."))
-    participation = spec.get("participation")
-    if participation:
-        us_meta, us_6_plus = us_population_6_plus_record()
-        sources.append(source("ACS 2020-2024 national population by age", us_meta))
-        rate = participation["value"] / us_6_plus
-        findings.append(record(
-            "expected_players_at_national_rate", round(profile["population"] * rate), participation["source"],
-            "sfia-2025-topline", "2025", 0.4, participation["url"], "agrees",
-            note=(f"Residents x the national rate ({participation['value'] / 1e6:.1f}M players / "
-                  f"{us_6_plus / 1e6:.0f}M Americans aged 6+ = {rate:.1%}). Assumes this area plays at "
-                  "the national average; local rates are unknown. " + participation["note"])))
-    growth_vs_area = None if profile["growth"] is None else profile["growth"] - totals["growth"]
-    signal_value = profile["under_5_growth"] - totals["under_5_growth"] if (
-        spec.get("age_focus") == "under_5" and profile["under_5_growth"] is not None) else growth_vs_area
-    signal = {"name": "population trend", "stance": stance(signal_value, plus=0.02, minus=-0.02),
-              "value": signal_value,
-              "reason": (f"{'Under-5' if spec.get('age_focus') == 'under_5' else 'Population'} change since 2015-2019 "
-                         f"is {fmt_pct(signal_value, signed=True, points=True)} vs the Houston area"
-                         if signal_value is not None else "Trend unknown")}
-    summary = (f"{profile['population']:,.0f} residents within {radius:g} mi "
-               f"({pct['population']}th pct of Houston-area 3-mile areas), income ≈ ${profile['median_income_approx']:,} "
-               f"({pct['median_income_approx']}th pct), growth {fmt_pct(profile['growth'], signed=True)} since 2015-19 "
-               f"vs {totals['growth']:+.1%} area-wide.") if profile["median_income_approx"] else \
-        f"{profile['population']:,.0f} residents within {radius:g} mi."
-    return {"sources": sources, "findings": findings, "summary": summary, "confidence": 0.8,
-            "profile": profile, "percentiles": pct, "signal": signal,
-            "handoff": "Residents profile and trend to the lookalike agent (features) and coordinator (trend signal)."}
+@lru_cache(maxsize=None)
+def us_population_6_plus_record():
+    """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""
+    query = census_key_params({"get": "B01003_001E,B01001_003E,B01001_027E,B01001_004E,B01001_028E", "for": "us:1"})
+    rows, meta = fetch(ACS.format(year=2024), query)
+    cells = dict(zip(rows[0], rows[1]))
+    total = float(cells["B01003_001E"])
+    under5 = float(cells["B01001_003E"]) + float(cells["B01001_027E"])
+    age5to9 = float(cells["B01001_004E"]) + float(cells["B01001_028E"])
+    # Age 5 is one fifth of the 5-9 band (assumes even ages within the band).
+    return meta, total - under5 - age5to9 / 5
 
 
 # --- OpenStreetMap facilities ----------------------------------------------------
@@ -461,7 +374,7 @@ def residents_agent(lat, lon, use, radius=RADIUS_MI):
 def overpass_query(selectors):
     s, w, n_, e = BBOX
     body = "".join(f"{sel}({s},{w},{n_},{e});" for sel in selectors)
-    return f"[out:json][timeout:120];({body});out center tags;"
+    return f"[out:json][timeout:180];({body});out center tags;"
 
 
 def element_point(element):
@@ -483,12 +396,18 @@ def is_commercial(tags):
 def cluster(points, radius_mi):
     """Merge OSM features into facilities: courts in one park become one facility.
 
-    Two features merge when they are within `radius_mi` and their names do not
-    conflict (same name, or one is unnamed).
+    Features merge when within `radius_mi` and their names do not conflict (same
+    name, or one unnamed). A floor of 0.02 mi merges duplicates of one place (a shop
+    mapped as a point and as a building outline).
     """
-    facilities = []
+    radius_mi = max(radius_mi, 0.02)
+    facilities_out, index = [], {}
     for p in sorted(points, key=lambda p: (p["name"] is None, p["name"] or "")):
-        for f in facilities:
+        cell = (round(p["lat"] / 0.01), round(p["lon"] / 0.01))
+        span = max(1, math.ceil(radius_mi / 0.6))  # 0.01 degree is ~0.6-0.7 miles
+        nearby = [f for i in range(-span, span + 1) for j in range(-span, span + 1)
+                  for f in index.get((cell[0] + i, cell[1] + j), ())]
+        for f in nearby:
             if miles(p["lat"], p["lon"], f["lat"], f["lon"]) <= radius_mi and (
                     p["name"] is None or f["name"] is None or p["name"].casefold() == f["name"].casefold()):
                 f["features"] += 1
@@ -498,17 +417,17 @@ def cluster(points, radius_mi):
                 f["name"] = f["name"] or p["name"]
                 break
         else:
-            facilities.append({**p, "features": 1, "osm_ids": [p["osm_id"]]})
-    return facilities
-
-
-CLUSTER_MI = {"indoor pickleball": 0.15, "fitness studio": 0.03, "childcare": 0.03}
+            f = {**p, "features": 1, "osm_ids": [p["osm_id"]]}
+            facilities_out.append(f)
+            index.setdefault(cell, []).append(f)
+    return facilities_out
 
 
 @lru_cache(maxsize=None)
-def osm_facilities(use):
-    """All facilities for a use across the Houston area, clustered. Returns (facilities, meta)."""
-    query = overpass_query(USES[use]["osm"])
+def facilities(key):
+    """All facilities for an industry across the Houston area. Returns (rows, meta, GridIndex)."""
+    spec = INDUSTRIES[key]
+    query = overpass_query(spec["osm"])
     payload, meta = fetch(OVERPASS, form={"data": query})
     points = []
     for e in payload.get("elements", []):
@@ -518,108 +437,21 @@ def osm_facilities(use):
         tags = e.get("tags") or {}
         points.append({"lat": lat, "lon": lon, "name": tags.get("name"), "osm_id": f"{e['type']}/{e['id']}",
                        "indoor": is_indoor(tags), "commercial": is_commercial(tags)})
-    facilities = cluster(points, CLUSTER_MI.get(use, 0.03))
+    rows = cluster(points, spec["cluster_mi"])
     # Keep facilities inside the Houston area: within 2 miles of a Houston-area tract point.
-    rows, _ = tract_table(2024)
-    facilities = [f for f in facilities if near(rows, f["lat"], f["lon"], 2.0)]
+    tract_idx = tract_index(2024)
+    rows = [f for f in rows if tract_idx.near(f["lat"], f["lon"], 2.0)]
     meta = {**meta, "url": OVERPASS + "?data=" + query}
-    return facilities, tuple(sorted(meta.items()))
+    return rows, meta, GridIndex(rows)
 
 
 def osm_link(osm_id):
     return f"https://www.openstreetmap.org/{osm_id}"
 
 
-def competitors_agent(lat, lon, use, radius=RADIUS_MI):
-    """Who already serves it: facilities near the site and supply per 10k residents vs the Houston area."""
-    facilities, meta = osm_facilities(use)
-    meta = dict(meta)
-    word = USES[use]["facility_word"]
-    sources = [source(f"OpenStreetMap via Overpass ({word})", meta,
-                      "Volunteer-mapped; coverage is incomplete, so absence on the map is not proof of absence.")]
-    local = sorted(near(facilities, lat, lon, radius), key=lambda x: x[0])
-    wider = near(facilities, lat, lon, 5.0)
-    profile = area_profile(lat, lon, radius)
-    totals = area_totals()
-    area_rate = len(facilities) / totals["population"] * 10_000
-    local_rate = len(local) / profile["population"] * 10_000 if profile and profile["population"] else None
-    ratio = local_rate / area_rate if local_rate is not None and area_rate else None
-    nearest = min(((miles(lat, lon, f["lat"], f["lon"]), f) for f in facilities), key=lambda x: x[0], default=None)
-    when = meta["retrieved_at"][:10]
-    findings = [
-        record("competitors_within_radius", len(local), "public:osm", f"overpass-{use}", when, 0.6,
-               meta["url"], "agrees",
-               note=f"{word.capitalize()} within {radius:g} miles ({sum(f['indoor'] for _, f in local)} indoor or in a "
-                    f"building, {sum(f['commercial'] for _, f in local)} fee/customer-only). Courts in one place count "
-                    "as one facility. OpenStreetMap is incomplete."),
-        record("competitors_within_5mi", len(wider), "public:osm", f"overpass-{use}", when, 0.6, meta["url"], "agrees",
-               note="Same count at 5 miles."),
-        record("supply_per_10k_residents", None if local_rate is None else round(local_rate, 2), "computed",
-               "osm-count / acs-population", when, 0.5, meta["url"], "agrees" if local_rate is not None else "unknown",
-               note=f"Houston area: {area_rate:.2f} per 10k ({len(facilities)} facilities / "
-                    f"{totals['population']:,.0f} residents). Ratio here vs area: "
-                    f"{'unknown' if ratio is None else f'{ratio:.2f}x'}."),
-    ]
-    if nearest:
-        d, f = nearest
-        findings.append(record("nearest_competitor", {"name": f["name"] or "(unnamed on the map)",
-                                                      "miles": round(d, 2), "indoor": f["indoor"]},
-                               "public:osm", f["osm_ids"][0], when, 0.6, osm_link(f["osm_ids"][0]), "agrees",
-                               note="Straight-line distance, not drive time."))
-    signal = {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
-              "stance": None if ratio is None else (1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
-              "reason": ("Supply unknown" if ratio is None else
-                         f"{len(local)} {word} within {radius:g} mi"
-                         + (f" ({sum(f['indoor'] or f['commercial'] for _, f in local)} indoor or paid)" if local else "")
-                         + f" = {ratio:.1f}x the Houston-area rate per resident"
-                         + (" (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""))}
-    nearest_text = (f"; nearest {nearest[1]['name'] or 'unnamed'} at {nearest[0]:.1f} mi" if nearest else "")
-    return {"sources": sources, "findings": findings, "signal": signal, "confidence": 0.5,
-            "summary": f"{len(local)} {word} within {radius:g} mi, {len(wider)} within 5 mi{nearest_text}.",
-            "handoff": "Supply ratio to the coordinator; facility locations are the lookalike agent's training data.",
-            "nearby": [{"name": f["name"], "miles": round(d, 2), "indoor": f["indoor"], "commercial": f["commercial"],
-                        "lat": f["lat"], "lon": f["lon"], "url": osm_link(f["osm_ids"][0])} for d, f in local[:15]]}
-
-
 # --- CoStar kit tenancies --------------------------------------------------------
 
-# Business category from the tenant's company name. CoStar's own industry code is too
-# coarse here (gyms sit under Education, Personal Services or Arts & Recreation), so
-# names decide, and the CoStar code is kept next to each tenant for audit.
-CATEGORIES = {
-    "fitness_recreation": re.compile(
-        r"\b(gym|gyms|fitness|crossfit|yoga|pilates|barre|martial arts?|karate|taekwondo|tae kwon do|jiu[- ]?jitsu|"
-        r"boxing|kickboxing|gymnastics?|cheer|dance (studio|academy|center)|pickleball|tennis|golf|climbing|"
-        r"swim(ming)? (school|club|academy)|athletic club|sports (club|academy|center|complex)|orangetheory|"
-        r"curves|f45|cyclebar|soulcycle|bootcamp|personal training|health club|rec(reation)? center)\b", re.I),
-    "childcare": re.compile(
-        r"\b(day ?care|child ?care|childcare|preschool|pre-school|montessori|kindercare|kiddie academy|"
-        r"primrose school|goddard school|la petite|tutor time|learning (center|academy|tree)|early (learning|childhood)|"
-        r"children'?s (center|academy|learning)|kids'? (academy|club|zone|world)|nursery school)\b", re.I),
-    "food": re.compile(
-        r"\b(restaurant|cafe|café|coffee|pizza|taco|tacos|taqueria|burger|grill|kitchen|bakery|bbq|bar-b-q|sushi|"
-        r"donut|doughnut|deli|bistro|cantina|eatery|starbucks|subway|chick-fil-a|mcdonald'?s|wingstop|smoothie|"
-        r"tea house|boba|ice cream|yogurt)\b", re.I),
-    "medical": re.compile(
-        r"\b(md|m\.d\.|dds|dmd|clinic|dental|dentist|medical|physician|physicians|pediatric|urgent care|"
-        r"orthodont|chiropract|physical therapy|dermatology|cardiology|imaging|hospice|health ?care|surgery|"
-        r"surgical|optometr|eye (care|associates)|pharmacy|counseling|therapy)\b", re.I),
-}
-CATEGORY_LABEL = {"fitness_recreation": "fitness & recreation", "childcare": "childcare", "food": "food & drink",
-                  "medical": "medical", "other": "other businesses"}
-# Suppliers and consultants to an industry are not the industry ("Golf Design", "Fitness Wholesalers").
-NOT_A_VENUE = re.compile(r"\b(design|contractors?|wholesal\w*|consult\w*|equipment|suppl(y|ies)|network|"
-                         r"services group|tour|council|apartments)\b", re.I)
 NOT_A_DEPARTURE = {7: "Renewal", 12: "MovingIntoSameBuilding", 14: "OccupancySplit"}
-
-
-def categorize(name):
-    if name and NOT_A_VENUE.search(name):
-        return "other"
-    for category, pattern in CATEGORIES.items():
-        if name and pattern.search(name):
-            return category
-    return "other"
 
 
 def kit_path():
@@ -636,20 +468,23 @@ def day(value):
 
 @lru_cache(maxsize=4)
 def kit_tenancies(kit=None):
-    """Houston tenancies with location, category, arrival and departure dates.
+    """Houston tenancies with location, industries, arrival and departure dates. Returns (rows, GridIndex).
 
     An arrival is the first occupancy of a tenant in a property (renewals and
     expansions are not new arrivals). A departure is an ended occupancy whose
-    reason is not a renewal, a move within the building or a split.
+    reason is not a renewal, a move within the building or a split. Industries
+    come from tenant names (neighborhood_industries.industries_for_tenant).
     """
     from space_fit import kit_lines  # local import: the kit is optional for the rest of the pipeline
     kit = Path(kit) if kit else kit_path()
     if not kit:
         raise ValueError("CoStar kit not found. Set COSTAR_KIT to the unzipped kit folder or the zip.")
-    password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
-    derived = CACHE / f"kit-tenancies-{hashlib.sha1(str(kit.resolve()).encode()).hexdigest()[:8]}.json"
+    rules = hashlib.sha1(json.dumps({k: v["names"] for k, v in INDUSTRIES.items()}).encode()).hexdigest()[:6]
+    derived = CACHE / f"kit-tenancies-{hashlib.sha1(str(kit.resolve()).encode()).hexdigest()[:8]}-{rules}.json"
     if derived.exists():
-        return tuple(json.loads(derived.read_text()))
+        out = json.loads(derived.read_text())
+        return tuple(out), GridIndex(out)
+    password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
     places = {}
     for line in kit_lines(kit, "data/commercial-property.jsonl", password):
         prop = json.loads(line)
@@ -659,12 +494,9 @@ def kit_tenancies(kit=None):
     companies = {}
     for line in kit_lines(kit, "data/company-detail.jsonl", password):
         c = json.loads(line)
-        companies[c["id"]] = (c.get("name"), (c.get("profile") or {}).get("industryType"))
-    rows = []
-    for line in kit_lines(kit, "data/location-occupancy.jsonl", password):
-        r = json.loads(line)
-        if r.get("propertyId") in places:
-            rows.append(r)
+        companies[c["id"]] = c.get("name")
+    rows = [r for r in (json.loads(line) for line in kit_lines(kit, "data/location-occupancy.jsonl", password))
+            if r.get("propertyId") in places]
     first = {}
     for r in rows:
         k = (r.get("tenantLocationId"), r["propertyId"])
@@ -674,89 +506,20 @@ def kit_tenancies(kit=None):
     out = []
     for r in rows:
         tenant = r.get("tenantLocationId")
-        name, industry = companies.get(tenant, (None, None))
+        name = companies.get(tenant)
         start = day(r.get("moveInDate") or r.get("fromDate"))
         end = day(r.get("toDate"))
-        reason = r.get("expirationReason")
         lat, lon = places[r["propertyId"]]
         out.append({
             "id": r["id"], "property_id": r["propertyId"], "lat": lat, "lon": lon, "name": name,
-            "costar_industry": industry, "category": categorize(name) if name else "unknown",
+            "industries": industries_for_tenant(name),
             "arrival": start if tenant and first.get((tenant, r["propertyId"])) == start else None,
-            "departure": end if end and reason not in NOT_A_DEPARTURE else None,
+            "departure": end if end and r.get("expirationReason") not in NOT_A_DEPARTURE else None,
             "sqft": sum((sp.get("squareFeetOccupied") or 0) for sp in r.get("spaces") or []) or None,
         })
     derived.parent.mkdir(parents=True, exist_ok=True)
     derived.write_text(json.dumps(out))
-    return tuple(out)
-
-
-MOMENTUM_RADIUS_MI = 5.0  # wider than the residents radius: the kit is a sample of buildings
-
-
-def momentum_agent(lat, lon, use, radius=MOMENTUM_RADIUS_MI, kit=None, today=None):
-    """What is moving in: arrivals and departures of this kind of business near the site (CoStar kit)."""
-    rows = kit_tenancies(kit)
-    category = USES[use]["kit_category"]
-    label = CATEGORY_LABEL[category]
-    today = today or datetime.now(timezone.utc).date().isoformat()
-    since = f"{int(today[:4]) - 3}{today[4:]}"
-    local = [r for _, r in near(rows, lat, lon, radius)]
-    buildings = len({r["property_id"] for r in local})
-    years = list(range(int(today[:4]) - 7, int(today[:4]) + 1))
-
-    def by_year(items, field):
-        return {y: sum(1 for r in items if r[field] and r[field][:4] == str(y) and r[field] <= today) for y in years}
-
-    mine = [r for r in local if r["category"] == category]
-    arrivals = by_year(mine, "arrival")
-    departures = by_year(mine, "departure")
-    recent_in = [r for r in mine if r["arrival"] and since < r["arrival"] <= today]
-    recent_out = [r for r in mine if r["departure"] and since < r["departure"] <= today]
-    all_in = sum(1 for r in local if r["arrival"] and since < r["arrival"] <= today)
-    all_out = sum(1 for r in local if r["departure"] and since < r["departure"] <= today)
-    houston_in = [r for r in rows if r["arrival"] and since < r["arrival"] <= today]
-    houston_share = sum(r["category"] == category for r in houston_in) / len(houston_in) if houston_in else None
-    local_share = len(recent_in) / all_in if all_in else None
-    net = len(recent_in) - len(recent_out)
-    enough = len(recent_in) + len(recent_out) >= 2
-    source_id = "costar-kit:location-occupancy+company-detail+commercial-property"
-    caveat = ("The kit covers only CoStar's Matterport-scanned properties (about 1,758 in Houston), so this is a "
-              "sample of buildings, not every business. Categories come from tenant names (keyword rules).")
-    findings = [
-        record(f"kit_{category}_arrivals_by_year", arrivals, "costar", source_id, today, 0.5, None, "agrees",
-               note=f"{label.capitalize()} tenants arriving in {buildings} kit buildings within {radius:g} mi. "
-                    "First occupancy of a tenant in a building; renewals excluded. " + caveat),
-        record(f"kit_{category}_departures_by_year", departures, "costar", source_id, today, 0.5, None, "agrees",
-               note="Ended occupancies, excluding renewals, moves within the building and splits."),
-        record(f"kit_{category}_net_last_3_years", net if enough else None, "costar", source_id, today, 0.4, None,
-               "agrees" if enough else "unknown",
-               note=(f"{len(recent_in)} arrived, {len(recent_out)} left since {since}." if enough else
-                     f"Only {len(recent_in) + len(recent_out)} {label} moves since {since} in the sample: too few "
-                     "to call a trend.")),
-        record("kit_all_business_net_last_3_years", all_in - all_out, "costar", source_id, today, 0.5, None, "agrees",
-               note=f"All tenants within {radius:g} mi: {all_in} arrived, {all_out} left since {since}."),
-        record(f"kit_{category}_share_of_arrivals", None if local_share is None else round(local_share, 3), "costar",
-               source_id, today, 0.4, None, "agrees" if local_share is not None else "unknown",
-               note=f"Share of arrivals here that are {label}, vs {fmt_pct(houston_share)} across all Houston kit "
-                    "buildings in the same period."),
-    ]
-    signal = {"name": "business arrivals", "value": net if enough else None,
-              "stance": None if not enough else (1 if net > 0 else -1 if net < 0 else 0),
-              "reason": (f"{len(recent_in)} {label} businesses moved into nearby CoStar buildings since {since[:4]}, "
-                         f"{len(recent_out)} left" if enough else
-                         f"Too few {label} moves in the CoStar sample nearby to call a trend")}
-    examples = sorted(recent_in, key=lambda r: r["arrival"], reverse=True)[:6]
-    return {"sources": [{"name": "CoStar hackathon kit: tenancies, companies, properties", "url": None,
-                         "retrieved_at": None, "cached": True, "note": caveat}],
-            "findings": findings, "signal": signal, "confidence": 0.4,
-            "summary": (f"{len(local)} tenancies in {buildings} kit buildings within {radius:g} mi. {label.capitalize()}: "
-                        f"{len(recent_in)} arrived, {len(recent_out)} left since {since[:4]}; all businesses: "
-                        f"{all_in} arrived, {all_out} left."),
-            "handoff": "Category momentum to the coordinator (counts only with 2+ moves). All-business moves are "
-                       "context, not a vote: they are not specific to this use.",
-            "examples": [{"name": r["name"], "arrived": r["arrival"], "sqft": r["sqft"],
-                          "costar_property_id": r["property_id"]} for r in examples]}
+    return tuple(out), GridIndex(out)
 
 
 # --- Lookalike model ---------------------------------------------------------------
@@ -764,6 +527,7 @@ def momentum_agent(lat, lon, use, radius=MOMENTUM_RADIUS_MI, kit=None, today=Non
 FEATURES = {  # name -> (label, function of a 3-mile area profile)
     "log_density": ("residents per sq mi (log)", lambda p: math.log1p(p["density_per_sqmi"] or 0)),
     "log_income": ("median household income (log, approx.)", lambda p: math.log(max(p["median_income_approx"], 1))),
+    "share_renters": ("share of homes rented", lambda p: p["share_renters"] or 0.0),
     "share_25_34": ("share aged 25-34", lambda p: p["share_age_25_34"]),
     "share_35_54": ("share aged 35-54", lambda p: p["share_age_35_54"]),
     "share_55_plus": ("share aged 55+", lambda p: p["share_age_55_64"] + p["share_age_65_plus"]),
@@ -806,16 +570,28 @@ def fit_logistic(x, y, l2=1.0, iterations=25):
     z = [[1.0] + [(r[j] - mean[j]) / sd[j] for j in range(k)] for r in x]
     w = [0.0] * (k + 1)
     for _ in range(iterations):
-        p = [sigmoid(sum(a * b for a, b in zip(w, row))) for row in z]
-        grad = [sum((yi - pi) * row[j] for row, yi, pi in zip(z, y, p)) - (l2 * w[j] if j else 0)
-                for j in range(k + 1)]
-        hess = [[sum(pi * (1 - pi) * row[i] * row[j] for row, pi in zip(z, p)) + (l2 if i == j and i else 0)
-                 for j in range(k + 1)] for i in range(k + 1)]
+        grad = [0.0] * (k + 1)
+        hess = [[0.0] * (k + 1) for _ in range(k + 1)]
+        for row, yi in zip(z, y):
+            pi = sigmoid(sum(a * b for a, b in zip(w, row)))
+            err, curv = yi - pi, pi * (1 - pi)
+            for i in range(k + 1):
+                grad[i] += err * row[i]
+                ci = curv * row[i]
+                hrow = hess[i]
+                for j in range(i, k + 1):
+                    hrow[j] += ci * row[j]
+        for i in range(k + 1):
+            for j in range(i):
+                hess[i][j] = hess[j][i]
+            if i:
+                grad[i] -= l2 * w[i]
+                hess[i][i] += l2
         step = solve(hess, grad)
         w = [a + b for a, b in zip(w, step)]
         if max(abs(v) for v in step) < 1e-6:
             break
-    return {"mean": mean, "sd": sd, "weights": w, "features": list(FEATURES)}
+    return {"mean": mean, "sd": sd, "weights": w, "features": list(FEATURES) if k == len(FEATURES) else None}
 
 
 def model_logit(model, row):
@@ -839,28 +615,25 @@ def auc(positives, negatives):
         j = i
         while j < len(ranked) and ranked[j][0] == ranked[i][0]:
             j += 1
-        average_rank = (i + j + 1) / 2
-        rank_sum += average_rank * sum(label for _, label in ranked[i:j])
+        rank_sum += (i + j + 1) / 2 * sum(label for _, label in ranked[i:j])
         i = j
     n_pos, n_neg = len(positives), len(negatives)
     return (rank_sum - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
 
 
-def training_data(use, radius=RADIUS_MI):
-    """Positives: real facilities (OSM). Background: every Houston-area tract point (random places)."""
-    facilities, _ = osm_facilities(use)
+def training_data(key, radius=RADIUS_MI, cap=MAX_TRAINING_POSITIVES, seed=7):
+    """Positives: real facilities (OSM), subsampled to `cap`. Background: every Houston-area tract point."""
+    rows, _, _ = facilities(key)
+    sample = random.Random(seed).sample(list(rows), cap) if len(rows) > cap else list(rows)
     pos = []
-    for f in facilities:
-        row = features(area_profile(f["lat"], f["lon"], radius))
+    for f in sample:
+        row = features(area_profile(round(f["lat"], 5), round(f["lon"], 5), radius))
         if row:
-            pos.append({"lat": f["lat"], "lon": f["lon"], "x": row, "name": f["name"],
-                        "indoor": f["indoor"], "commercial": f["commercial"]})
-    background = []
-    for p in reference_profiles(radius):
-        row = features(p)
-        if row:
-            background.append({"lat": p["lat"], "lon": p["lon"], "x": row})
-    return pos, background
+            pos.append({"lat": f["lat"], "lon": f["lon"], "x": row, "positive": True,
+                        "flag": bool(f["indoor"] or f["commercial"])})
+    background = [{"lat": p["lat"], "lon": p["lon"], "x": features(p), "positive": False}
+                  for p in reference_profiles(radius) if features(p)]
+    return pos, background, len(rows)
 
 
 def spatial_fold(lat, lon, folds, cell=0.2):
@@ -869,143 +642,497 @@ def spatial_fold(lat, lon, folds, cell=0.2):
     return int(hashlib.sha1(key.encode()).hexdigest(), 16) % folds
 
 
-def cross_validate(pos, background, cols, folds, assign):
+def cross_validate(pos, background, cols, folds, fold_of):
     """Fit on all folds but one, score the held-out fold; pooled over folds."""
-    for r in pos + background:
-        r["fold"] = assign(r)
     held_pos, held_neg = [], []
     for k in range(folds):
-        train_pos = [r for r in pos if r["fold"] != k]
-        train_neg = [r for r in background if r["fold"] != k]
-        test_pos = [r for r in pos if r["fold"] == k]
-        test_neg = [r for r in background if r["fold"] == k]
-        if not train_pos or not test_neg:
+        train = [r for r in pos + background if fold_of(r) != k]
+        test_pos = [r for r in pos if fold_of(r) == k]
+        test_neg = [r for r in background if fold_of(r) == k]
+        if not any(r["positive"] for r in train) or not test_neg:
             continue
-        model = fit_logistic([[r["x"][c] for c in cols] for r in train_pos + train_neg],
-                             [1] * len(train_pos) + [0] * len(train_neg))
+        model = fit_logistic([[r["x"][c] for c in cols] for r in train], [1 if r["positive"] else 0 for r in train])
         neg_scores = [model_logit(model, [r["x"][c] for c in cols]) for r in test_neg]
         held_neg.extend(neg_scores)
         for r in test_pos:
-            held_pos.append((model_logit(model, [r["x"][c] for c in cols]), neg_scores, r["indoor"] or r["commercial"]))
+            held_pos.append((model_logit(model, [r["x"][c] for c in cols]), neg_scores, r.get("flag", False)))
     return held_pos, held_neg
 
 
-def evaluate(use, folds=5, seed=7, radius=RADIUS_MI):
+def evaluate(key, folds=5, seed=7, radius=RADIUS_MI):
     """Hold out real facilities and check they score above random Houston-area places.
 
-    Positives are mapped facilities; the background is every Houston-area tract point
-    (one per ~4,500 residents, so roughly a random residential address). Two splits:
-    random by place, and spatial by 0.2-degree grid cell (~13 miles) so a held-out
-    facility's neighbours are not in training. The 7-feature model was fixed before
-    evaluation; one-feature baselines (income only, density only) go through the same
-    cross-validation. Reports AUC with a bootstrap interval and the hit rate: the share
-    of held-out facilities scoring in the top 30% of their fold's background places.
+    Positives are mapped facilities (up to 600, sampled with a fixed seed); the
+    background is every Houston-area tract point (one per ~4,500 residents, roughly
+    a random residential address). Two splits: random by place, and spatial by
+    0.2-degree grid cell (~13 miles) so a held-out facility's neighbours are not in
+    training. Controls on the spatial split: income alone, density alone, and the
+    full model with facility labels shuffled (should give ~0.5; checks for leakage).
+    Reports AUC with a bootstrap interval and the hit rate: the share of held-out
+    facilities scoring in the top 30% of their fold's background places.
     """
-    pos, background = training_data(use, radius)
+    started = time.perf_counter()
+    pos, background, total = training_data(key, radius, seed=seed)
+    out = {"industry": key, "label": INDUSTRIES[key]["label"], "facilities_mapped": total,
+           "facilities_used": len(pos), "background_places": len(background), "radius_mi": radius,
+           "features": {k: v[0] for k, v in FEATURES.items()}, "splits": {}, "status": "ok", "validated": False}
+    if total < MIN_FACILITIES:
+        out.update(status="too_few", note=f"Only {total} mapped facilities in OpenStreetMap; at least "
+                                          f"{MIN_FACILITIES} are needed to train and test a lookalike model.")
+        out["evaluated_at"] = now_iso()
+        return out
     rng = random.Random(seed)
     names = list(FEATURES)
     all_cols = list(range(len(names)))
-    out = {"use": use, "facilities": len(pos), "background_places": len(background), "radius_mi": radius,
-           "features": {k: v[0] for k, v in FEATURES.items()}, "splits": {}}
     for split in ("random", "spatial"):
-        fold_of = {}
-
-        def assign(r, split=split):
-            key = (r["lat"], r["lon"])
-            if key not in fold_of:
-                fold_of[key] = rng.randrange(folds) if split == "random" else spatial_fold(r["lat"], r["lon"], folds)
-            return fold_of[key]
-        held_pos, held_neg = cross_validate(pos, background, all_cols, folds, assign)
-        pos_scores = [s for s, _, _ in held_pos]
-        paid = [s for s, _, flag in held_pos if flag]
+        folds_of = {}
+        for r in pos + background:
+            folds_of[id(r)] = rng.randrange(folds) if split == "random" else spatial_fold(r["lat"], r["lon"], folds)
+        fold_of = lambda r: folds_of[id(r)]  # noqa: E731
+        held_pos, held_neg = cross_validate(pos, background, all_cols, folds, fold_of)
+        scores = [s for s, _, _ in held_pos]
+        flagged = [s for s, _, flag in held_pos if flag]
         hits = [percentile(s, negs) >= 70 for s, negs, _ in held_pos if negs]
-        boot = sorted(auc([rng.choice(pos_scores) for _ in pos_scores], [rng.choice(held_neg) for _ in held_neg])
-                      for _ in range(300))
-        baselines = {}
-        for label, name in (("income_only", "log_income"), ("density_only", "log_density")):
-            bp, bn = cross_validate(pos, background, [names.index(name)], folds, assign)
-            baselines[label] = round(auc([s for s, _, _ in bp], bn), 3)
-        out["splits"][split] = {
-            "auc": round(auc(pos_scores, held_neg), 3),
-            "auc_90ci": [round(boot[15], 3), round(boot[284], 3)],
+        boot = sorted(auc([rng.choice(scores) for _ in scores], [rng.choice(held_neg) for _ in held_neg])
+                      for _ in range(200))
+        result = {
+            "auc": round(auc(scores, held_neg), 3), "auc_90ci": [round(boot[10], 3), round(boot[189], 3)],
             "hit_rate_top30": round(sum(hits) / len(hits), 3) if hits else None, "hit_rate_by_chance": 0.3,
-            "indoor_or_paid_facilities": len(paid),
-            "indoor_or_paid_auc": round(auc(paid, held_neg), 3) if paid else None,
-            "baseline_auc": baselines,
-            "held_out_facilities": len(pos_scores), "held_out_background": len(held_neg),
+            "indoor_or_paid_facilities": len(flagged),
+            "indoor_or_paid_auc": round(auc(flagged, held_neg), 3) if len(flagged) >= 10 else None,
+            "held_out_facilities": len(scores), "held_out_background": len(held_neg),
         }
+        if split == "spatial":
+            baselines = {}
+            for label, name in (("income_only", "log_income"), ("density_only", "log_density")):
+                bp, bn = cross_validate(pos, background, [names.index(name)], folds, fold_of)
+                baselines[label] = round(auc([s for s, _, _ in bp], bn), 3)
+            shuffled = [dict(r) for r in pos + background]
+            labels = [r["positive"] for r in shuffled]
+            random.Random(seed + 1).shuffle(labels)
+            for r, label in zip(shuffled, labels):
+                r["positive"] = label
+            spatial_of = lambda r: spatial_fold(r["lat"], r["lon"], folds)  # noqa: E731
+            cp, cn = cross_validate([r for r in shuffled if r["positive"]], [r for r in shuffled if not r["positive"]],
+                                    all_cols, folds, spatial_of)
+            baselines["shuffled_labels"] = round(auc([s for s, _, _ in cp], cn), 3)
+            result["baseline_auc"] = baselines
+        out["splits"][split] = result
     model = fit_logistic([r["x"] for r in pos + background], [1] * len(pos) + [0] * len(background))
     out["model"] = model
-    out["coefficients"] = {k: round(w, 3) for k, w in zip(model["features"], model["weights"][1:])}
+    out["coefficients"] = {k: round(w, 3) for k, w in zip(names, model["weights"][1:])}
     out["background_logits"] = sorted(round(model_logit(model, r["x"]), 4) for r in background)
+    spatial = out["splits"]["spatial"]["auc"]
+    out["validated"] = spatial is not None and spatial >= VALIDATED_AUC
     out["caveats"] = [
-        "Facilities come from OpenStreetMap, which is incomplete and skews to mapped parks and clubs.",
+        "Facilities come from OpenStreetMap, which is incomplete and uneven by category.",
         "Measures resemblance to where facilities already are, not paid demand or profitability.",
-        "Bootstrap interval resamples places independently and ignores spatial correlation, so it is too narrow.",
+        "Resident features only: workers, visitors and traffic (which drive restaurants and cafes) are not measured.",
+        "The bootstrap interval resamples places independently and ignores spatial correlation, so it is too narrow.",
     ]
     out["evaluated_at"] = now_iso()
+    out["seconds"] = round(time.perf_counter() - started, 1)
     return out
 
 
-def evaluation_path(use):
-    return CACHE / f"lookalike-eval-{re.sub(r'[^a-z]+', '-', use)}.json"
+def evaluation_path(key):
+    return CACHE / f"lookalike-v2-{key}.json"
 
 
 @lru_cache(maxsize=None)
-def lookalike_model(use):
-    path = evaluation_path(use)
+def lookalike_model(key):
+    """The evaluated model for an industry, from the cache (built on first use if missing)."""
+    path = evaluation_path(key)
     if path.exists():
         return json.loads(path.read_text())
-    result = evaluate(use)
+    if offline():
+        raise Offline(f"No prepared lookalike model for {key}; run --prepare online first.")
+    result = evaluate(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result))
     return result
 
 
-VALIDATED_AUC = 0.6  # below this on the spatial hold-out, the score is shown but does not vote
+def _evaluate_and_save(key):
+    """Worker for --prepare (separate process: the fit is CPU-bound pure Python)."""
+    result = evaluate(key)
+    evaluation_path(key).parent.mkdir(parents=True, exist_ok=True)
+    evaluation_path(key).write_text(json.dumps(result))
+    return key, summarize_eval(result)
 
 
-def lookalike_agent(lat, lon, use, radius=RADIUS_MI):
-    """Does this place look like places where the business already operates? Measured, not asserted."""
-    ev = lookalike_model(use)
-    word = USES[use]["facility_word"]
-    row = features(area_profile(lat, lon, radius))
-    spatial = ev["splits"]["spatial"]
-    validated = spatial["auc"] is not None and spatial["auc"] >= VALIDATED_AUC
-    method = (f"Logistic model on 7 resident features within {radius:g} mi, trained on {ev['facilities']} mapped "
-              f"{word} vs {ev['background_places']} Houston-area tract points. Held out by area (13-mile grid "
-              f"cells): AUC {spatial['auc']} (90% CI {spatial['auc_90ci'][0]}-{spatial['auc_90ci'][1]}); "
-              f"{fmt_pct(spatial['hit_rate_top30'])} of held-out facilities score in the top 30% (30% by chance). "
-              f"Same CV with income alone: AUC {spatial['baseline_auc']['income_only']}; density alone: "
-              f"{spatial['baseline_auc']['density_only']}.")
-    sources = [{"name": "Lookalike evaluation (computed here)", "url": None, "retrieved_at": ev["evaluated_at"],
-                "cached": True, "note": method}]
-    if not row:
-        return {"sources": sources, "status": "unknown", "summary": "No resident profile; lookalike unknown.",
-                "findings": [record("lookalike_percentile", None, "computed", "lookalike", note=method)]}
-    logit = model_logit(ev["model"], row)
-    pct = percentile(logit, ev["background_logits"])
-    push = contributions(ev["model"], row)
-    top = sorted(push.items(), key=lambda kv: -abs(kv[1]))[:3]
-    why = ", ".join(f"{FEATURES[k][0]} {'raises' if v > 0 else 'lowers'} it" for k, v in top)
+def prepare(keys, kit=None, fetch_workers=2, eval_workers=4, log=print):
+    """Build every cached artifact the requests need. Overpass allows ~2 parallel slots per client."""
+    started = time.perf_counter()
+    reference_profiles()
+    us_population_6_plus_record()
+    log(f"census tables + reference profiles: {time.perf_counter() - started:.1f}s")
+    try:
+        t = time.perf_counter()
+        rows, _ = kit_tenancies(kit)
+        log(f"kit tenancies: {len(rows)} rows, {time.perf_counter() - t:.1f}s")
+    except (OSError, ValueError, RuntimeError) as error:
+        log(f"kit tenancies unavailable: {error}")
+
+    def get(key):
+        t = time.perf_counter()
+        try:
+            rows, _, _ = facilities(key)
+            return key, len(rows), round(time.perf_counter() - t, 1), None
+        except (RuntimeError, OSError, ValueError) as error:
+            return key, 0, round(time.perf_counter() - t, 1), str(error)
+    with ThreadPoolExecutor(fetch_workers) as pool:
+        fetched = list(pool.map(get, keys))
+    for key, count, seconds, error in fetched:
+        log(f"osm {key}: {count} facilities, {seconds}s" + (f" ERROR {error}" if error else ""))
+    todo = [k for k, _, _, error in fetched if not error and not evaluation_path(k).exists()]
+    summaries = {}
+    with ProcessPoolExecutor(eval_workers) as pool:
+        for key, summary in pool.map(_evaluate_and_save, todo):
+            summaries[key] = summary
+            spatial = summary.get("splits", {}).get("spatial", {})
+            log(f"eval {key}: {summary['status']} AUC {spatial.get('auc')} ({summary.get('seconds')}s)")
+    log(f"prepare done in {time.perf_counter() - started:.1f}s")
+    return summaries
+
+
+def summarize_eval(ev):
+    return {k: v for k, v in ev.items() if k not in ("model", "background_logits")}
+
+
+# --- Trace and signals ---------------------------------------------------------
+
+def run_agent(trace, agent, role, fn, inputs):
+    """Run one specialist and record its step: inputs, sources, findings, confidence, hand-off."""
+    started = time.perf_counter()
+    step = {"agent": agent, "role": role, "computed_by": "code", "inputs": inputs,
+            "sources": [], "findings": [], "summary": "", "confidence": None,
+            "handoff": "", "signal": None, "per_industry": {}, "status": "ok"}
+    try:
+        step.update(fn(**inputs) or {})
+    except Offline as error:
+        step.update(status="unknown", summary=f"Offline and not cached: {error}",
+                    handoff="Signal stays unknown; nothing was guessed.")
+    except (RuntimeError, OSError, ValueError, KeyError) as error:
+        step.update(status="error", summary=f"{type(error).__name__}: {error}",
+                    handoff="Signal stays unknown; nothing was guessed.")
+    step["ms"] = round(1000 * (time.perf_counter() - started))
+    trace.append(step)
+    return step
+
+
+def stance(value, *, plus, minus):
+    """+1 at or above `plus`, -1 at or below `minus`, else 0; None stays unknown."""
+    if value is None:
+        return None
+    return 1 if value >= plus else -1 if value <= minus else 0
+
+
+def per_industry(industries, fn):
+    """Run fn(key) for each industry; one industry failing does not stop the others."""
+    out = {}
+    for key in industries:
+        try:
+            out[key] = fn(key)
+        except Offline as error:
+            out[key] = {"status": "unknown", "summary": f"Offline and not cached: {error}", "findings": [],
+                        "signal": None}
+        except (RuntimeError, OSError, ValueError, KeyError) as error:
+            out[key] = {"status": "error", "summary": f"{type(error).__name__}: {error}", "findings": [],
+                        "signal": None}
+    return out
+
+
+def flatten(results):
+    return [r for v in results.values() for r in v.get("findings", [])]
+
+
+def one_or_many(industries, results, many):
+    return results[industries[0]].get("summary", "") if len(industries) == 1 else many
+
+
+# --- Agents --------------------------------------------------------------------
+
+def residents_agent(lat, lon, industries, radius=RADIUS_MI):
+    """Who lives here: size, age mix, income, tenure and growth around the site vs the Houston area."""
+    profile = area_profile(round(lat, 5), round(lon, 5), radius)
+    sources = census_sources(2024) + census_sources(2019)
+    if not profile:
+        return {"sources": sources, "status": "unknown",
+                "summary": "No Census tract point lies inside the radius; residents are unknown.",
+                "findings": [record("residents_population", None, "public:acs", note="No tracts in radius.")]}
+    totals = area_totals()
+    acs_url, age_url = sources[1]["url"], sources[2]["url"]
+    note_area = (f"Sum of the {profile['tracts']} Census tracts whose internal point is within {radius:g} miles. "
+                 "Tract edges make the area approximate.")
+    pct = {f: houston_percentile(f, profile.get(f), radius) for f in
+           ("population", "density_per_sqmi", "median_income_approx", "growth", "share_renters",
+            "share_age_25_34", "share_age_35_54", "share_age_55_64", "share_age_65_plus", "share_under_5")}
     findings = [
-        record("lookalike_percentile", pct, "computed", f"lookalike-{use}", ev["evaluated_at"][:10],
-               0.7 if validated else 0.3, None, "agrees" if validated else "unknown",
-               note=f"Looks more like places with {word} than {pct}% of Houston-area neighborhoods. Biggest "
-                    f"drivers here: {why}. {method}"),
-        record("lookalike_drivers", push, "computed", f"lookalike-{use}", ev["evaluated_at"][:10], 0.6, None,
-               "agrees", note="Standardised feature x model weight; positive pushes toward 'looks like existing "
-                              "facilities'. Correlation with where facilities are, not proof of demand."),
+        record("residents_population", profile["population"], "public:acs", "acs-2020-2024-tracts",
+               "2020-2024", 0.9, acs_url, "agrees",
+               note=f"{note_area} Margin of error about ±{profile['population_moe']:,} (90%). "
+                    f"Houston-area percentile of 3-mile areas: {pct['population']}."),
+        record("residents_density_per_sqmi", profile["density_per_sqmi"], "public:acs", "acs-2020-2024-tracts",
+               "2020-2024", 0.85, acs_url, "agrees", note=f"Houston-area percentile: {pct['density_per_sqmi']}."),
+        record("residents_median_income_approx", profile["median_income_approx"], "public:acs",
+               "acs-2020-2024-B19013", "2020-2024", 0.7, acs_url, "agrees",
+               note="Household-weighted mean of tract median household incomes (2024 dollars); an approximation, "
+                    f"since medians do not add. Houston-area percentile: {pct['median_income_approx']}."),
+        record("residents_share_renters", profile["share_renters"], "public:acs", "acs-2020-2024-B25003",
+               "2020-2024", 0.85, acs_url, "agrees",
+               note=f"Renter-occupied share of occupied homes. Houston-area percentile: {pct['share_renters']}."),
+        record("residents_growth_2019_to_2024", profile["growth"], "public:acs", "acs-2015-2019-vs-2020-2024",
+               "2015-2019 vs 2020-2024", 0.6, acs_url, "agrees" if profile["growth"] is not None else "unknown",
+               note=(f"Population {profile['population_2019']:,.0f} -> {profile['population']:,.0f} using each "
+                     f"vintage's own tracts (2010 vs 2020 boundaries) within the same radius. Houston area overall: "
+                     f"{totals['growth']:+.1%}. Overlapping 5-year samples, so this is a trend, not a yearly rate."
+                     if profile["population_2019"] else "No 2015-2019 tracts in radius.")),
+        record("residents_age_mix", {k[6:]: profile[k] for k in profile
+                                     if k.startswith("share_age") or k == "share_under_5"},
+               "public:acs", "acs-2020-2024-B01001", "2020-2024", 0.85, age_url, "agrees",
+               note="Shares of residents by age band (ACS sex-by-age table B01001). Houston-area percentiles: "
+                    + ", ".join(f"{k.removeprefix('share_')} {v}" for k, v in pct.items()
+                                if k.startswith("share_age") or k == "share_under_5")),
     ]
-    signal = {"name": "lookalike", "value": pct, "validated": validated,
-              "stance": stance(pct, plus=70, minus=30) if validated else None,
-              "reason": (f"Looks more like places that already have {word} than {pct}% of Houston-area "
-                         f"neighborhoods" + ("" if validated else " (model not validated; not used in the verdict)"))}
-    return {"sources": sources, "findings": findings, "signal": signal, "confidence": 0.7 if validated else 0.3,
-            "summary": f"Lookalike score {pct}/100 vs Houston-area neighborhoods. {why}.",
-            "evaluation": {k: v for k, v in ev.items() if k not in ("model", "background_logits")},
-            "handoff": "Lookalike percentile to the coordinator (votes only if the held-out AUC clears "
-                       f"{VALIDATED_AUC})."}
+
+    def one(key):
+        spec = INDUSTRIES[key]
+        band = spec["demand_band"]
+        local = profile["growth"] if band is None else profile.get(f"{band}_growth")
+        area = totals["growth"] if band is None else totals[f"{band}_growth"]
+        value = None if local is None else round(local - area, 4)
+        out_findings = []
+        if band:
+            out_findings.append(record(
+                f"{key}.residents_{band}", profile[band], "public:acs", f"acs-B01001-{band}", "2020-2024", 0.8,
+                age_url, "agrees", note=f"{BAND_LABEL[band]} residents within {radius:g} miles; change since "
+                                        f"2015-2019: {fmt_pct(local)} (Houston area {area:+.1%})."))
+        part = spec["participation"]
+        if part:
+            us_meta, us_6_plus = us_population_6_plus_record()
+            if not any(s["name"].startswith("ACS 2020-2024 national") for s in sources):
+                sources.append(source("ACS 2020-2024 national population by age", us_meta))
+            rate = part["value"] / us_6_plus
+            out_findings.append(record(
+                f"{key}.expected_participants_at_national_rate", round(profile["population"] * rate), part["source"],
+                f"{part['source']}-{part['year']}", str(part["year"]), 0.4, part["url"], "agrees",
+                note=(f"Residents x the national rate ({part['value'] / 1e6:.1f}M / {us_6_plus / 1e6:.0f}M Americans "
+                      f"aged 6+ = {rate:.1%}). Assumes this area matches the national average; local rates are "
+                      "unknown. " + part["note"])))
+        return {"findings": out_findings,
+                "signal": {"name": "population trend", "value": value, "stance": stance(value, plus=0.02, minus=-0.02),
+                           "reason": (f"{BAND_LABEL[band]} change since 2015-19 is "
+                                      f"{fmt_pct(value, points=True)} vs the Houston area" if value is not None
+                                      else "Trend unknown")},
+                "summary": f"{BAND_LABEL[band]} trend {fmt_pct(value, points=True)} vs area"}
+    results = per_industry(industries, one)
+    summary = (f"{profile['population']:,.0f} residents within {radius:g} mi "
+               f"({pct['population']}th pct of Houston-area 3-mile areas), income ≈ "
+               f"${profile['median_income_approx'] or 0:,} ({pct['median_income_approx']}th pct), "
+               f"{fmt_pct(profile['share_renters'])} renters, growth {fmt_pct(profile['growth'], signed=True)} "
+               f"since 2015-19 vs {totals['growth']:+.1%} area-wide.")
+    return {"sources": sources, "findings": findings + flatten(results), "summary": summary, "confidence": 0.8,
+            "profile": profile, "percentiles": pct, "per_industry": results,
+            "handoff": "Profile to the lookalike agent (features); trend per industry to the coordinator."}
+
+
+def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
+    """Who already serves it: facilities near the site and supply per 10k residents vs the Houston area."""
+    profile = area_profile(round(lat, 5), round(lon, 5), radius)
+    totals = area_totals()
+    sources = []
+
+    def one(key):
+        rows, meta, index = facilities(key)
+        word = INDUSTRIES[key]["places"]
+        sources.append(source(f"OpenStreetMap via Overpass ({word})", meta,
+                              "Volunteer-mapped; absence on the map is not proof of absence."))
+        local = sorted(index.near(lat, lon, radius), key=lambda x: x[0])
+        wider = index.near(lat, lon, 5.0)
+        area_rate = len(rows) / totals["population"] * 10_000
+        local_rate = len(local) / profile["population"] * 10_000 if profile and profile["population"] else None
+        ratio = local_rate / area_rate if local_rate is not None and area_rate else None
+        nearest = min(index.near(lat, lon, 25.0), key=lambda x: x[0], default=None)
+        when = (meta.get("retrieved_at") or "")[:10]
+        paid = sum(f["indoor"] or f["commercial"] for _, f in local)
+        findings = [
+            record(f"{key}.competitors_within_radius", len(local), "public:osm", f"overpass-{key}", when, 0.6,
+                   meta["url"], "agrees",
+                   note=f"Mapped {word} within {radius:g} miles ({paid} indoor or paid). Features in one place "
+                        "count as one facility. OpenStreetMap is incomplete."),
+            record(f"{key}.competitors_within_5mi", len(wider), "public:osm", f"overpass-{key}", when, 0.6,
+                   meta["url"], "agrees", note="Same count at 5 miles."),
+            record(f"{key}.supply_per_10k_residents", None if local_rate is None else round(local_rate, 2),
+                   "computed", "osm-count / acs-population", when, 0.5, meta["url"],
+                   "agrees" if local_rate is not None else "unknown",
+                   note=f"Houston area: {area_rate:.2f} per 10k ({len(rows)} facilities / "
+                        f"{totals['population']:,.0f} residents). Ratio here vs area: "
+                        f"{'unknown' if ratio is None else f'{ratio:.2f}x'}."),
+        ]
+        if nearest:
+            d, f = nearest
+            findings.append(record(f"{key}.nearest_competitor", {"name": f["name"] or "(unnamed on the map)",
+                                                                 "miles": round(d, 2)},
+                                   "public:osm", f["osm_ids"][0], when, 0.6, osm_link(f["osm_ids"][0]), "agrees",
+                                   note="Straight-line distance, not drive time."))
+        votes = INDUSTRIES[key]["supply_votes"]
+        tag = "" if ratio is None else " (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""
+        return {"findings": findings,
+                "signal": {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
+                           "stance": None if ratio is None else (
+                               0 if not votes else 1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
+                           "reason": ("Supply unknown" if ratio is None else
+                                      f"{len(local)} {word} mapped within {radius:g} mi"
+                                      + (f" ({paid} indoor or paid)" if local else "")
+                                      + f" = {ratio:.1f}x the Houston-area rate per resident{tag}"
+                                      + ("" if votes else "; these businesses cluster on purpose, so supply "
+                                                          "does not vote"))},
+                "summary": f"{len(local)} within {radius:g} mi, {len(wider)} within 5 mi"
+                           + (f"; nearest {nearest[1]['name'] or 'unnamed'} at {nearest[0]:.1f} mi" if nearest else ""),
+                "nearby": [{"name": f["name"], "miles": round(d, 2), "indoor": f["indoor"],
+                            "commercial": f["commercial"], "url": osm_link(f["osm_ids"][0])} for d, f in local[:10]]}
+    results = per_industry(industries, one)
+    known = [k for k, v in results.items() if v.get("signal")]
+    crowded = [INDUSTRIES[k]["label"] for k in known if results[k]["signal"]["stance"] == -1]
+    under = [INDUSTRIES[k]["label"] for k in known if results[k]["signal"]["stance"] == 1]
+    return {"sources": sources, "findings": flatten(results), "per_industry": results, "confidence": 0.5,
+            "summary": one_or_many(industries, results,
+                                   f"Checked {len(known)}/{len(industries)} industries. Underserved: "
+                                   f"{', '.join(under) or 'none'}. Crowded: {', '.join(crowded) or 'none'}."),
+            "handoff": "Supply ratio per industry to the coordinator; facility locations train the lookalike agent."}
+
+
+def momentum_agent(lat, lon, industries, radius=MOMENTUM_RADIUS_MI, kit=None, today=None):
+    """What is moving in: arrivals and departures of each kind of business near the site (CoStar kit)."""
+    _, index = kit_tenancies(kit)
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    since = f"{int(today[:4]) - 3}{today[4:]}"
+    local = [r for _, r in index.near(lat, lon, radius)]
+    buildings = len({r["property_id"] for r in local})
+    years = list(range(int(today[:4]) - 7, int(today[:4]) + 1))
+    all_in = sum(1 for r in local if r["arrival"] and since < r["arrival"] <= today)
+    all_out = sum(1 for r in local if r["departure"] and since < r["departure"] <= today)
+    source_id = "costar-kit:location-occupancy+company-detail+commercial-property"
+    caveat = ("The kit covers only CoStar's Matterport-scanned properties (about 1,758 in Houston), so this is a "
+              "sample of buildings, not every business. Industries come from tenant names (keyword rules).")
+
+    def by_year(items, field):
+        return {y: sum(1 for r in items if r[field] and r[field][:4] == str(y) and r[field] <= today) for y in years}
+
+    def moves(keys):
+        mine = [r for r in local if any(k in r["industries"] for k in keys)]
+        recent_in = [r for r in mine if r["arrival"] and since < r["arrival"] <= today]
+        recent_out = [r for r in mine if r["departure"] and since < r["departure"] <= today]
+        return mine, recent_in, recent_out
+
+    def one(key):
+        label = INDUSTRIES[key]["label"].lower()
+        group = INDUSTRIES[key]["group"]
+        mine, recent_in, recent_out = moves([key])
+        scope = label
+        if len(recent_in) + len(recent_out) < 2:  # too few of this exact business: use its group, and say so
+            family = [k for k, spec in INDUSTRIES.items() if spec["group"] == group]
+            mine, recent_in, recent_out = moves(family)
+            scope = f"{group.lower()} businesses (too few {label} moves alone)"
+        net = len(recent_in) - len(recent_out)
+        enough = len(recent_in) + len(recent_out) >= 2
+        findings = [
+            record(f"{key}.kit_arrivals_by_year", by_year(mine, "arrival"), "costar", source_id, today, 0.5, None,
+                   "agrees", note=f"Arrivals of {scope} in {buildings} kit buildings within {radius:g} mi. First "
+                                  "occupancy of a tenant in a building; renewals excluded."),
+            record(f"{key}.kit_departures_by_year", by_year(mine, "departure"), "costar", source_id, today, 0.5,
+                   None, "agrees", note=f"Departures of {scope}, excluding renewals, moves within the building and "
+                                        "splits."),
+            record(f"{key}.kit_net_last_3_years", net if enough else None, "costar", source_id, today,
+                   0.4 if scope == label else 0.3, None, "agrees" if enough else "unknown",
+                   note=(f"{scope.capitalize()}: {len(recent_in)} arrived, {len(recent_out)} left since {since}."
+                         if enough else f"Only {len(recent_in) + len(recent_out)} {scope} moves since {since} in "
+                                        "the sample: too few to call a trend.")),
+        ]
+        return {"findings": findings,
+                "signal": {"name": "business arrivals", "value": net if enough else None,
+                           "stance": None if not enough else (1 if net > 0 else -1 if net < 0 else 0),
+                           "reason": (f"{len(recent_in)} {scope} moved into nearby CoStar buildings since "
+                                      f"{since[:4]}, {len(recent_out)} left" if enough else
+                                      f"Too few {group.lower()} moves in the CoStar sample nearby to call a trend")},
+                "summary": f"{len(recent_in)} in / {len(recent_out)} out since {since[:4]}"
+                           + ("" if scope == label else f" ({group.lower()})"),
+                "examples": [{"name": r["name"], "arrived": r["arrival"], "sqft": r["sqft"],
+                              "costar_property_id": r["property_id"]}
+                             for r in sorted(recent_in, key=lambda r: r["arrival"], reverse=True)[:5]]}
+    results = per_industry(industries, one)
+    shared = record("kit_all_business_net_last_3_years", all_in - all_out, "costar", source_id, today, 0.5, None,
+                    "agrees", note=f"All tenants within {radius:g} mi: {all_in} arrived, {all_out} left since {since}. "
+                                   + caveat)
+    moving = [f"{INDUSTRIES[k]['label']} ({v['summary']})" for k, v in results.items()
+              if (v.get("signal") or {}).get("stance") is not None]
+    return {"sources": [{"name": "CoStar hackathon kit: tenancies, companies, properties", "url": None,
+                         "retrieved_at": None, "cached": True, "note": caveat}],
+            "findings": [shared] + flatten(results), "per_industry": results, "confidence": 0.4,
+            "summary": (f"{len(local)} tenancies in {buildings} kit buildings within {radius:g} mi; all businesses: "
+                        f"{all_in} arrived, {all_out} left since {since[:4]}. "
+                        + (f"{INDUSTRIES[industries[0]]['label']}: {results[industries[0]].get('summary')}."
+                           if len(industries) == 1 else f"Enough moves to call: {'; '.join(moving) or 'none'}.")),
+            "handoff": "Per-industry momentum to the coordinator (counts only with 2+ moves). All-business moves "
+                       "are context, not a vote."}
+
+
+def lookalike_agent(lat, lon, industries, radius=RADIUS_MI):
+    """Does this place look like places where each business already operates? Measured, not asserted."""
+    row = features(area_profile(round(lat, 5), round(lon, 5), radius))
+    sources = []
+
+    def one(key):
+        ev = lookalike_model(key)
+        label = INDUSTRIES[key]["label"].lower()
+        if ev["status"] != "ok":
+            return {"findings": [record(f"{key}.lookalike_percentile", None, "computed", f"lookalike-{key}",
+                                        note=ev.get("note", "No model."))],
+                    "signal": {"name": "lookalike", "value": None, "stance": None, "validated": False,
+                               "reason": ev.get("note", "No lookalike model")},
+                    "summary": "no model (too few mapped)", "evaluation": summarize_eval(ev)}
+        spatial = ev["splits"]["spatial"]
+        validated = ev["validated"]
+        method = (f"Logistic model on {len(FEATURES)} resident features within {radius:g} mi, trained on "
+                  f"{ev['facilities_used']} of {ev['facilities_mapped']} mapped {label} vs "
+                  f"{ev['background_places']} Houston-area tract points. Held out by area (13-mile cells): AUC "
+                  f"{spatial['auc']} (90% CI {spatial['auc_90ci'][0]}-{spatial['auc_90ci'][1]}); income alone "
+                  f"{spatial['baseline_auc']['income_only']}; shuffled labels "
+                  f"{spatial['baseline_auc']['shuffled_labels']}.")
+        sources.append({"name": f"Lookalike evaluation: {label}", "url": None, "retrieved_at": ev["evaluated_at"],
+                        "cached": True, "note": method})
+        if not row:
+            return {"findings": [record(f"{key}.lookalike_percentile", None, "computed", f"lookalike-{key}",
+                                        note="No resident profile at this site.")],
+                    "signal": {"name": "lookalike", "value": None, "stance": None, "validated": validated,
+                               "reason": "No resident profile"}, "summary": "unknown"}
+        pct = percentile(model_logit(ev["model"], row), ev["background_logits"])
+        push = contributions(ev["model"], row)
+        top = sorted(push.items(), key=lambda kv: -abs(kv[1]))[:3]
+        why = ", ".join(f"{FEATURES[k][0]} {'raises' if v > 0 else 'lowers'} it" for k, v in top)
+        findings = [
+            record(f"{key}.lookalike_percentile", pct, "computed", f"lookalike-{key}", ev["evaluated_at"][:10],
+                   0.7 if validated else 0.3, None, "agrees" if validated else "unknown",
+                   note=f"Looks more like places with {label} than {pct}% of Houston-area neighborhoods. Biggest "
+                        f"drivers here: {why}. {method}"),
+            record(f"{key}.lookalike_drivers", push, "computed", f"lookalike-{key}", ev["evaluated_at"][:10], 0.6,
+                   None, "agrees", note="Standardised feature x model weight; positive pushes toward 'looks like "
+                                        "existing facilities'. Correlation with where facilities are, not demand."),
+        ]
+        return {"findings": findings,
+                "signal": {"name": "lookalike", "value": pct, "validated": validated,
+                           "stance": stance(pct, plus=70, minus=30) if validated else None,
+                           "reason": (f"Looks more like places that already have {label} than {pct}% of "
+                                      "Houston-area neighborhoods" +
+                                      ("" if validated else f" (model AUC {spatial['auc']} < {VALIDATED_AUC}: "
+                                                            "not used in the verdict)"))},
+                "summary": f"{pct}/100 ({why})", "evaluation": summarize_eval(ev)}
+    results = per_industry(industries, one)
+    return {"sources": sources, "findings": flatten(results), "per_industry": results, "confidence": 0.7,
+            "summary": one_or_many(industries, results, "Scores: " + ", ".join(
+                f"{INDUSTRIES[k]['label']} {(v.get('signal') or {}).get('value')}" for k, v in results.items())),
+            "handoff": f"Percentile per industry to the coordinator (votes only if held-out AUC >= {VALIDATED_AUC})."}
 
 
 # --- Site, coordinator, narrator ----------------------------------------------------
@@ -1064,8 +1191,7 @@ def site_agent(address=None, property_id=None, kit=None):
                            meta["retrieved_at"][:10], 0.9, meta["url"], "agrees",
                            note="Census address-range geocode (interpolated along the street).")]
         sources = [source("Census geocoder", meta)]
-    rows, _ = tract_table(2024)
-    inside = bool(near(rows, point["lat"], point["lon"], RADIUS_MI))
+    inside = bool(tract_index(2024).near(point["lat"], point["lon"], RADIUS_MI))
     if not inside:
         findings.append(record("site_in_coverage", False, "computed", "coverage", None, 0.9, None, "unknown",
                                note=f"Outside the {AREA_NAME}: no comparison data."))
@@ -1080,26 +1206,26 @@ VERDICTS = {"supported": "The neighborhood supports this use", "mixed": "Mixed s
             "weak": "The neighborhood does not look like it supports this use", "unknown": "Not enough evidence"}
 RULES = [
     "Lookalike votes +1 at the 70th percentile or above, -1 at the 30th or below, and only if its spatial "
-    f"hold-out AUC is at least {VALIDATED_AUC}.",
-    "Population trend votes +1 if growth since 2015-19 beats the Houston area by 2+ points, -1 if it trails by 2+.",
-    "Local supply votes +1 at half the Houston-area facilities per resident or less (underserved), -1 at 2x or more.",
-    "Business arrivals vote +1 if more of this kind of business moved in than out over 3 years, -1 if fewer; "
-    "needs 2+ moves.",
+    f"hold-out AUC for that industry is at least {VALIDATED_AUC}.",
+    "Population trend votes +1 if growth since 2015-19 beats the Houston area by 2+ points, -1 if it trails by 2+ "
+    "(childcare uses the under-5 trend, tutoring the 5-17 trend).",
+    "Local supply votes +1 at half the Houston-area facilities per resident or less (underserved), -1 at 2x or more "
+    "(not for restaurants, fast food, cafes and bars, which cluster on purpose).",
+    "Business arrivals vote +1 if more of this kind of business moved into nearby CoStar buildings than left over 3 "
+    "years, -1 if fewer; needs 2+ moves, and falls back to the business's group (e.g. sports & fitness) when the "
+    "exact business has fewer.",
     "Supported: lookalike +1 and total +2 or more. Weak: lookalike -1, or total -2 or less. Unknown: lookalike "
     "missing or fewer than 2 signals known. Otherwise mixed.",
     "These cut-offs are our rules, set relative to the Houston-area distribution; they are not industry standards.",
 ]
 
 
-def coordinate(use, steps):
-    """Coordinator: combine the specialists' signals into a verdict with the deciding reasons."""
-    signals = [st["signal"] | {"agent": st["agent"]} for st in steps if st.get("signal")]
+def coordinate(key, signals):
+    """Coordinator: combine one industry's signals into a verdict with the deciding reasons."""
     known = [sg for sg in signals if sg["stance"] is not None]
     look = next((sg for sg in signals if sg["name"] == "lookalike"), None)
     total = sum(sg["stance"] for sg in known)
-    if use not in USES:
-        verdict = "unknown"
-    elif not look or look["stance"] is None or len(known) < 2:
+    if not look or look["stance"] is None or len(known) < 2:
         verdict = "unknown"
     elif look["stance"] == 1 and total >= 2:
         verdict = "supported"
@@ -1119,18 +1245,39 @@ def coordinate(use, steps):
         insight = "Proven but crowded: places like this have the business, and this one already has plenty."
     elif look and supply and look["stance"] == -1 and supply["stance"] == 1:
         insight = "Few competitors here, but the residents do not look like those near existing facilities."
-    if use not in USES:
-        headline = f"No neighborhood model for {use}: {NO_NEIGHBORHOOD_MODEL.get(use, 'not modelled')}"
-    else:
-        lead = reasons[0]["reason"] if reasons and verdict != "unknown" else ""
-        headline = VERDICTS[verdict] + (f": {lead[0].lower()}{lead[1:]}" if lead else "")
-    return {"use": use, "verdict": verdict, "headline": headline, "score": total, "insight": insight,
-            "reasons": reasons, "unknown": unknown, "rules": RULES,
-            "lookalike_percentile": look["value"] if look else None}
+    lead = reasons[0]["reason"] if reasons and verdict != "unknown" else ""
+    headline = VERDICTS[verdict] + (f": {lead[0].lower()}{lead[1:]}" if lead else "")
+    return {"industry": key, "use": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"], "verdict": verdict,
+            "headline": headline, "score": total, "insight": insight, "reasons": reasons, "unknown": unknown,
+            "rules": RULES, "lookalike_percentile": look["value"] if look else None,
+            "lookalike_validated": bool(look and look.get("validated"))}
 
 
-NARRATOR_MODEL = os.environ.get("NEIGHBORHOOD_LLM_MODEL", "solar-mini4")
-NARRATOR_URL = "https://api.upstage.ai/v1/chat/completions"
+def llm_config():
+    """OpenAI-compatible chat endpoint (team contract: LLM_BASE_URL, LLM_MODEL, LLM_API_KEY).
+
+    OpenRouter later is just: LLM_BASE_URL=https://openrouter.ai/api/v1, LLM_MODEL=<model>,
+    LLM_API_KEY=<key>. Until then it falls back to Upstage Solar Mini with UPSTAGE_API_KEY.
+    """
+    if os.environ.get("LLM_API_KEY"):
+        return {"base_url": os.environ.get("LLM_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/"),
+                "model": os.environ.get("LLM_MODEL", "openai/gpt-4o-mini"), "key": os.environ["LLM_API_KEY"]}
+    return {"base_url": "https://api.upstage.ai/v1", "model": os.environ.get("NEIGHBORHOOD_LLM_MODEL", "solar-mini4"),
+            "key": os.environ.get("UPSTAGE_API_KEY")}
+
+
+def chat(messages, max_tokens=260):
+    """One chat completion against the configured OpenAI-compatible endpoint (stdlib only)."""
+    cfg = llm_config()
+    if not cfg["key"]:
+        raise Offline("No LLM key (set LLM_API_KEY, or UPSTAGE_API_KEY)")
+    headers = {"Authorization": f"Bearer {cfg['key']}", "Content-Type": "application/json", "User-Agent": USER_AGENT}
+    if "openrouter.ai" in cfg["base_url"]:
+        headers["X-Title"] = "Neighborhood demand check"
+    body = json.dumps({"model": cfg["model"], "temperature": 0, "max_tokens": max_tokens,
+                       "messages": messages}).encode()
+    with urlopen(Request(f"{cfg['base_url']}/chat/completions", data=body, headers=headers), timeout=25) as response:
+        return json.loads(response.read())["choices"][0]["message"]["content"].strip()
 
 
 def numbers_in(text):
@@ -1143,35 +1290,30 @@ def narrate(decisions, site_label):
     The text is rejected if it contains any number that is not in its input, so the
     model can explain but cannot invent figures. Returns (text, step).
     """
+    cfg = llm_config()
     facts = json.dumps({"site": site_label, "decisions": [{k: d[k] for k in
                                                            ("use", "verdict", "insight", "reasons", "unknown")}
-                                                          for d in decisions]})
+                                                          for d in decisions[:6]]})
     step = {"agent": "narrator", "role": "Writes a short plain-English summary from the coordinator's records",
-            "computed_by": f"llm ({NARRATOR_MODEL})", "inputs": {"records": "coordinator output only"},
-            "sources": [], "findings": [], "signal": None, "confidence": None, "status": "ok"}
-    key = os.environ.get("UPSTAGE_API_KEY")
-    cache = CACHE / "narration" / (hashlib.sha1((NARRATOR_MODEL + facts).encode()).hexdigest()[:20] + ".json")
+            "computed_by": f"llm ({cfg['model']})", "inputs": {"records": "coordinator output (top 6 uses)"},
+            "sources": [], "findings": [], "signal": None, "per_industry": {}, "confidence": None, "status": "ok"}
+    cache = CACHE / "narration" / (hashlib.sha1((cfg["model"] + facts).encode()).hexdigest()[:20] + ".json")
     started = time.perf_counter()
     text = None
     try:
         if cache.exists():
             text = json.loads(cache.read_text())["text"]
-        elif offline() or not key:
-            raise Offline("no cached narration" if key else "UPSTAGE_API_KEY is not set")
+        elif offline():
+            raise Offline("no cached narration")
         else:
-            body = json.dumps({"model": NARRATOR_MODEL, "temperature": 0, "max_tokens": 260, "messages": [
+            text = chat([
                 {"role": "system", "content": "You explain a site-selection verdict to a small-business owner in "
                  "3 short sentences. Use only the facts given. Do not add any number that is not in the facts. "
                  "Say plainly what is unknown. A stance of +1 supports the use, -1 counts against it, 0 is "
                  "neutral (for local supply, 0 means about the Houston-area rate, not high)."},
-                {"role": "user", "content": facts}]}).encode()
-            request = Request(NARRATOR_URL, data=body, headers={"Authorization": f"Bearer {key}",
-                                                                "Content-Type": "application/json",
-                                                                "User-Agent": USER_AGENT})
-            with urlopen(request, timeout=25) as response:
-                text = json.loads(response.read())["choices"][0]["message"]["content"].strip()
+                {"role": "user", "content": facts}])
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"text": text, "model": NARRATOR_MODEL, "created_at": now_iso()}))
+            cache.write_text(json.dumps({"text": text, "model": cfg["model"], "created_at": now_iso()}))
         invented = sorted(numbers_in(text) - numbers_in(facts))
         if invented:
             step.update(status="rejected", summary=f"Rejected: the text used numbers not in the records {invented[:5]}.")
@@ -1187,103 +1329,198 @@ def narrate(decisions, site_label):
     return text, step
 
 
-def investigate(use, address=None, property_id=None, kit=None, explain=False):
-    """Run the pipeline. use='suggest' ranks every use; otherwise validate one use. Returns a report with the trace."""
+def plan(request):
+    """Planner: which industries to check for the request, and how the request was understood (code, no LLM)."""
+    if request == "suggest":
+        return {"industries": list(INDUSTRIES), "how": f"suggest mode: all {len(INDUSTRIES)} industries",
+                "not_modelled": dict(NOT_RESIDENT_DRIVEN), "candidates": []}
+    if request in NOT_RESIDENT_DRIVEN:
+        return {"industries": [], "how": f"catalog use '{request}' is not resident-driven",
+                "not_modelled": {request: NOT_RESIDENT_DRIVEN[request]}, "candidates": []}
+    key, how, candidates = resolve(request)
+    return {"industries": [key] if key else [], "how": how, "candidates": candidates, "not_modelled": {},
+            "unmatched": None if key else request}
+
+
+def planner_step(request):
+    p = plan(request)
+    if request == "suggest":
+        summary = p["how"]
+    elif p["industries"]:
+        summary = f"'{request}' -> {INDUSTRIES[p['industries'][0]]['label']} ({p['how']})"
+    else:
+        summary = f"'{request}': {p['how']}" + (f" ({next(iter(p['not_modelled'].values()))})"
+                                               if p["not_modelled"] else "")
+    return {"summary": summary, "plan": p, "findings": [],
+            "handoff": "Site first; then each specialist covers every planned industry."}
+
+
+SPECIALISTS = [
+    ("residents", "Who lives here: ACS residents, age mix, income, tenure and trend vs the Houston area", residents_agent),
+    ("competitors", "Who already serves it: mapped facilities near the site (OpenStreetMap)", competitors_agent),
+    ("momentum", "What is moving in: CoStar kit tenant arrivals and departures by industry", momentum_agent),
+    ("lookalike", "Does it look like places that already have this business? (held-out evaluated)", lookalike_agent),
+]
+TIERS = {"supported": 0, "mixed": 1, "weak": 2, "unknown": 3}
+
+
+def investigate(request, address=None, property_id=None, kit=None, explain=False):
+    """Run the pipeline for a request: an industry key/label/free text, a catalog use, or 'suggest'."""
     started = time.perf_counter()
     trace = []
-    uses = list(USES) + list(NO_NEIGHBORHOOD_MODEL) if use == "suggest" else [use]
-    run_agent(trace, "planner", "Chooses which specialists run for each use (rule table, not an LLM)",
-              lambda: {"summary": "; ".join(f"{u}: {', '.join(plan(u)[0])}" for u in uses),
-                       "findings": [], "plan": {u: {"steps": plan(u)[0], "why": plan(u)[1]} for u in uses},
-                       "handoff": "Site agent first; each specialist then runs per use."}, {})
+    planned = run_agent(trace, "planner", "Maps the request to industries (registry + synonyms, code)",
+                        planner_step, {"request": request})
+    p = planned["plan"]
+    industries = p["industries"]
     site = run_agent(trace, "site", "Resolves the address or CoStar property to one point",
                      site_agent, {"address": address, "property_id": property_id, "kit": kit})
     decisions = []
-    if site["status"] == "ok":
+    if site["status"] == "ok" and industries:
         lat, lon = site["point"]["lat"], site["point"]["lon"]
-        agents = {
-            "residents": ("Who lives here: ACS residents, age mix, income and trend vs the Houston area",
-                          residents_agent, {}),
-            "competitors": ("Who already serves it: mapped facilities near the site (OpenStreetMap)",
-                            competitors_agent, {}),
-            "momentum": ("What is moving in: CoStar kit tenant arrivals and departures by category",
-                         momentum_agent, {"kit": kit}),
-            "lookalike": ("Does it look like places that already have this business? (held-out evaluated)",
-                          lookalike_agent, {}),
-        }
-        for u in uses:
-            steps = []
-            for name in plan(u)[0]:
-                if name in agents:
-                    role, fn, extra = agents[name]
-                    steps.append(run_agent(trace, name, role, fn, {"lat": lat, "lon": lon, "use": u, **extra}))
-                    steps[-1]["use"] = u
-            decision = coordinate(u, steps)
-            trace.append({"agent": "coordinator", "use": u, "role": "Combines the signals into a verdict",
-                          "computed_by": "code", "inputs": {"signals": [s["agent"] for s in steps]}, "sources": [],
-                          "findings": [], "signal": None, "status": "ok", "confidence": None, "ms": 0,
-                          "summary": f"{u}: {decision['verdict']} (signal total {decision['score']:+d})",
-                          "handoff": "Verdict and deciding reasons to the person."})
-            decisions.append(decision)
-    tiers = {"supported": 0, "mixed": 1, "weak": 2, "unknown": 3}
-    ranked = sorted(decisions, key=lambda d: (tiers[d["verdict"]], d["use"] not in USES,
-                                              -(d["lookalike_percentile"] or -1)))
+        steps = []
+        for name, role, fn in SPECIALISTS:
+            inputs = {"lat": lat, "lon": lon, "industries": industries}
+            if name == "momentum":
+                inputs["kit"] = kit
+            steps.append(run_agent(trace, name, role, fn, inputs))
+        t = time.perf_counter()
+        for key in industries:
+            signals = [st["per_industry"][key]["signal"] for st in steps
+                       if ((st.get("per_industry") or {}).get(key) or {}).get("signal")]
+            decisions.append(coordinate(key, signals))
+        decisions.sort(key=lambda d: (TIERS[d["verdict"]],
+                                      -(d["lookalike_percentile"] or 0) if d["lookalike_validated"] else 1))
+        counts = {v: sum(d["verdict"] == v for d in decisions) for v in TIERS}
+        trace.append({"agent": "coordinator", "role": "Combines each industry's signals into a verdict",
+                      "computed_by": "code", "inputs": {"industries": len(industries)}, "sources": [],
+                      "findings": [], "signal": None, "per_industry": {}, "status": "ok", "confidence": None,
+                      "ms": round(1000 * (time.perf_counter() - t)),
+                      "summary": (f"{decisions[0]['use']}: {decisions[0]['verdict']} (signal total "
+                                  f"{decisions[0]['score']:+d})" if len(decisions) == 1 else
+                                  ", ".join(f"{n} {v}" for v, n in counts.items() if n)),
+                      "handoff": "Verdicts and deciding reasons to the person."})
     narration = None
     if explain and decisions:
-        narration, step = narrate(ranked, site["point"]["label"])
+        narration, step = narrate(decisions, site["point"]["label"])
         trace.append(step)
-    for step in trace:  # inputs are shown in the trace; keep them small and JSON-safe
-        step["inputs"] = {k: v for k, v in step["inputs"].items() if k != "kit"}
-    evidence = [r for st in trace for r in st.get("findings", [])]
+    for step in trace:  # keep trace inputs small and JSON-safe
+        step["inputs"] = {k: (f"{len(v)} industries" if k == "industries" and isinstance(v, list) and len(v) > 3
+                              else v)
+                          for k, v in step["inputs"].items() if k != "kit"}
     return {
-        "mode": "suggest" if use == "suggest" else "validate",
+        "mode": "suggest" if request == "suggest" else "validate", "request": request,
         "site": site.get("point"), "area": AREA_NAME, "radius_mi": RADIUS_MI,
-        "decisions": ranked, "narration": narration,
-        "narration_label": f"Written by an LLM ({NARRATOR_MODEL}) from the records below; numbers checked."
+        "decisions": decisions, "not_modelled": p.get("not_modelled", {}),
+        "unmatched": p.get("unmatched"), "candidates": p.get("candidates", []),
+        "narration": narration,
+        "narration_label": f"Written by an LLM ({llm_config()['model']}) from the records below; numbers checked."
         if narration else None,
-        "trace": trace, "evidence": evidence,
+        "trace": trace, "evidence": [r for st in trace for r in st.get("findings", [])],
+        "timings_ms": {st["agent"]: st.get("ms", 0) for st in trace},
         "offline": offline(), "elapsed_ms": round(1000 * (time.perf_counter() - started)),
         "computed_by": "All numbers and verdicts are computed in code. Only the optional summary is LLM-written.",
     }
 
 
+def industry_catalog():
+    """Industries with their group and measured lookalike accuracy (for pickers and the API)."""
+    out = []
+    for key, spec in INDUSTRIES.items():
+        path = evaluation_path(key)
+        ev = json.loads(path.read_text()) if path.exists() else {}
+        spatial = ev.get("splits", {}).get("spatial", {})
+        out.append({"key": key, "label": spec["label"], "group": spec["group"],
+                    "facilities_mapped": ev.get("facilities_mapped"), "lookalike_auc": spatial.get("auc"),
+                    "validated": ev.get("validated", False), "status": ev.get("status", "not prepared")})
+    return out
+
+
 def warm(kit=None):
-    """Load the kit tenancies and cached tables in the background so the first request is quick."""
+    """Load cached tables, kit tenancies and models in the background so the first request is quick."""
     try:
+        reference_profiles()
+        for key in INDUSTRIES:
+            if evaluation_path(key).exists():
+                lookalike_model(key)
+                facilities(key)
         kit_tenancies(kit)
-        for use in USES:
-            lookalike_model(use)
     except (Offline, RuntimeError, OSError, ValueError, KeyError):
         pass  # the request path reports what is missing
+
+
+def bench(property_ids=(13890701, 23296), kit=None):
+    """Time requests after a restart: the first one runs with empty memory caches (disk caches present)."""
+    for fn in (area_profile, facilities, lookalike_model, kit_tenancies, tract_table, tract_index, reference_profiles,
+               reference_values, acs, tracts, property_pin):
+        fn.cache_clear()
+    rows = []
+    for round_ in ("first", "repeat"):
+        for pid in property_ids:
+            for request in ("indoor pickleball", "suggest"):
+                t = time.perf_counter()
+                report = investigate(request, property_id=pid, kit=kit)
+                rows.append({"round": round_, "property_id": pid, "request": request,
+                             "ms": round(1000 * (time.perf_counter() - t)), "steps_ms": report["timings_ms"],
+                             "industries": len(report["decisions"])})
+    return rows
+
+
+def print_report():
+    print(f"{'industry':20} {'mapped':>6} {'AUC':>6} {'90% CI':>14} {'top30':>6} {'income':>7} {'density':>7} "
+          f"{'shuffled':>8}  status")
+    for item in industry_catalog():
+        path = evaluation_path(item["key"])
+        if not path.exists():
+            print(f"{item['key']:20} not prepared")
+            continue
+        ev = json.loads(path.read_text())
+        s = ev.get("splits", {}).get("spatial")
+        if not s:
+            print(f"{item['key']:20} {ev['facilities_mapped']:>6}  {ev.get('note')}")
+            continue
+        b = s["baseline_auc"]
+        print(f"{item['key']:20} {ev['facilities_mapped']:>6} {s['auc']:>6} {str(s['auc_90ci']):>14} "
+              f"{s['hit_rate_top30']:>6} {b['income_only']:>7} {b['density_only']:>7} {b['shuffled_labels']:>8}  "
+              f"{'votes' if ev['validated'] else 'shown only'}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--address")
     parser.add_argument("--property-id", type=int)
-    parser.add_argument("--use", default="indoor pickleball", help=f"one of {list(USES)} or 'suggest'")
+    parser.add_argument("--use", default="indoor pickleball",
+                        help="an industry key, label or description (e.g. 'bouldering gym'), or 'suggest'")
     parser.add_argument("--kit", type=Path)
     parser.add_argument("--offline", action="store_true", help="use only cached responses")
     parser.add_argument("--explain", action="store_true", help="add the optional LLM summary")
-    parser.add_argument("--evaluate", metavar="USE", help="run the held-out lookalike evaluation and save it")
+    parser.add_argument("--prepare", metavar="KEYS", help="'all' or comma-separated industry keys: fetch + evaluate")
+    parser.add_argument("--report", action="store_true", help="print the evaluation table for prepared industries")
+    parser.add_argument("--bench", action="store_true", help="time cold and warm requests")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     if args.offline:
         os.environ["NEIGHBORHOOD_OFFLINE"] = "1"
-    if args.evaluate:
-        result = evaluate(args.evaluate)
-        evaluation_path(args.evaluate).parent.mkdir(parents=True, exist_ok=True)
-        evaluation_path(args.evaluate).write_text(json.dumps(result))
-        print(json.dumps({k: v for k, v in result.items() if k not in ("model", "background_logits")}, indent=2))
+    if args.prepare:
+        prepare(list(INDUSTRIES) if args.prepare == "all" else args.prepare.split(","), args.kit)
+        return
+    if args.report:
+        print_report()
+        return
+    if args.bench:
+        for row in bench(kit=args.kit):
+            print(json.dumps(row))
         return
     report = investigate(args.use, args.address, args.property_id, args.kit, args.explain)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
         return
-    print(f"Site: {(report['site'] or {}).get('label')}")
+    print(f"Site: {(report['site'] or {}).get('label')}   ({report['elapsed_ms']} ms)")
     for step in report["trace"]:
-        print(f"  [{step['agent']}{' / ' + step['use'] if step.get('use') else ''}] {step['status']} "
-              f"({step.get('ms', 0)} ms, {step['computed_by']}): {step.get('summary', '')}")
+        print(f"  [{step['agent']}] {step['status']} ({step.get('ms', 0)} ms, {step['computed_by']}): "
+              f"{step.get('summary', '')}")
+    if report["unmatched"]:
+        print(f"\nCould not match '{report['unmatched']}' to an industry. Try one of: "
+              + ", ".join(spec["label"] for spec in INDUSTRIES.values()))
     for d in report["decisions"]:
         print(f"\n{d['use']}: {d['verdict'].upper()} - {d['headline']}")
         if d["insight"]:
@@ -1292,32 +1529,10 @@ def main():
             print(f"  {r['stance']:+d} {r['signal']}: {r['reason']}")
         for r in d["unknown"]:
             print(f"   ? {r['signal']}: {r['reason']}")
+    for use, why in report["not_modelled"].items():
+        print(f"\n{use}: not modelled ({why})")
     if report["narration"]:
         print(f"\n{report['narration_label']}\n{report['narration']}")
-
-
-@lru_cache(maxsize=None)
-def us_population_6_plus_record():
-    """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""
-    key = os.environ.get("CENSUS_API_KEY")
-    query = {"get": "B01003_001E,B01001_003E,B01001_027E,B01001_004E,B01001_028E", "for": "us:1"}
-    if key:
-        query["key"] = key
-    rows, meta = fetch(ACS.format(year=2024), query)
-    cells = dict(zip(rows[0], rows[1]))
-    total = float(cells["B01003_001E"])
-    under5 = float(cells["B01001_003E"]) + float(cells["B01001_027E"])
-    age5to9 = float(cells["B01001_004E"]) + float(cells["B01001_028E"])
-    # Age 5 is one fifth of the 5-9 band (assumes even ages within the band).
-    return meta, total - under5 - age5to9 / 5
-
-
-def fmt_pct(value, signed=False, points=False):
-    if value is None:
-        return "unknown"
-    if points:
-        return f"{value * 100:+.1f} pts"
-    return f"{value:+.1%}" if signed else f"{value:.1%}"
 
 
 if __name__ == "__main__":
