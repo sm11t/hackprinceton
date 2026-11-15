@@ -322,7 +322,7 @@ def tours_from(findings, suite):
     return sorted(tours.values(), key=lambda t: t["captured_at"] or "", reverse=True)
 
 
-def cash_months(cost, rent, budget, reserve, months=12, delay=3):
+def cash_months(cost, rent, budget, reserve, months=12, delay=3, extra_bills=None, cash_source=None):
     """12 months of cash with ZERO revenue, from the real cost ledger and rent, run through Jayant's Nessie-pilot
     simulator (nessie_pilot.simulate). Opening costs are paid up front, base rent every month; a delay moves the
     opening, not the cash line (with no revenue, rent is owed either way), so it shortens the months you're open
@@ -334,8 +334,9 @@ def cash_months(cost, rent, budget, reserve, months=12, delay=3):
         return None
     building = next((l for l in lines if l["label"].startswith("Rent while you build")), None)
     build_months = cost.get("build_months") or 3
-    buyer = {"starting_cash": budget, "recurring_bills": [{"payee": "Base rent (CoStar asking)", "monthly": monthly}],
-             "source": "your budget"}
+    buyer = {"starting_cash": budget, "recurring_bills": [{"payee": "Base rent (CoStar asking)", "monthly": monthly}]
+             + [{"payee": b["payee"], "monthly": b["monthly"]} for b in extra_bills or []],
+             "source": cash_source or "your budget"}
     cases = {}
     for case in ("low", "base", "high"):
         upfront = cost["cash_to_open"][case] - (building[case] if building else 0)  # rent is billed monthly instead
@@ -348,6 +349,7 @@ def cash_months(cost, rent, budget, reserve, months=12, delay=3):
                        "first_month_below_zero": next((r["month"] for r in run["rows"] if r["cash"] < 0), None),
                        "opens": run["opening_month"], "opens_if_delayed": late["opening_month"]}
     return {"months": months, "reserve": reserve, "budget": budget, "monthly_rent": monthly, "delay": delay,
+            "other_bills": buyer["recurring_bills"][1:], "cash_source": buyer["source"],
             "cases": cases, "engine": "nessie_pilot.simulate (Jayant's Nessie pilot), zero revenue",
             "note": "Zero revenue: only base rent is charged after the opening costs. No payroll, utilities or "
                     "revenue are modelled, so read it as 'how long could rent alone be covered'."}
@@ -412,7 +414,8 @@ def find_space(property_id, suite, kit, key=None):
     return building, space
 
 
-def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None, delay_months=0, explain=False):
+def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None, delay_months=0, explain=False,
+           bank=None):
     """Full review of `business` (registry key or description) in a listed space."""
     from venture_costs import cash_to_open, flip, rent_estimates, rent_for
     started = time.perf_counter()
@@ -678,7 +681,8 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
                       "months_of_rent_after_opening": cost.get("months_of_rent_after_opening"),
                       "lines": cost.get("lines"), "sources": cost.get("sources"), "rent": rent,
                       "delay_what_if": money_holder.get("delayed"), "three_month_delay": (money_holder.get("stress") or {}).get("required"),
-                      "cash_12m": cash_months(cost, rent, budget, reserve) if cost else None},
+                      "cash_12m": cash_months(cost, rent, budget, reserve, extra_bills=(bank or {}).get("bills"),
+                                              cash_source=(bank or {}).get("source")) if cost else None},
             "demand": decision,
             "permits": permits_step.get("steps", []),
             "records": [r for r in next((s for s in trace if s["agent"] == "records"), {}).get("findings", [])

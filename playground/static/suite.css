@@ -607,3 +607,10 @@ svg.cc { width: 100%; height: auto; display: block; }
 .cc-table { display: inline; margin-left: 4px; }
 .cash-panel { margin-top: 12px; }
 .cash-one { margin: 4px 0 14px; }
+
+/* Capital One Nessie card */
+.nessie { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.nx-head { display: flex; align-items: center; gap: 8px; }
+.nx-acct { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.nx-bal { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.01em; }
+.nx-bills { margin: 0; }

@@ -8,6 +8,7 @@
    permit pages (Tavily, team key from .env) for those pairs.
 2. Offline: sets NEIGHBORHOOD_OFFLINE=1 and JURISDICTION_OFFLINE=1 and reruns the scan and every review from the
    caches only, checking each verdict and that the jurisdiction is still verified. Prints PASS / FAIL per pair.
+   Run suite_nessie.py --seed once online to create the Capital One Nessie sandbox persona the demo reads.
 3. --ventures: (re)creates the "Demo:" ventures saved at each stage, so a reload or a crash recovers to any step.
 4. --warm-server http://127.0.0.1:8765: requests the scan and every demo review from the running server, so the
    first click on stage is instant (the first read of the kit takes seconds).
@@ -120,6 +121,14 @@ def demo_ventures(scan, reviews):
              entry("indoor_pickleball", 13890701, None, "")]
     base = {"budget": 500000, "reserve": 50000, "area": {"mode": "anywhere", "radius": 10}, "exclude": [],
             "directions": ["salon_barber", "physical_therapy", "cafe"]}
+    try:  # Capital One Nessie sandbox persona: its balance is the budget, its bills feed the 12-month view
+        import suite_nessie
+        a = suite_nessie.read()
+        base["nessie"] = {k: a[k] for k in ("account_id", "balance", "monthly_bills", "retrieved_at", "cached")}
+        print(f"  Nessie account …{a['account_id'][-6:]}: ${a['balance']:,.0f}, ${a['monthly_bills']:,.0f}/mo bills"
+              + (" (cached)" if a["cached"] else ""))
+    except Exception as error:  # noqa: BLE001
+        print(f"  Nessie unavailable ({type(error).__name__}): ventures saved without it")
     stages = ["budget", "scan", "opportunities", "shortlist", "investigate", "decide"]
     made = []
     for i, stage in enumerate(stages):  # created oldest first so the list reads in demo order, newest on top

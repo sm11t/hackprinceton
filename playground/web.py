@@ -476,10 +476,17 @@ def main():
                         property_id = params.get("property_id", [""])[0]
                         if not property_id.isdigit():
                             raise ValueError("Give a CoStar property_id.")
+                        bank = None
+                        if params.get("nessie", [""])[0]:  # the user's other bills, from the Nessie sandbox account
+                            try:
+                                import suite_nessie
+                                bank = suite_nessie.read(params["nessie"][0] if params["nessie"][0] != "1" else None)
+                            except (RuntimeError, OSError, ValueError, KeyError):
+                                bank = None
                         body = venture_review.review(params.get("business", [""])[0], int(property_id),
                                                      params.get("suite", [""])[0] or None, budget, reserve, args.kit,
                                                      delay_months=int(number("delay", 0)),
-                                                     explain=params.get("explain", ["0"])[0] == "1")
+                                                     explain=params.get("explain", ["0"])[0] == "1", bank=bank)
                     self.send(json.dumps(body, default=str).encode(), "application/json")
                 except ValueError as error:
                     self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
@@ -510,6 +517,13 @@ def main():
                     out.append({"property_id": pid, "address": row["Address"], "listed_spaces": len(b["spaces"]) if b else 0})
                 out.sort(key=lambda r: -r["listed_spaces"])
                 self.send(json.dumps({"query": q, "places": out[:12], "matches": len(rows)}).encode(), "application/json")
+                return
+            if route.path == "/api/nessie/account":
+                try:
+                    import suite_nessie
+                    self.send(json.dumps(suite_nessie.read(params.get("id", [""])[0] or None)).encode(), "application/json")
+                except (RuntimeError, OSError, ValueError, KeyError) as error:
+                    self.send(json.dumps({"error": f"Nessie unavailable: {error}"}).encode(), "application/json", 502)
                 return
             if route.path == "/api/signal-guide":
                 import signal_guide

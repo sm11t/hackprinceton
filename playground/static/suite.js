@@ -173,6 +173,7 @@
   async function review(p, explain) {
     const i = inputs();
     const q = new URLSearchParams({ business: p.business, property_id: p.property_id, suite: p.suite || "", budget: i.budget, reserve: i.reserve, delay: 3 });
+    if (i.nessie && i.nessie.account_id) q.set("nessie", i.nessie.account_id);
     if (explain) q.set("explain", "1");
     return api("/api/venture/review?" + q.toString());
   }
@@ -341,7 +342,7 @@
         <div class="vhead-main"><input id="vname" class="vname" value="${esc(v.name)}" aria-label="Venture name" maxlength="80">
           <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>${esc(KIND_LABEL[kindOf()])}</span><span class="saved">${savedText()}</span></div></div>
         <dl class="facts">
-          <div><dt>Budget</dt><dd>${kmoney(i.budget)}</dd></div>
+          <div><dt>Budget</dt><dd>${kmoney(i.budget)}${i.nessie && i.nessie.balance === i.budget ? src("Nessie") : ""}</dd></div>
           <div><dt>Reserve</dt><dd>${kmoney(i.reserve)}</dd></div>
           <div><dt>To open with</dt><dd>${kmoney(i.budget - i.reserve)}</dd></div>
           ${i.businessLabel && kindOf() !== "budget" ? `<div><dt>Business</dt><dd>${esc(i.businessLabel)}</dd></div>` : ""}
@@ -398,6 +399,10 @@
     el.innerHTML = `${head("budget", titles[0], titles[1])}
       <div class="budget-layout">
         <div class="panel">
+          <div class="field"><span class="label">Your cash, from your bank</span>
+            <div class="nessie well" id="nessie"><div class="nx-head"><b>Capital One Nessie</b>${chip("blue", "sandbox · simulated bank data")}</div>
+              <div id="nx-body" class="muted small"><span class="spinner" style="width:12px;height:12px"></span> Reading the account…</div></div>
+            <span class="hint">The balance becomes your budget; recurring bills are charged in the 12-month cash view. Sandbox data, not a live bank connection.</span></div>
           ${bizField}${placeField}
           <div class="field"><label for="cash">Total cash you can put in</label>
             <div class="money-input"><span>$</span><input id="cash" inputmode="numeric" value="${num(i.budget)}"></div>
@@ -455,6 +460,24 @@
       el.querySelector("#near").classList.toggle("hidden", b.dataset.m !== "near");
     });
     el.querySelectorAll("#exclude button").forEach((b) => b.onclick = () => b.classList.toggle("on"));
+    // Capital One Nessie: the account's balance is the budget, its recurring bills feed the 12-month view.
+    (async () => {
+      const body = el.querySelector("#nx-body");
+      try {
+        const a = await api("/api/nessie/account");
+        const when = new Date(a.retrieved_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+        body.className = "";
+        body.innerHTML = `<div class="nx-acct"><div><div class="small muted">${esc(a.nickname || "Checking")} · account …${esc(String(a.account_id).slice(-6))}</div>
+            <div class="nx-bal">${money(a.balance)}</div></div>
+            <ul class="plain nx-bills">${(a.bills || []).map((b) => li("grey", "↻", `${esc(b.payee)} <span class="num">${money(b.monthly)}</span>/mo`)).join("") || li("grey", "·", "No recurring bills")}</ul></div>
+          <div class="faint small">${esc(a.source)} · ${a.cached ? `cached ${esc(when)} (offline replay)` : `read ${esc(when)}`}</div>`;
+        const fresh = !i.nessie || i.nessie.account_id !== a.account_id;
+        if (fresh) { cash.value = num(a.balance); range.value = a.balance; sync(); }
+        await setInputs({ nessie: { account_id: a.account_id, balance: a.balance, monthly_bills: a.monthly_bills, retrieved_at: a.retrieved_at, cached: a.cached },
+          ...(fresh ? { budget: a.balance } : {}) }, true);
+        refreshRail("budget");
+      } catch (e) { body.innerHTML = `Nessie unavailable (${esc(e.message)}). Type your cash below.`; }
+    })();
     // Building search (I have a space / I know both): any Houston kit building; listed ones first.
     const loadSuites = async (pid) => {
       const sel = el.querySelector("#suite"); if (!sel) return;
@@ -1141,7 +1164,7 @@
       <div class="cc-top"><div class="seg cc-case">${["low", "base", "high"].map((k) => `<button type="button" data-case="${k}" class="${k === cashCase ? "on" : ""}">${cap(k)} cost</button>`).join("")}</div>${legend}</div>
       <div class="cc-plot">${svg}<div class="cc-tip" hidden></div></div>
       <ul class="plain cc-says">${items.map((it, j) => `<li><span class="mk" style="color:${SERIES[j]}">●</span><span>${cashSentence(it.c, it.label)}</span></li>`).join("")}</ul>
-      <div class="faint small">Starts from your ${kmoney(c0.budget)}; opening costs from the sourced ledger are paid up front, then the CoStar asking rent every month. <b>Zero revenue</b>, and no payroll or utilities, so real runway is shorter. Computed with Jayant's Nessie-pilot simulator. ${table}</div>
+      <div class="faint small">Starts from your ${kmoney(c0.budget)}${/Nessie/.test(c0.cash_source || "") || (inputs().nessie && inputs().nessie.balance === c0.budget) ? " (Capital One Nessie sandbox balance)" : ""}; opening costs from the sourced ledger are paid up front, then the CoStar asking rent every month${(c0.other_bills || []).length ? ` plus your ${c0.other_bills.map((b) => `${esc(b.payee.toLowerCase())} (${money(b.monthly)}/mo)`).join(", ")} from Nessie` : ""}. <b>Zero revenue</b>, and no payroll or utilities, so real runway is shorter. Computed with Jayant's Nessie-pilot simulator. ${table}</div>
     </div>`;
   }
   function bindCash(root, items, rerender) {

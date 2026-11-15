@@ -1,5 +1,6 @@
 """Tests for the budget-first venture pieces: cash to open, the opportunity scan and the deep review."""
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import neighborhood as nb
@@ -350,3 +351,30 @@ class CashMonths(unittest.TestCase):
         self.assertEqual((base["opens"], base["opens_if_delayed"]), (4, 7))
         self.assertLess(out["cases"]["high"]["first_month_below_reserve"], 9)
         self.assertIsNone(vr.cash_months(cost, {"monthly": None}, 500000, 50000))
+
+
+class NessieMoney(unittest.TestCase):
+    def test_nessie_bills_feed_the_12_months(self):
+        cost = {"cash_to_open": {"low": 300000, "base": 400000, "high": 500000}, "build_months": 3,
+                "lines": [{"label": "Equipment", "low": 1, "base": 1, "high": 1}]}
+        plain = vr.cash_months(cost, {"monthly": 10000}, 500000, 50000)
+        bank = vr.cash_months(cost, {"monthly": 10000}, 500000, 50000,
+                              extra_bills=[{"payee": "Personal living expenses", "monthly": 3000}],
+                              cash_source="Capital One Nessie sandbox (simulated bank data)")
+        self.assertEqual(plain["cases"]["base"]["cash"][12] - bank["cases"]["base"]["cash"][12], 36000)
+        self.assertIn("Nessie", bank["cash_source"])
+        self.assertEqual(bank["other_bills"][0]["monthly"], 3000)
+
+    def test_cached_account_is_labelled_cached(self):
+        import suite_nessie as sn
+        with mock.patch.object(sn, "buyer_from_nessie", side_effect=RuntimeError("offline")), \
+                mock.patch.object(sn, "CACHE", Path(self.tmp)):
+            (Path(self.tmp) / "account-a1.json").write_text('{"account_id": "a1", "balance": 500000, "bills": [], '
+                                                            '"monthly_bills": 0, "retrieved_at": "t", "source": "s"}')
+            out = sn.read("a1")
+        self.assertTrue(out["cached"])
+        self.assertEqual(out["balance"], 500000)
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp()
