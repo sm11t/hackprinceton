@@ -1,6 +1,6 @@
 # Pre-Stage-2 vision intelligence research spike
 
-**Status: research spike complete with Vexcel access blocker.** This is an isolated research harness on `research/helix-vision-spike`, based on validated Stage 1 commit `06d95d5`. It does not change Helix production behavior and does not integrate legacy code.
+**Status: research spike complete; Vexcel connectivity and a small matched-property exterior sample are confirmed.** This is an isolated research harness on `research/helix-vision-spike`, based on validated Stage 1 commit `06d95d5`. It does not change Helix production behavior and does not integrate legacy code.
 
 ## Selected property and sources
 
@@ -13,7 +13,11 @@
 
 ### Vexcel
 
-The official [Vexcel v2 API](https://api.vexcelgroup.com/v2/) and [v1-to-v2 operation mapping](https://vexcel.atlassian.net/wiki/spaces/APIDOCS/pages/3035136040/API%2BMigration%2BGuide+from+1.0+to+2.0) were inspected. Relevant operations include oriented coverage/metadata/extract, orthomosaic dates/coverage and property extract generation. Read-only oriented coverage, oriented metadata, orthomosaic dates and orthomosaic coverage probes each returned HTTP 401 with a credential present. No extraction was attempted because authorization and licensed-asset entitlement/cost could not be verified. Consequently there is no Vexcel coverage result or imagery in this spike. The supplied credential needs Vexcel-side authorization/entitlement review.
+The official [Vexcel v2 API](https://api.vexcelgroup.com/v2/) and [v1-to-v2 operation mapping](https://vexcel.atlassian.net/wiki/spaces/APIDOCS/pages/3035136040/API%2BMigration%2BGuide+from+1.0+to+2.0) were inspected alongside the user-supplied Vexcel hackathon tutorial PDF and `vexcel_quickstart.py`. The first probe incorrectly sent the API key as a `token` query parameter, producing misleading 401s. The supplied helper showed the documented `X-API-KEY` header; after correcting the request, all tested read-only operations and the small selected-property image extracts returned HTTP 200. This was an integration bug in our probe, not evidence of missing Vexcel authorization.
+
+For CoStar property `236138` (15603 W Hardy Rd, Houston; 29.944369, -95.385271), `property/extract` returned seven parcel candidates. The point-matching parcel selected collection `us-tx-cypress-2026`, with ortho estimate 2026-01-02. Oriented coverage and metadata returned 25 and 181 features respectively before parcel filtering; four matching source images were identified: north, east, south and west obliques, captured on 2026-01-02 between 17:25:42 and 18:29:39 UTC. The selected collection's orthomosaic date response reports capture range 17:43:12–18:06:35 UTC. Coverage, metadata and dates all returned HTTP 200. Five explicit, low-resolution extracts (one orthomosaic and four obliques) returned HTTP 200 as 800×800 JPEGs. Source IDs, image hashes, dimensions, capture/publish dates, WGS84 coordinates, provider attribution and retrieval time are recorded in the local ignored manifest under `output/vexcel_sample/costar-236138/manifest.json`. The sample contact sheet is local-only. No property/image result is presented as a CoStar field.
+
+To gauge city inventory coverage, the CoStar kit's listing CSV (7,163 Houston and 5,984 Los Angeles rows) was joined with property detail records. Coordinates were present for 1,758 Houston and 1,581 Los Angeles properties; the primary listing CSV itself has no coordinates. A fixed-seed simple random sample of 100 coordinate-bearing properties in each city was checked against `oriented/collections` and `ortho/collections`, without downloading inventory imagery. All 100/100 points in each city had both types of Vexcel coverage. Of these samples, 99/100 in each city linked to at least one Matterport model, and all those linked samples had both types of Vexcel coverage. This is promising sampled evidence, not a complete inventory census or a guarantee for non-geocoded records. Full response rows are retained in the ignored `output/vexcel_inventory_sample.json`.
 
 ### Matterport
 
@@ -57,15 +61,15 @@ Original faces, provenance manifest, approximate manual labels, Perceptron overl
 
 ## Findings and recommended direction
 
-1. **Proceed with a two-part visual evidence chain only after entitlements are ready:** licensed Vexcel exterior imagery plus Matterport interior scan (when the exact-property match exists) → Perceptron Mk1 localized candidates → a VLM constrained to interpret those regions and cite the image/evidence ID. Keep raw-image VLM as a control configuration.
+1. **A two-part visual evidence chain is technically viable on the sampled property:** Vexcel exterior imagery plus the exact-property Matterport interior scan → Perceptron Mk1 localized candidates → a VLM constrained to interpret those regions and cite the image/evidence ID. Keep raw-image VLM as a control configuration. Confirm permitted scope/usage charges before expanding beyond this deliberately small sample.
 2. Keep every generated visual claim tied to source image ID, face/panorama ID, normalized geometry, source coordinates, retrieval/acquisition timestamp and permission/attribution provenance. Preserve model observations separately from CoStar listing facts.
 3. Gate abstention and structured-output correctness before using visual results downstream. Never infer engineering condition, code compliance, or unobserved geometry from these labels.
-4. This spike does **not** justify selecting a winner: the sample is one property and three views; Vexcel exterior coverage is blocked. DeepSeek was faster and slightly cheaper in this run. Qwen with Mk1 context had higher observed precision but lower recall than raw-image Qwen; the measurements are inconclusive beyond this sample.
+4. This spike does **not** justify selecting a winner: the evaluated vision-model sample is one property's three indoor views. DeepSeek was faster and slightly cheaper in this run. Qwen with Mk1 context had higher observed precision but lower recall than raw-image Qwen; the measurements are inconclusive beyond this sample. Vexcel connectivity is confirmed, but only one property's exterior imagery was extracted and city-wide coverage was tested at 100 points per city.
 
 ## Blockers and next steps
 
-- Have Vexcel enable the API credential for the required coverage/metadata products and confirm extraction entitlements and any cost before imagery download.
+- There is no current Vexcel authentication blocker. Before scaling imagery extraction, confirm the credential's permitted volume and any usage charges; this probe's API responses do not report a charge amount.
 - Perceptron Mk1 and configuration B are now confirmed working through OpenRouter; the separate Perceptron credential is unnecessary for this route.
-- If Vexcel confirms coverage at this property's coordinates, use only a permitted low-volume sample and record source IDs, image capture/acquisition time, dimensions, CRS, license and attribution.
+- Extend the city coverage join only after obtaining coordinates for more of the CoStar inventory; current detail records cover 1,758/7,163 Houston and 1,581/5,984 Los Angeles rows. Keep coverage queries separate from image extraction and retain the sample/usage limits.
 - Expand hand-labeled evaluation to several authorized properties/views with independent review before ranking architectures or reporting meaningful detection metrics.
 - Do not integrate this research harness into Helix production or begin Stage 2 business analysis until the separate review/authorization.

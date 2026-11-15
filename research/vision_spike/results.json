@@ -1664,5 +1664,145 @@
       },
       "overlay": "overlay_perceptron-mk1_skybox_face_3.jpg"
     }
-  ]
+  ],
+  "vexcel": {
+    "auth_method": "X-API-KEY header",
+    "initial_401_root_cause": "Probe incorrectly sent key as a token query parameter; corrected to X-API-KEY per supplied quickstart. This was an integration error, not an observed entitlement blocker.",
+    "selected_costar_property": {
+      "id": 236138,
+      "address": "15603 W Hardy Rd, Houston, TX",
+      "coordinates_wgs84": [
+        29.944369,
+        -95.385271
+      ]
+    },
+    "operations_http_status": {
+      "property_extract": 200,
+      "oriented_collections": 200,
+      "oriented_query": 200,
+      "ortho_dates": 200
+    },
+    "selected_collection": "us-tx-cypress-2026",
+    "ortho_capture_dates": {
+      "collection": "us-tx-cypress-2026",
+      "first-capture-date": "2026-01-02T17:43:12",
+      "estimate-date": "2026-01-02T17:48:42",
+      "last-capture-date": "2026-01-02T18:06:35"
+    },
+    "oriented_source_images": [
+      {
+        "direction": "oblique-east",
+        "image_name": "2026~us-tx-cypress-2026~images~E_20260102_180614_49_2DD28CCF482FDB9_rgb",
+        "capture_date": "2026-01-02T18:06:14",
+        "collection": "us-tx-cypress-2026",
+        "first_publish_date": "2026-03-20T19:27:01",
+        "last_publish_date": "2026-03-20T19:28:51"
+      },
+      {
+        "direction": "oblique-north",
+        "image_name": "2026~us-tx-cypress-2026~images~N_20260102_182939_50_2DD28CD8BB07CDA_rgb",
+        "capture_date": "2026-01-02T18:29:39",
+        "collection": "us-tx-cypress-2026",
+        "first_publish_date": "2026-03-20T19:26:59",
+        "last_publish_date": "2026-03-20T19:28:49"
+      },
+      {
+        "direction": "oblique-south",
+        "image_name": "2026~us-tx-cypress-2026~images~S_20260102_172542_49_2DD28CCD0AB6070_rgb",
+        "capture_date": "2026-01-02T17:25:42",
+        "collection": "us-tx-cypress-2026",
+        "first_publish_date": "2026-03-20T19:26:59",
+        "last_publish_date": "2026-03-20T19:28:50"
+      },
+      {
+        "direction": "oblique-west",
+        "image_name": "2026~us-tx-cypress-2026~images~W_20260102_180652_50_2DD28CDA49E4BC7_rgb",
+        "capture_date": "2026-01-02T18:06:52",
+        "collection": "us-tx-cypress-2026",
+        "first_publish_date": "2026-03-20T19:27:01",
+        "last_publish_date": "2026-03-20T19:28:51"
+      }
+    ],
+    "images_extracted": {
+      "ortho": {
+        "status": 200,
+        "filename": "ortho_latest.jpg",
+        "width_px": 800,
+        "height_px": 800,
+        "format": "JPEG",
+        "bytes": 296406,
+        "sha256": "4f6e734d3c4f04ad36bfded0fc244f3bdd29a4d7437e85b5a339401c9d31e300"
+      },
+      "oblique-east": {
+        "status": 200,
+        "filename": "oblique-east_latest.jpg",
+        "width_px": 800,
+        "height_px": 800,
+        "format": "JPEG",
+        "bytes": 282565,
+        "sha256": "7f66b5fa779bce38c15c9c96410b47040f07f2dae7d7d7b30c289b72d9a9ab82"
+      },
+      "oblique-north": {
+        "status": 200,
+        "filename": "oblique-north_latest.jpg",
+        "width_px": 800,
+        "height_px": 800,
+        "format": "JPEG",
+        "bytes": 316404,
+        "sha256": "5d2b044093e7e4f7b189583e35eec5a5b6a64df97bea64b43e9e15d8f7c884fc"
+      },
+      "oblique-south": {
+        "status": 200,
+        "filename": "oblique-south_latest.jpg",
+        "width_px": 800,
+        "height_px": 800,
+        "format": "JPEG",
+        "bytes": 327202,
+        "sha256": "792e2cc87a763b73e1ec119d105a51c35bb8e8f1493e6611d81fccf23b35e6c2"
+      },
+      "oblique-west": {
+        "status": 200,
+        "filename": "oblique-west_latest.jpg",
+        "width_px": 800,
+        "height_px": 800,
+        "format": "JPEG",
+        "bytes": 276601,
+        "sha256": "ea54a4ed23d8591076634bd93a6bf9c595805a1509b232a8df1a639d50ab2ba0"
+      }
+    },
+    "attribution": "Imagery \u00a9 Vexcel Imaging US, Inc. (per supplied Vexcel Hackathon Tutorial).",
+    "retrieved_at_utc": "2026-11-15T04:39:22.032330+00:00",
+    "inventory_sample": {
+      "method": "simple random sample without replacement from coordinate-bearing properties in each city",
+      "sample_per_city": 100,
+      "random_seed": 20261115,
+      "imagery_downloaded": false,
+      "cities": {
+        "Houston": {
+          "costar_city_listing_count": 7163,
+          "coordinate_bearing_count": 1758,
+          "coordinate_bearing_with_matterport_count": 1734,
+          "coverage_sample_n": 100,
+          "sampled_with_both_ortho_and_oblique": 100,
+          "matterport_linked_sample_n": 99,
+          "matterport_linked_with_both_coverage": 99
+        },
+        "Los Angeles": {
+          "costar_city_listing_count": 5984,
+          "coordinate_bearing_count": 1581,
+          "coordinate_bearing_with_matterport_count": 1554,
+          "coverage_sample_n": 100,
+          "sampled_with_both_ortho_and_oblique": 100,
+          "matterport_linked_sample_n": 99,
+          "matterport_linked_with_both_coverage": 99
+        }
+      },
+      "limitation": "Not a complete inventory census; CoStar listing rows without coordinates could not be queried."
+    },
+    "limitations": [
+      "Vexcel response did not report query or extraction charges; no claim of zero cost.",
+      "Only five images were extracted for one selected matched property.",
+      "City coverage rates are samples of coordinate-bearing CoStar properties, not complete city inventories."
+    ]
+  }
 }

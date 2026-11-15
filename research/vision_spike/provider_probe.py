@@ -62,19 +62,21 @@ def _count_records(value):
 
 def vexcel_probe(token):
     wkt = f"POINT({LON} {LAT})"
-    common = {"wkt": wkt, "srid": "4326", "layer": "urban", "token": token}
+    # Vexcel accepts X-API-KEY (preferred) or `api_key`; it does not use a
+    # `token` query parameter. Keep credentials out of URLs and logs.
+    headers = {"X-API-KEY": token, "Accept": "application/json"}
     paths = {
-        "oriented_coverage": ("oriented/collections", {**common, "metadata-format": "JSON"}),
-        "oriented_metadata": ("oriented/query", {"wkt": wkt, "srid": "4326", "orientation": "ALL",
-                             "band": "RGB", "metadata-format": "JSON",
-                             "include": "image-name,geometry,capture-date,collection,product-type,first-publish-date,last-publish-date",
-                             "token": token}),
-        "ortho_dates": ("ortho/dates", common),
-        "ortho_coverage": ("ortho/collections", {**common, "metadata-format": "JSON", "order-by": "default"}),
+        "oriented_coverage": ("oriented/collections", {"wkt": wkt, "srid": "4326", "layer": "urban",
+                                "product-type": "oblique", "include": "product-type,collection,last-capture-date"}),
+        "oriented_metadata": ("oriented/query", {"wkt": wkt, "srid": "4326", "layer": "urban",
+                             "product-type": "oblique", "include": "image-name,geometry,capture-date,collection,product-type,first-publish-date,last-publish-date"}),
+        "ortho_dates": ("ortho/dates", {"wkt": wkt, "srid": "4326", "layer": "urban,urban-r,wide-area,urban-g"}),
+        "ortho_coverage": ("ortho/collections", {"wkt": wkt, "srid": "4326",
+                            "layer": "urban,urban-r,wide-area,urban-g", "include": "collection,last-capture-date"}),
     }
     result, private = {}, {}
     for key, (path, params) in paths.items():
-        status, content_type, body, latency = request("https://api.vexcelgroup.com/v2/" + path + "?" + urlencode(params))
+        status, content_type, body, latency = request("https://api.vexcelgroup.com/v2/" + path + "?" + urlencode(params), headers=headers)
         parsed = None
         try:
             parsed = json.loads(body.decode("utf-8"))
@@ -88,8 +90,9 @@ def vexcel_probe(token):
                        "top_level_keys": sorted(parsed.keys())[:20] if isinstance(parsed, dict) else [],
                        "record_count": _count_records(parsed)}
     save_private("vexcel_raw.json", private)
-    return {"credential_present": True, "operations": result, "imagery_extraction_attempted": False,
-            "reason": "Extraction can incur licensed-asset charges; confirm entitlement/cost first."}
+    return {"credential_present": True, "auth_method": "X-API-KEY header", "operations": result,
+            "imagery_extraction_attempted": False,
+            "reason": "Read-only coverage/metadata checks only; no image extracts requested."}
 
 
 def _post_graphql(url, headers, data):
