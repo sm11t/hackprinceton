@@ -378,3 +378,70 @@ asking rents. Each record states its method, the number of similar deals behind 
 unknown when fewer than 30 recent deals share its use and lease basis. Examples: Tanner suite A asks
 $10.20 vs $5.76–$15.00 for 79 similar Houston flex NNN deals; Wynnwood asks $9.60 vs a modeled
 $9.38–$18.87.
+
+## Neighborhood demand (`neighborhood.py`)
+
+For a CoStar property or a street address and a use, a team of specialist agents says whether the
+neighborhood supports that business, or (with `use=suggest`) ranks the uses. Every step goes into a trace
+(inputs, sources with retrieval dates, evidence records, confidence, code vs LLM, hand-off) that `/maximo`
+shows under "Does the neighborhood support it?".
+
+| Agent | Data | Output |
+|---|---|---|
+| Planner | rule table | which specialists apply to the use (uses with business-to-business demand stay unknown) |
+| Site | CoStar pin or Census geocoder | one point; stops outside the five Houston-area counties |
+| Who lives here | ACS 2020-24 vs 2015-19 tracts within 3 mi | residents, density, income (approx.), age mix, growth vs the Houston area; SFIA participation for pickleball |
+| Who already serves it | OpenStreetMap (Overpass) | facilities within 3 and 5 mi (courts clustered, indoor/paid flagged), supply per 10k residents vs the Houston area |
+| What is moving in | CoStar kit tenancies + company names | arrivals and departures of this kind of business in kit buildings within 5 mi over 3 years |
+| Lookalike check | the above, trained on real facilities | how much the area resembles places that already have the business, with a measured accuracy |
+| Coordinator | the signals | supported / mixed / weak / unknown with the deciding reasons and the rules it used |
+| Narrator (optional) | coordinator output only | 3-sentence summary by Solar Mini; rejected if it uses any number not in its input |
+
+Numbers and verdicts are computed in code. Only the optional summary is LLM-written, and the UI labels it.
+
+```bash
+# from the repo root; keys come from the gitignored .env (CENSUS_API_KEY, optional UPSTAGE_API_KEY)
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --property-id 13890701 --use "indoor pickleball"
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --address "9700 Tanner Rd, Houston, TX 77041" --use suggest --explain
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --evaluate "indoor pickleball"   # re-run the held-out test
+```
+
+- API: `GET /api/neighborhood?property_id=13890701&use=indoor%20pickleball` (or `address=`, `use=suggest`, `explain=1`).
+- Demo links: `/maximo?property=13890701&use=indoor%20pickleball&hood=check` and `&hood=suggest`.
+- The kit is read from `--kit` (web), `COSTAR_KIT`, `./costar-hackathon-kit` or `~/Downloads/costar-hackathon-kit.zip`.
+- **Offline:** every Census, Overpass and LLM response is cached under `playground/output/neighborhood/`
+  (gitignored). Run each demo building once online, then `--offline` (CLI or `web.py`) or
+  `NEIGHBORHOOD_OFFLINE=1` uses only the cache. Anything not cached comes back as unknown, not guessed.
+
+### How accurate is the lookalike check?
+
+Logistic model on 7 resident features (density, income, four age shares, growth) within 3 miles, fixed before
+testing. Positives are real facilities mapped in OpenStreetMap; the background is every Houston-area Census
+tract point (about one per 4,500 residents, so roughly a random residential address). 5-fold hold-out, split
+by ~13-mile grid cells so a held-out facility's neighbours are not in training:
+
+| Use | Facilities | AUC (90% interval) | Hidden facilities in top 30% (chance: 30%) | Income alone | Density alone |
+|---|---|---|---|---|---|
+| Indoor pickleball | 100 | 0.642 (0.598-0.683) | 44% | 0.661 | 0.432 |
+| Fitness studio | 369 | 0.682 (0.660-0.708) | 56% | 0.680 | 0.499 |
+| Childcare | 167 | 0.632 (0.596-0.665) | 45% | 0.585 | 0.406 |
+
+Read honestly: better than chance, but modest. For pickleball and fitness the score is mostly an income
+signal (income alone does as well), while for childcare the age mix adds real information. The
+18 indoor or paid pickleball facilities score a bit higher (AUC 0.689). The interval resamples places
+independently and ignores spatial correlation, so it is too narrow. The score only votes in the verdict when
+the spatial AUC is at least 0.6.
+
+### Limits
+
+- OpenStreetMap is volunteer-mapped: courts in parks are well covered, and childcare is badly undercounted
+  (167 mapped vs thousands licensed). Absence on the map is not proof of absence.
+- The CoStar kit covers only Matterport-scanned properties (about 1,758 in Houston), so the move-in signal is a
+  sample. Categories come from tenant names (keyword rules; CoStar's own industry code is too coarse here).
+  Fitness has 75 Houston tenancies in the kit and childcare 27, so the signal is often "too few to call".
+- ACS 5-year estimates overlap (2015-19 vs 2020-24) and use different tract boundaries. The trend is computed
+  within the same radius on each vintage's own tracts. Median income is a household-weighted mean of tract
+  medians (an approximation).
+- The thresholds (70th/30th percentile, ±2 points of growth, 0.5x/2x supply) are our rules, set relative to the
+  Houston-area distribution. They are not industry standards.
+- Warehouse, flex, office and retail are not modelled: their demand does not come from nearby residents.

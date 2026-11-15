@@ -569,7 +569,9 @@ def competitors_agent(lat, lon, use, radius=RADIUS_MI):
     signal = {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
               "stance": None if ratio is None else (1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
               "reason": ("Supply unknown" if ratio is None else
-                         f"{len(local)} {word} within {radius:g} mi = {ratio:.1f}x the Houston-area rate per resident"
+                         f"{len(local)} {word} within {radius:g} mi"
+                         + (f" ({sum(f['indoor'] or f['commercial'] for _, f in local)} indoor or paid)" if local else "")
+                         + f" = {ratio:.1f}x the Houston-area rate per resident"
                          + (" (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""))}
     nearest_text = (f"; nearest {nearest[1]['name'] or 'unnamed'} at {nearest[0]:.1f} mi" if nearest else "")
     return {"sources": sources, "findings": findings, "signal": signal, "confidence": 0.5,
