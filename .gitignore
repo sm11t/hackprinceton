@@ -8,6 +8,7 @@
 .opportunity-reports/
 .opportunity-usage.jsonl
 .stage2-assets/
+/project helix/finance_lab/vendor/output/
 /project helix/stage3_engine/vendor/output/
 *.json.tmp
 __pycache__/

@@ -53,6 +53,8 @@ def load_env():
 
 load_env()
 from stage2.orchestrator import investigate as run_stage2_investigation
+from stage2.physical_profile import build_physical_profile
+from finance_lab import engine as finance_lab
 from stage3_engine import adapter as stage3_adapter
 import opportunity_report
 
@@ -67,7 +69,7 @@ if MODEL != OPENROUTER_MODEL:
     raise RuntimeError(f"OPENROUTER_MODEL must be {OPENROUTER_MODEL}")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 COSTAR_KIT_PATH = os.environ.get("COSTAR_KIT_PATH", "/Users/jessenth/Downloads/costar-hackathon-kit.zip")
-COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD")
+COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD") or "princeton-h4ck4th0n-2026"
 
 # Initialize CoStar service
 try:
@@ -413,6 +415,53 @@ class ChatHandler(BaseHTTPRequestHandler):
             except ValueError as error: self.send_json({'error':str(error)},status=400)
             except (OSError,RuntimeError) as error: self.send_json({'error':str(error)},status=503)
             return
+        if route.path == "/finance-lab":
+            content = (BASE_DIR / "finance_lab" / "index.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers(); self.wfile.write(content); return
+        if route.path == "/api/finance-lab/businesses":
+            self.send_json({"businesses": finance_lab.businesses()}); return
+        if route.path == "/api/finance-lab/properties":
+            query=parse_qs(route.query); city=(query.get("city") or [""])[0]; q=(query.get("q") or [""])[0].strip()
+            if city not in ("Houston", "Los Angeles") or not q:
+                self.send_json({"properties": []}); return
+            try: self.send_json(costar.search_properties(q, city, limit=50))
+            except Exception as error: self.send_json({"error":str(error)},status=503)
+            return
+        if route.path == "/api/finance-lab/property":
+            try:
+                from zipfile import ZipFile
+                from dataclasses import asdict
+                from discovery import normalize_rent
+                pid=int((parse_qs(route.query).get("id") or [""])[0]); prop=costar.get_property(pid); spaces=[]
+                indexed_address=(costar._property_index.get(pid) or {}).get("address")
+                if indexed_address and not prop.get("error"): prop["address"]=indexed_address
+                with ZipFile(costar.kit_path) as z, z.open("data/commercial-listing-summary.jsonl",pwd=costar.password) as stream:
+                    for line in stream:
+                        if str(pid).encode() not in line: continue
+                        row=json.loads(line)
+                        if row.get("listingStatus") != 1: continue
+                        lease=row.get("forLeaseSummary") or {}
+                        for s in lease.get("spaces") or []:
+                            if s.get("propertyId") != pid: continue
+                            raw={"rate_low":s.get("rateLow") if s.get("rateLow") is not None else lease.get("askingRateLow"),"rate_high":s.get("rateHigh") if s.get("rateHigh") is not None else lease.get("askingRateHigh"),"rate_basis_code":s.get("rateBasis") if s.get("rateBasis") is not None else lease.get("askingRateBasis"),"asking_rate_has_value":s.get("askingRateHasValue"),"monetary_unit":s.get("monetaryUnit",lease.get("monetaryUnit",row.get("monetaryUnit"))),"area_min_sqft":s.get("squareFeetMin"),"area_max_sqft":s.get("squareFeetMax")}
+                            spaces.append({"space_id":s.get("id"),"listing_id":row.get("id"),"suite":s.get("suite"),"area_min_sqft":s.get("squareFeetMin"),"area_max_sqft":s.get("squareFeetMax"),"rent":asdict(normalize_rent(raw))})
+                self.send_json({"property":prop,"spaces":spaces})
+            except (ValueError, TypeError): self.send_json({"error":"Invalid property ID."},status=400)
+            except Exception as error: self.send_json({"error":str(error)},status=503)
+            return
+        if route.path == "/api/finance-lab/nessie":
+            account=(parse_qs(route.query).get("account_id") or [os.environ.get("NESSIE_ACCOUNT_ID", "")])[0]
+            if not account: self.send_json({"error":"Configure NESSIE_ACCOUNT_ID to read a sandbox account."},status=400); return
+            import re
+            if not re.fullmatch(r"[A-Za-z0-9-]{1,80}",account): self.send_json({"error":"Invalid sandbox account ID."},status=400); return
+            try:
+                import suite_nessie
+                self.send_json({"account":suite_nessie.read(account)})
+            except Exception as error: self.send_json({"error":str(error)},status=503)
+            return
         if route.path in ("/", "/index.html"):
             index_path = BASE_DIR / "index.html"
             if not index_path.exists():
@@ -424,6 +473,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
+            return
+
+        if urlsplit(self.path).path == "/api/stage3/physical-profile":
+            query = parse_qs(urlsplit(self.path).query)
+            handoff_id = (query.get("id") or [""])[0]
+            handoff = INVESTIGATION_HANDOFFS.get(handoff_id) or {}
+            dossier = handoff.get("dossier")
+            if not dossier:
+                self.send_json({"error": "Completed investigation dossier not found."}, status=404)
+            else:
+                self.send_json({"physical_profile": build_physical_profile(dossier)})
             return
 
         if urlsplit(self.path).path == "/api/investigation":
@@ -718,6 +778,22 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json(result)
             except (ValueError,json.JSONDecodeError) as error: self.send_json({'error':str(error)},status=400)
             except (OSError,RuntimeError) as error: self.send_json({'error':str(error)},status=503)
+            return
+        if self.path == "/api/finance-lab/simulate":
+            try:
+                data=self.read_json_payload()
+                pid=data.get('property_id')
+                if isinstance(pid,bool) or not str(pid or '').isdigit(): raise ValueError('Select a valid CoStar property.')
+                facts=finance_lab.property_facts(costar,int(pid)) if costar else None
+                if not facts: raise ValueError('Selected CoStar property was not found.')
+                self.send_json(finance_lab.simulate(data,property_data=facts))
+            except (ValueError, json.JSONDecodeError) as error: self.send_json({"error":str(error)},status=400)
+            except (OSError,RuntimeError) as error: self.send_json({"error":f"Could not retrieve property facts ({type(error).__name__})."},status=503)
+            return
+        if self.path == "/api/finance-lab/create-loan":
+            try: self.send_json({"loan":finance_lab.create_loan(self.read_json_payload())})
+            except (ValueError,json.JSONDecodeError) as error: self.send_json({"error":str(error)},status=400)
+            except RuntimeError as error: self.send_json({"error":str(error)},status=503)
             return
         if self.path == "/api/discovery":
             try:
