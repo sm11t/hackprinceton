@@ -29,7 +29,7 @@ from zipfile import ZipFile
 
 from advisor_money import advisor_cash, plan_inputs
 from alternatives import CATALOG
-from deal import SERVICE, monthly_rent
+from deal import SERVICE, load_rent_estimates, monthly_rent
 from money_runway import DEFAULTS
 from eligibility import DWELLING_CAPTION, DWELLING_TYPES, PROPERTY_TYPES
 from reconcile import MARKETS, check_identity, check_size, costar_address, kit_password, unique_scans
@@ -151,7 +151,7 @@ def screen_space(prop, space, use, min_sf=None, max_sf=None):
         "monthly_rent": monthly, "rent_per_sf_year": per_sf_year, "lease_basis": basis,
         "rent_source": "CoStar asking rent" if monthly else "not listed; default assumption used",
         "verdict": verdict, "fit_reason": deciding_reason(fit), "evidence_flags": flags,
-        "build_cost": build_allowance(use, space["square_feet"]),
+        "build_cost": build_allowance(use, space["square_feet"]), "space_id": space["raw"].get("id"),
         "tour_count": len(unique_scans(prop)),
     }
 
@@ -169,47 +169,85 @@ def space_key(row):
     return (VERDICT_ORDER[row["verdict"]], bool(row["evidence_flags"]), row["monthly_rent"] is None, upfront)
 
 
-BUDGET_ORDER = {True: 0, None: 1, False: 2}  # within budget, unknown (no asking rent), over budget
+def budget_order(row):
+    """Within budget on a listed rent, within even at the high rent estimate, unknown, over budget."""
+    if row["within_budget"] is True:
+        return 0 if row["budget_basis"] == "listed rent" else 1
+    return 2 if row["within_budget"] is None else 3
 
 
-def add_cash(row, use, capital, reserve):
+def cash_for(row, use, capital, reserve, monthly):
     inputs = {"starting_cash": capital, "reserve": reserve, "build_cost": row["build_cost"]}
-    if row["monthly_rent"] is not None:
-        inputs["monthly_rent"] = row["monthly_rent"]
+    if monthly is not None:
+        inputs["monthly_rent"] = monthly
     cash = advisor_cash(inputs, use, "lease", area=row["square_feet"],
                         rent_source="CoStar asking rent" if row["monthly_rent"] else "Editable assumption")
     totals = cash["costs"]["totals"]["base"]
     gap = ((cash.get("money") or {}).get("conversion") or {}).get("extra_funding_needed") or 0
-    fits = not totals["shortfall"] and not gap
-    # Without a listed rent the cash figure rests on the default rent, so budget fit is not established.
-    row.update(cash_to_open=totals["cash_required"], shortfall=totals["shortfall"] or 0, reserve_gap=gap,
-               within_budget=fits if row["monthly_rent"] is not None else None,
-               assumed_rent=None if row["monthly_rent"] is not None else DEFAULTS["monthly_rent"])
+    return totals, gap, not totals["shortfall"] and not gap
+
+
+def usable_estimate(row, rent_estimates):
+    """The market rent range for a space with no listed rent, if it rests on enough similar recent deals."""
+    e = ((rent_estimates or {}).get("spaces") or {}).get(str(row.get("space_id")))
+    return e if e and not e.get("low_confidence") else None
+
+
+def add_cash(row, use, capital, reserve, rent_estimates=None):
+    if row["monthly_rent"] is not None:
+        totals, gap, fits = cash_for(row, use, capital, reserve, row["monthly_rent"])
+        row.update(within_budget=fits, budget_basis="listed rent", assumed_rent=None, rent_estimate=None)
+    elif (e := usable_estimate(row, rent_estimates)):
+        # No listed rent: test the budget at the HIGH end of what similar spaces asked, so "within budget"
+        # holds even if the broker quotes high; "over" only when even the typical rent breaks it.
+        typical, high = (round(e[k] * row["square_feet"] / 12) for k in ("typical", "high"))
+        _, _, fits_high = cash_for(row, use, capital, reserve, high)
+        totals, gap, fits_typical = cash_for(row, use, capital, reserve, typical)
+        row.update(within_budget=True if fits_high else (False if not fits_typical else None),
+                   budget_basis="rent estimate", assumed_rent=typical,
+                   rent_estimate={"low": e["low"], "typical": e["typical"], "high": e["high"],
+                                  "method": e["method"], "high_monthly": high})
+    else:
+        # Without a listed rent or a usable estimate, the cash figure rests on the default rent.
+        totals, gap, _ = cash_for(row, use, capital, reserve, None)
+        row.update(within_budget=None, budget_basis="default rent", assumed_rent=DEFAULTS["monthly_rent"],
+                   rent_estimate=None)
+    row.update(cash_to_open=totals["cash_required"], shortfall=totals["shortfall"] or 0, reserve_gap=gap)
     return row
 
 
 def rank_key(row):
-    return (VERDICT_ORDER[row["verdict"]], BUDGET_ORDER[row["within_budget"]], bool(row["evidence_flags"]),
+    return (VERDICT_ORDER[row["verdict"]], budget_order(row), bool(row["evidence_flags"]),
             row["cash_to_open"] if row["cash_to_open"] is not None else float("inf"))
 
 
 def why(row):
     parts = [f"{row['square_feet']:,.0f} sq ft"]
+    e = row.get("rent_estimate")
     if row["monthly_rent"]:
         parts.append(f"${row['monthly_rent']:,}/mo asking ({row['lease_basis']})")
+    elif e:
+        source = "trained model" if e["method"] == "model" else "similar recent deals"
+        parts.append(f"no asking rent listed; similar spaces asked ${e['low']:,.2f}–${e['high']:,.2f}/sq ft/yr "
+                     f"({source}), ~${row['assumed_rent']:,}/mo typical")
     else:
         parts.append("no asking rent listed")
     parts.append(f"${row['build_cost']:,.0f} build-out allowance")
     parts.append(f"~${row['cash_to_open']:,.0f} to open incl. reserve" if row["cash_to_open"] is not None
                  else "cash to open incomplete")
-    if row["within_budget"] is None:
+    if e:
+        parts.append({True: "within budget even at the high rent estimate",
+                      False: "over budget even at the typical rent estimate",
+                      None: "within budget at the typical rent estimate but not the high one; get a quote"}
+                     [row["within_budget"]])
+    elif row["within_budget"] is None:
         parts.append(f"budget fit unknown until the broker quotes a rent (cash assumes ${row['assumed_rent']:,.0f}/mo)")
     else:
         parts.append("within budget" if row["within_budget"] else "over budget under planning allowances")
     return ", ".join(parts) + "."
 
 
-def rank_market(candidates, use, capital, reserve, top=TOP, min_sf=None, max_sf=None):
+def rank_market(candidates, use, capital, reserve, top=TOP, min_sf=None, max_sf=None, rent_estimates=None):
     """Pure ranking over load_market() output."""
     if use not in CATALOG:
         raise ValueError(f"use must be one of {', '.join(CATALOG)}")
@@ -228,7 +266,7 @@ def rank_market(candidates, use, capital, reserve, top=TOP, min_sf=None, max_sf=
             row["evidence_flags"] = building_flags + row["evidence_flags"]
             if prop["id"] not in best or space_key(row) < space_key(best[prop["id"]]):
                 best[prop["id"]] = row
-    rows = sorted((add_cash(row, use, capital, reserve) for row in best.values()), key=rank_key)
+    rows = sorted((add_cash(row, use, capital, reserve, rent_estimates) for row in best.values()), key=rank_key)
     for row in rows:
         row["why"] = why(row)
     counts = {v: sum(r["verdict"] == v for r in rows) for v in ("supported", "investigate")}
@@ -237,10 +275,12 @@ def rank_market(candidates, use, capital, reserve, top=TOP, min_sf=None, max_sf=
         "spaces_screened": screened, "buildings_screened": len(candidates), "buildings_passing": len(rows),
         "by_verdict": counts, "within_budget": sum(r["within_budget"] is True for r in rows),
         "budget_unknown": sum(r["within_budget"] is None for r in rows),
+        "rent_from_estimate": sum(r["budget_basis"] == "rent estimate" for r in rows),
         "results": rows[:top],
-        "ranking_basis": ("Physical-fit verdict from CoStar facts first, then budget (within, then unknown because "
-                          "no rent is listed, then over), then no evidence flag, then the lowest planning cash to open. "
-                          "One space per building. No numeric score."),
+        "ranking_basis": ("Physical-fit verdict from CoStar facts first, then budget (within on a listed rent, within "
+                          "even at the high market-rent estimate for spaces with no listed rent, unknown, over), then "
+                          "no evidence flag, then the lowest planning cash to open. One space per building. No numeric "
+                          "score."),
         "limits": ("CoStar data only: no per-building aerial or scan measurements, so most spaces are 'investigate'. "
                    "Cash to open uses the review's unverified planning allowances, with the build-out scaled by size "
                    f"(${build_allowance(use, REFERENCE_SF) / REFERENCE_SF:g}/sq ft); not quotes. "
@@ -261,7 +301,8 @@ def main():
     args = parser.parse_args()
     try:
         candidates = load_market(args.kit, args.market, kit_password())
-        result = rank_market(candidates, args.use, args.capital, args.reserve, args.top, args.min_sf, args.max_sf)
+        result = rank_market(candidates, args.use, args.capital, args.reserve, args.top, args.min_sf, args.max_sf,
+                             load_rent_estimates())
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
     print(json.dumps(result, indent=2))

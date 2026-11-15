@@ -363,18 +363,27 @@ python3 -m venv .venv && .venv/bin/pip install scikit-learn numpy   # training o
 | Deals since 2012, one model for office-type space and one for the rest | 87% of deals are office; a single model, or all years, did worse on industrial and flex for held-out buildings |
 | Inputs: use, lease basis (`serviceType`), size, year, building type/class/age/size/stories, submarket, location | Lease basis must be an input: full service and NNN rents are not comparable |
 | Gradient-boosted trees, 10th/50th/90th percentile loss, widened by a conformal margin | Gives a range, and the margin makes it hold ~80% of rents in buildings the model never saw |
-| Model served per space use only where it beat the baseline in every held-out test | Flex and medical currently show the middle 80% of similar recent deals instead, and say so |
+| Model served per space use only where it beat the recent-deals baseline in every held-out test | Flex, industrial and medical currently show the middle 80% of similar recent deals instead, and say so |
 
 Evaluation (5 folds grouped by building, so every test building is unseen; baseline = median of
-the same city, use and lease basis):
+the last 7 years of deals for the same city, use and lease basis, i.e. what a broker would quote from
+recent comps):
 
 | Test | Model median error | Baseline | Range holds the rent |
 | --- | --- | --- | --- |
-| 2,110 signed deals from the last 7 years | 16.2% | 22.7% | 86% |
+| 2,110 signed deals from the last 7 years | 16.2% | 21.1% | 86% |
 | 2,085 current listings' asking rents | 15.4% | 21.7% | 84% |
 
-Weak spots: office/retail and flex listings (few examples); industrial ranges held 68% of current
-asking rents. Each record states its method, the number of similar deals behind it, and is marked
+The model's advantage is mostly office (78% of deals: 15.4% vs 20.0%). An earlier version compared
+against an all-years median (22.7%), which old, lower rents drag down; against recent comps the model
+loses on industrial listings (18.4% vs 17.3%) and flex listings (28.0% vs 18.6%), so those show comps.
+Signed rents track asking rents (median ratio 1.00 on 683 deals with both in the same units), so
+"what similar spaces were asking" is a fair label. Most "call for rate" listings have no lease basis
+either, so their estimate rests on few similar deals and is marked low confidence. Each record states its method, the number of similar deals behind it, and is marked
 unknown when fewer than 30 recent deals share its use and lease basis. Examples: Tanner suite A asks
-$10.20 vs $5.76–$15.00 for 79 similar Houston flex NNN deals; Wynnwood asks $9.60 vs a modeled
-$9.38–$18.87.
+$10.20 vs $5.76–$15.00 for 79 similar Houston flex NNN deals; Wynnwood asks $9.60 vs $6.00–$12.98
+for 70 similar industrial NNN deals.
+
+Market ranking uses the range for listed spaces with no asking rent: within budget only if it holds at
+the HIGH end of the range, over budget if it fails at the typical rent, unknown in between. Low-
+confidence estimates are not used.
