@@ -3,7 +3,9 @@
 !.env.example
 .verification-cache.json
 .stage2-handoffs.json
+.stage3-results.json
 .stage2-assets/
+/project helix/stage3_engine/vendor/output/
 *.json.tmp
 __pycache__/
 playground/output/

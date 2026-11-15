@@ -12,6 +12,9 @@
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
   let currentIntake = null;
   let currentDiscovery = null;
+  let currentInvestigation = null;
+  let currentStage3Output = null;
+  let stage3InvestigationId = null;
   let reclassifyTimer = null;
   let displayLimit = 40;
 
@@ -31,9 +34,10 @@
     intakeView.hidden = stage !== 0;
     discoveryView.hidden = stage !== 1;
     $("#stage2").hidden = stage !== 2;
-    $("#stage-indicator").textContent = stage === 0 ? "STAGE 0 · YOUR STARTING POINT" : stage === 1 ? "STAGE 1 · PROPERTY DISCOVERY" : "STAGE 2 · BUILDING INVESTIGATION";
-    $("#step-count").textContent = stage === 0 ? "01 / 03" : stage === 1 ? "02 / 03" : "03 / 03";
-    $("#progress").style.width = stage === 0 ? "12%" : stage === 1 ? "44%" : "76%";
+    $("#stage3").hidden = stage !== 3;
+    $("#stage-indicator").textContent = stage === 0 ? "STAGE 0 · YOUR STARTING POINT" : stage === 1 ? "STAGE 1 · PROPERTY DISCOVERY" : stage === 2 ? "STAGE 2 · BUILDING INVESTIGATION" : "STAGE 3 · BUSINESS OPTIONS";
+    $("#step-count").textContent = stage === 0 ? "01 / 04" : stage === 1 ? "02 / 04" : stage === 2 ? "03 / 04" : "04 / 04";
+    $("#progress").style.width = stage === 0 ? "12%" : stage === 1 ? "36%" : stage === 2 ? "62%" : "82%";
   }
   function readForm() {
     return {
@@ -100,8 +104,11 @@
     $("#investigation-state").textContent = handoff?.status === "stage2_complete" ? "Complete" : handoff?.status === "stage2_running" ? "In progress" : handoff?.status === "stage2_failed" ? "Could not finish" : "Partially complete";
   }
   function renderInvestigation(handoff) {
+    currentInvestigation = handoff;
     renderProgress(handoff);
     const d = handoff?.dossier;
+    $("#stage3-start").disabled = !d || handoff?.status === "stage2_running";
+    $("#stage3-transition-note").textContent = !d ? "Complete the investigation to explore business options." : handoff?.status === "stage2_partial" ? "Some property evidence is incomplete; you can still review conditional options." : "Review business options for this selected space.";
     if (!d) {
       $("#investigation-summary").textContent = handoff?.message || "Checking the selected property and gathering image evidence.";
       return;
@@ -231,6 +238,94 @@
     else for (const item of todo) text(unknowns, "p", item.task, "verification-question");
     $("#investigation-handoff").textContent = JSON.stringify({ physical_capabilities: d.stage3_handoff?.physical_capabilities, visual_evidence: d.stage3_handoff?.visual_evidence, physical_unknowns: d.stage3_handoff?.physical_unknowns, stage3_handoff: d.stage3_handoff }, null, 2);
   }
+  function stage3List(parent, heading, values) {
+    if (!values?.length) return;
+    const box=text(parent,"div",undefined,"stage3-list"); text(box,"h4",heading);
+    const list=text(box,"ul"); for(const value of values) text(list,"li",value);
+  }
+  function stage3Sources(parent, sources) {
+    if (!sources?.length) return;
+    const details=text(parent,"details",undefined,"stage3-sources"); text(details,"summary","View supporting sources");
+    const list=text(details,"ul");
+    for (const source of sources) {
+      const item=text(list,"li");
+      if (source.url && /^https?:\/\//i.test(source.url)) {
+        const link=text(item,"a",source.name || "Source"); link.href=source.url; link.target="_blank"; link.rel="noopener noreferrer";
+      } else text(item,"span",source.name || "Source");
+      if(source.note) text(item,"small",source.note);
+    }
+  }
+  function renderStage3(data) {
+    currentStage3Output=data;
+    $("#stage3-results").hidden=false;
+    $("#stage3-count").textContent=`${data.shortlist?.length || 0} shortlisted · ${data.summary?.businesses ?? data.gates?.length ?? 0} evaluated`;
+    $("#stage3-context").textContent=`${data.inputs?.address || "Selected property"} · ${Number(data.inputs?.space_sf || 0).toLocaleString()} SF · ${money.format(data.inputs?.budget || 0)} budget · Reserve ${data.inputs?.reserve === "unavailable" || data.inputs?.reserve == null ? "not provided" : money.format(data.inputs.reserve)}`;
+    const target=$("#stage3-candidates"); clear(target);
+    if (!data.shortlist?.length) text(target,"p","No business passed all screening gates with the available evidence.","stage3-empty");
+    for (const candidate of data.shortlist || []) {
+      const gate=(data.gates || []).find(x=>x.business===candidate.business) || {};
+      const card=text(target,"article",undefined,"stage3-card");
+      const head=text(card,"div",undefined,"stage3-card-head"), title=text(head,"div");
+      text(title,"span",`#${candidate.rank} · ${candidate.group || "Business option"}`,"stage3-rank");
+      text(title,"h3",candidate.label); text(head,"span","Needs verification","stage3-chip amber");
+      const totals=candidate.stage4_inputs?.cash_to_open || {};
+      const metrics=text(card,"div",undefined,"stage3-metrics");
+      for(const [label,value] of [["Low",totals.low],["Base",totals.base],["High",totals.high]]) {
+        const metric=text(metrics,"div"); text(metric,"small",`${label} startup`); text(metric,"strong",value == null ? "Unknown" : money.format(value));
+      }
+      const checks=text(card,"div",undefined,"stage3-check-grid");
+      const building=text(checks,"div",undefined,"stage3-check"); text(building,"h4","Building fit");
+      text(building,"p",(gate.building?.reasons || []).join(" · ") || gate.building?.rule || "Needs review.");
+      const affordability=text(checks,"div",undefined,"stage3-check"); text(affordability,"h4","Affordability");
+      text(affordability,"p",gate.affordability?.note || gate.affordability?.rule || "Needs review.");
+      stage3List(card,"Conditions",candidate.conditions);
+      stage3List(card,"Unknowns",candidate.unknowns);
+      stage3List(card,"Verify before proceeding",candidate.verification_questions);
+      const sources=[...(gate.building?.sources || []),...(gate.affordability?.sources || []),...(gate.compliance?.sources || [])];
+      const seen=new Set(); stage3Sources(card,sources.filter(s=>{const k=`${s.name}|${s.url}`;if(seen.has(k))return false;seen.add(k);return true;}));
+    }
+    const gates=$("#stage3-gates"); clear(gates);
+    $("#stage3-all-label").textContent=`Review all ${data.gates?.length || 0} business outcomes`;
+    for (const g of data.gates || []) {
+      const row=text(gates,"details",undefined,"stage3-gate"); const summary=text(row,"summary");
+      text(summary,"strong",g.label); text(summary,"span",g.hard_pass ? "Passed screening · conditional" : `Stopped at ${humanize(g.stopped_at || "review")}`,g.hard_pass ? "stage3-chip" : "stage3-chip muted");
+      for(const [label,key] of [["Building","building"],["Affordability","affordability"],["Compliance","compliance"]]) {
+        const info=g[key] || {}; const line=text(row,"div",undefined,"stage3-gate-detail"); text(line,"strong",`${label}: ${humanize(info.status)}`);
+        const reasons=info.reasons?.length ? info.reasons : info.note ? [info.note] : info.gates?.length ? info.gates.map(humanize) : info.rule ? [info.rule] : [];
+        stage3List(line,"Reasons",reasons); stage3List(line,"Unknowns",info.unknowns);
+      }
+    }
+    $("#stage3-json").textContent=JSON.stringify(data,null,2);
+  }
+  async function runStage3() {
+    const handoff=currentInvestigation, entry=handoff?.selected_listing || {}, intake=handoff?.intake || {};
+    if (!handoff?.dossier || !handoff.handoff_id) { $("#stage3-status").textContent="Complete the investigation first."; return; }
+    if (entry.transaction_type !== "lease") { $("#stage3-status").textContent="Business options currently support selected lease spaces. Return to properties to select a lease."; return; }
+    if (!entry.listing_id || !entry.space_id) { $("#stage3-status").textContent="The selected space cannot be verified because its listing or space ID is missing."; return; }
+    const reserve=$("#stage3-reserve").value.trim();
+    if (reserve!=="" && (!Number.isFinite(Number(reserve)) || Number(reserve)<0)) { $("#stage3-status").textContent="Enter a nonnegative reserve or leave it blank."; return; }
+    currentStage3Output=null; $("#stage3-run").disabled=true; $("#stage3-results").hidden=true; $("#stage3-status").textContent="Matching your exact space and evaluating all 26 business types…";
+    try {
+      const query=new URLSearchParams({id:handoff.handoff_id,reserve});
+      const result=await get(`/api/stage3/investigation?${query}`);
+      if (String(result.inputs?.property_id)!==String(entry.property_id)) throw new Error("The Stage 3 property did not match the selected property.");
+      renderStage3(result); $("#stage3-status").textContent="Screening complete. Review the conditions and evidence for each option.";
+    } catch(error) { $("#stage3-status").textContent=`Could not complete business screening: ${error.message}`; }
+    finally { $("#stage3-run").disabled=false; }
+  }
+  $("#stage3-start").addEventListener("click",()=>{
+    const handoff=currentInvestigation; if (!handoff?.dossier) return;
+    const intake=handoff.intake || {}, p=handoff.selected_listing || {};
+    if (stage3InvestigationId === handoff.handoff_id && currentStage3Output) {
+      setStage(3); window.scrollTo({top:0,behavior:"smooth"}); return;
+    }
+    stage3InvestigationId=handoff.handoff_id;
+    $("#stage3-reserve").value=intake.reserve == null ? "" : String(intake.reserve);
+    $("#stage3-context").textContent=`${p.address || "Selected property"} · ${p.area_min_sqft == null ? "Area unavailable" : `${Number(p.area_min_sqft).toLocaleString()} SF`} · ${money.format(intake.total_budget_usd || 0)} budget`;
+    setStage(3); window.scrollTo({top:0,behavior:"smooth"}); runStage3();
+  });
+  $("#stage3-run").addEventListener("click",runStage3);
+  $("#stage3-back").addEventListener("click",()=>{setStage(2);window.scrollTo({top:0,behavior:"smooth"});});
   function classificationLabel(value) {
     return ({ within_budget: "Within budget", stretch: "Stretch", over_budget: "Over budget", unknown: "Unknown" })[value] || "Unknown";
   }
@@ -451,10 +546,19 @@
     finally { button.disabled = false; button.innerHTML = 'Find Properties <span aria-hidden="true">→</span>'; }
   });
   $("#edit-intake").addEventListener("click", () => { setStage(0); fillForm(currentIntake); status.textContent = "Editing intake will require a fresh discovery search."; window.scrollTo({ top: 0, behavior: "smooth" }); });
-  $("#investigation-back").addEventListener("click", () => { setStage(1); window.scrollTo({ top: 0, behavior: "smooth" }); });
+  $("#investigation-back").addEventListener("click", () => { setStage(currentDiscovery ? 1 : 0); window.scrollTo({ top: 0, behavior: "smooth" }); });
   $("#horizon").addEventListener("change", scheduleReclassify);
   $("#allocation").addEventListener("input", scheduleReclassify);
   $("#fitout-question").addEventListener("change", event => { $("#fitout-amount-wrap").hidden = event.target.value !== "yes"; });
   budget.addEventListener("blur", () => { const n = Number(budget.value.replace(/[,$\s]/g, "")); if (Number.isFinite(n) && n > 0) budget.value = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(n); });
   fillForm(JSON.parse(localStorage.getItem(intakeKey) || "null"));
+  const savedInvestigation = new URLSearchParams(window.location.search).get("investigation");
+  if (savedInvestigation) {
+    get(`/api/investigation?id=${encodeURIComponent(savedInvestigation)}`).then(({handoff}) => {
+      if (!handoff?.dossier) throw new Error("Saved investigation is not available yet.");
+      currentIntake=handoff.intake || null; fillForm(currentIntake);
+      $("#investigation-back").textContent="← Back to intake";
+      setStage(2); renderInvestigation(handoff);
+    }).catch(error => { status.textContent=`Could not open investigation: ${error.message}`; });
+  }
 })();

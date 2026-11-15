@@ -53,6 +53,7 @@ def load_env():
 
 load_env()
 from stage2.orchestrator import investigate as run_stage2_investigation
+from stage3_engine import adapter as stage3_adapter
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -65,7 +66,7 @@ if MODEL != OPENROUTER_MODEL:
     raise RuntimeError(f"OPENROUTER_MODEL must be {OPENROUTER_MODEL}")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 COSTAR_KIT_PATH = os.environ.get("COSTAR_KIT_PATH", "/Users/jessenth/Downloads/costar-hackathon-kit.zip")
-COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD") or "princeton-h4ck4th0n-2026"
+COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD")
 
 # Initialize CoStar service
 try:
@@ -80,6 +81,7 @@ DISCOVERY_SESSIONS = {}
 DISCOVERY_LOCK = threading.Lock()
 VERIFY_CACHE_PATH = BASE_DIR / ".verification-cache.json"
 INVESTIGATION_PATH = BASE_DIR / ".stage2-handoffs.json"
+STAGE3_RESULTS_PATH = BASE_DIR / ".stage3-results.json"
 
 
 def read_json_store(path):
@@ -362,7 +364,45 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
+        route = urlsplit(self.path)
+        if route.path == "/api/stage3/result":
+            query=parse_qs(route.query)
+            result=read_json_store(STAGE3_RESULTS_PATH).get((query.get('id') or [''])[0])
+            if result is None: self.send_json({'error':'No saved Stage 3 result for this investigation.'},status=404)
+            else: self.send_json(result)
+            return
+        if route.path == "/api/stage3/investigation":
+            query=parse_qs(route.query,keep_blank_values=True)
+            handoff=INVESTIGATION_HANDOFFS.get((query.get('id') or [''])[0]) or {}
+            try:
+                if not handoff.get('dossier'): raise ValueError('Complete the property investigation first.')
+                listing=handoff.get('selected_listing') or {}; intake=handoff.get('intake') or {}
+                if listing.get('transaction_type') != 'lease': raise ValueError('Stage 3 currently supports selected lease spaces only.')
+                reserve=(query.get('reserve') or [intake.get('reserve')])[0]
+                if reserve == '': reserve=None
+                result=stage3_adapter.run(listing.get('property_id'), intake.get('total_budget_usd'), reserve=reserve,
+                    listing_id=listing.get('listing_id'), space_id=listing.get('space_id'), kit=costar.kit_path, kit_password=costar.password)
+                with DISCOVERY_LOCK:
+                    results=read_json_store(STAGE3_RESULTS_PATH)
+                    results[handoff['handoff_id']]=result
+                    write_json_store(STAGE3_RESULTS_PATH,results)
+                self.send_json(result)
+            except ValueError as error: self.send_json({'error':str(error)},status=400)
+            except (OSError,RuntimeError,AttributeError) as error: self.send_json({'error':str(error)},status=503)
+            return
+        if route.path == "/api/stage3":
+            query=parse_qs(route.query, keep_blank_values=True)
+            try:
+                if not costar: raise RuntimeError('CoStar kit is unavailable.')
+                result=stage3_adapter.run((query.get('property_id') or [None])[0],
+                    (query.get('budget') or [None])[0],
+                    reserve=(query.get('reserve') or [None])[0],
+                    suite=(query.get('suite') or [None])[0], kit=costar.kit_path, kit_password=costar.password)
+                self.send_json(result)
+            except ValueError as error: self.send_json({'error':str(error)},status=400)
+            except (OSError,RuntimeError) as error: self.send_json({'error':str(error)},status=503)
+            return
+        if route.path in ("/", "/index.html"):
             index_path = BASE_DIR / "index.html"
             if not index_path.exists():
                 self.send_error(404, "index.html not found")
@@ -409,8 +449,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             })
             return
 
-        if self.path in ("/maximus.css", "/maximus.js"):
-            asset = BASE_DIR / ("maximus.css" if self.path.endswith(".css") else "maximus.js")
+        if self.path in ("/maximus.css", "/maximus.js", "/stage3.css"):
+            asset = BASE_DIR / self.path.lstrip('/')
             self.send_response(200)
             self.send_header("Content-Type", "text/css; charset=utf-8" if self.path.endswith(".css") else "application/javascript; charset=utf-8")
             self.send_header("Cache-Control", "no-store")

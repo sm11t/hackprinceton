@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102b27"><title>MAXIMUS · Adaptive reuse</title>
-  <link rel="stylesheet" href="/maximus.css"><script src="/maximus.js" defer></script>
+  <link rel="stylesheet" href="/maximus.css"><link rel="stylesheet" href="/stage3.css"><script src="/maximus.js" defer></script>
 </head>
 <body>
 <div class="shell">
@@ -59,7 +59,15 @@
       <section class="investigation-section"><h3>Evidence disagreements</h3><div id="investigation-contradictions"></div></section>
       <section class="investigation-section"><h3>Property compliance preflight</h3><div id="investigation-compliance"></div></section>
       <section class="investigation-section" id="investigation-next-section"><h3>Open property questions</h3><div id="investigation-unknowns"></div></section>
+      <div class="stage3-transition"><button class="primary" id="stage3-start" type="button" disabled>Explore business options →</button><p class="hint" id="stage3-transition-note">Complete the investigation to explore business options.</p></div>
       <details class="handoff-details"><summary>Technical evidence and Stage 3 handoff</summary><p class="hint">Source records and machine-readable data are provided for review. Provider data may be incomplete or dated.</p><pre id="investigation-handoff"></pre></details>
+    </section>
+    <section class="content wide stage3-page" id="stage3" hidden>
+      <button class="stage3-back" id="stage3-back" type="button">← Back to investigation</button>
+      <header class="stage3-header"><div><p class="stage3-kicker">Stage 3 · Business options</p><h2>What could work here?</h2><p id="stage3-context" class="stage3-subtitle"></p></div><span class="stage3-chip">Conditional opportunities</span></header>
+      <div class="stage3-intro"><p>See which business types clear the building, budget and preliminary compliance checks for this space. Each option still needs the checks below.</p><div class="stage3-reserve"><label for="stage3-reserve">Cash reserve <span>optional</span></label><div><span>$</span><input id="stage3-reserve" type="number" min="0" step="any" inputmode="decimal" placeholder="Not provided"><button id="stage3-run" type="button">Find options</button></div><small>Leave blank if you haven’t chosen a reserve.</small></div></div>
+      <p id="stage3-status" class="stage3-status" role="status" aria-live="polite"></p>
+      <div id="stage3-results" hidden><div class="stage3-section-head"><div><p class="stage3-kicker">Your shortlist</p><h3>Opportunities to investigate</h3></div><span id="stage3-count" class="stage3-chip"></span></div><p class="stage3-caveat">These are conditional screening results. They are not legal approvals or verified business demand.</p><div id="stage3-candidates" class="stage3-candidates"></div><details class="stage3-all"><summary id="stage3-all-label">Review all business outcomes</summary><div id="stage3-gates"></div></details><details class="stage3-debug"><summary>Complete deterministic output</summary><pre id="stage3-json"></pre></details></div>
     </section>
   </main>
 </div>
