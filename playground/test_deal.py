@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from deal import deal_facts, load_deal_data, monthly_rent, rent_for_simulation
+from deal import deal_facts, load_deal_data, load_rent_estimates, monthly_rent, rent_for_simulation
 
 CONTRACT_KEYS = {"fact", "value", "source", "source_id", "captured_at", "confidence",
                  "evidence_url", "status", "needs_human", "note"}
@@ -113,6 +113,55 @@ class SimulatorRent(unittest.TestCase):
 
     def test_no_priced_space_means_no_sourced_rent(self):
         self.assertIsNone(rent_for_simulation([space(rate=0)]))
+
+
+def estimates(**overrides):
+    e = {"property_id": 23296, "suite": "A", "space_use": "flex", "service_type": 13, "low": 8.0, "typical": 10.0,
+         "high": 13.0, "asking": 10.2, "method": "model", "similar_recent_deals": 79, "low_confidence": False}
+    e.update(overrides)
+    return {"generated": "2026-11-14", "trained_on_deals": 8314, "train_since": 2012, "recent_years": 7,
+            "evaluation": {"listings": {"model_median_error_pct": 15.4, "range_coverage_pct": 84, "by_space_use": {}}},
+            "spaces": {"21863700": e}}
+
+
+class MarketRent(unittest.TestCase):
+    def market(self, rate=0.85, **overrides):
+        result = deal_facts(23296, [space(rate=rate, id=21863700)], [], [], rent_estimates=estimates(**overrides))
+        return fact(result, "market_rent_range")
+
+    def test_asking_within_range_agrees(self):
+        rec = self.market()  # $0.85/sf/month = $10.20/sf/year
+        self.assertEqual((rec["status"], rec["value"]), ("agrees", 10.0))
+        self.assertIn("$8.00–$13.00", rec["note"])
+        self.assertIn("off by a median 15.4%", rec["note"])
+        self.assertIn("not an appraisal", rec["note"])
+
+    def test_asking_above_range_is_flagged_for_a_person(self):
+        rec = self.market(rate=1.5)  # $18/sf/year
+        self.assertEqual(rec["status"], "conflict")
+        self.assertTrue(rec["needs_human"])
+        self.assertIn("above the range", rec["note"])
+
+    def test_call_for_rate_space_gets_an_estimate_marked_unknown(self):
+        rec = self.market(rate=0)
+        self.assertEqual(rec["status"], "unknown")
+        self.assertIn("No asking rent is posted", rec["note"])
+
+    def test_thin_evidence_is_rough_not_a_verdict(self):
+        rec = self.market(rate=1.5, low_confidence=True, similar_recent_deals=0)
+        self.assertEqual(rec["status"], "unknown")
+        self.assertIn("No recent deals share", rec["note"])
+
+    def test_says_when_the_range_comes_from_similar_deals(self):
+        self.assertIn("79 similar flex deals", self.market(method="similar_deals")["note"])
+
+    def test_no_estimates_file_means_no_records(self):
+        self.assertIsNone(load_rent_estimates("/nonexistent/rent-estimates.json"))
+        result = deal_facts(23296, [space(id=21863700)], [], [], rent_estimates=None)
+        self.assertFalse([r for r in result["records"] if r["fact"] == "market_rent_range"])
+
+    def test_keeps_the_contract(self):
+        self.assertEqual(set(self.market()), CONTRACT_KEYS)
 
 
 class KitLoading(unittest.TestCase):

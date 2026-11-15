@@ -34,7 +34,7 @@
     req_min_drive_in_bays: "Drive-in doors you need", req_min_parking_spaces: "Parking you need",
     req_min_amps: "Power you need", req_min_floor_load_psf: "Floor load you need",
     req_three_phase: "Three-phase power", req_sprinklers: "Sprinklers",
-    lease_asking_rent: "Asking rent", sale_asking_price: "Asking price", last_sale_price: "Sold",
+    lease_asking_rent: "Asking rent", market_rent_range: "Similar leased spaces asked", sale_asking_price: "Asking price", last_sale_price: "Sold",
     capital_vs_lease: "Your capital vs leasing", capital_vs_purchase: "Your capital vs buying",
   };
   const unit = (fact) =>
@@ -44,7 +44,7 @@
     if (r.value === null || r.value === undefined) return "—";
     if (typeof r.value === "boolean") return r.value ? "Yes" : "No";
     if (typeof r.value === "number" && /rent|price|capital_vs/.test(r.fact))
-      return "$" + r.value.toLocaleString("en-US") + (r.fact === "lease_asking_rent" ? "/mo" : r.fact === "capital_vs_lease" ? " yr 1" : "");
+      return "$" + r.value.toLocaleString("en-US") + (r.fact === "lease_asking_rent" ? "/mo" : r.fact === "market_rent_range" ? "/sq ft/yr typical" : r.fact === "capital_vs_lease" ? " yr 1" : "");
     if (typeof r.value === "number")
       return r.fact === "footprint_vs_costar_floor" ? `${r.value}×` : r.value.toLocaleString("en-US") + unit(r.fact);
     return r.value;
@@ -180,6 +180,7 @@
   const DEAL_GROUPS = [
     ["capital", "Your capital", (r) => r.fact.startsWith("capital_")],
     ["lease", "Lease: asking rents in this building", (r) => r.fact === "lease_asking_rent"],
+    ["market", "Market check: what similar spaces that leased were asking", (r) => r.fact === "market_rent_range"],
     ["buy", "Buy: for-sale listing", (r) => r.fact === "sale_asking_price"],
     ["sold", "Sale history", (r) => r.fact === "last_sale_price"],
   ];

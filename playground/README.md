@@ -343,3 +343,38 @@ the selected deal. Cypresswood (966604) is the residential regression, Tanner Su
 and Wynnwood's unnamed 9,900 sq ft listing are the commercial paths. A separately
 requested hypothetical scenario uses editable placeholders. The property decision
 shows evidence by issue and records behind expandable details.
+
+## Market rent check (trained model)
+
+`rent_model.py` learns what spaces like this one were asking when they leased, from the kit's
+signed lease deals, and writes a low / typical / high $/sq ft/year range for every listed space
+(including "call for rate" spaces) to `playground/output/rent-estimates.json`. That folder is
+gitignored because the file is derived from sponsor data. The deal panel shows it as
+`market_rent_range` next to each asking rent. If the file is missing, the check is skipped.
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install scikit-learn numpy   # training only; the server stays stdlib
+.venv/bin/python playground/rent_model.py --kit ~/Downloads/costar-hackathon-kit.zip   # ~1 min on a laptop CPU
+```
+
+| Choice | Why |
+| --- | --- |
+| Target: asking rent on signed deals, normalized to $/sq ft/yr | 15,609 deals have it; contract rent is on only ~2,000 |
+| Deals since 2012, one model for office-type space and one for the rest | 87% of deals are office; a single model, or all years, did worse on industrial and flex for held-out buildings |
+| Inputs: use, lease basis (`serviceType`), size, year, building type/class/age/size/stories, submarket, location | Lease basis must be an input: full service and NNN rents are not comparable |
+| Gradient-boosted trees, 10th/50th/90th percentile loss, widened by a conformal margin | Gives a range, and the margin makes it hold ~80% of rents in buildings the model never saw |
+| Model served per space use only where it beat the baseline in every held-out test | Flex and medical currently show the middle 80% of similar recent deals instead, and say so |
+
+Evaluation (5 folds grouped by building, so every test building is unseen; baseline = median of
+the same city, use and lease basis):
+
+| Test | Model median error | Baseline | Range holds the rent |
+| --- | --- | --- | --- |
+| 2,110 signed deals from the last 7 years | 16.2% | 22.7% | 86% |
+| 2,085 current listings' asking rents | 15.4% | 21.7% | 84% |
+
+Weak spots: office/retail and flex listings (few examples); industrial ranges held 68% of current
+asking rents. Each record states its method, the number of similar deals behind it, and is marked
+unknown when fewer than 30 recent deals share its use and lease basis. Examples: Tanner suite A asks
+$10.20 vs $5.76–$15.00 for 79 similar Houston flex NNN deals; Wynnwood asks $9.60 vs a modeled
+$9.38–$18.87.
