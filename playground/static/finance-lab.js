@@ -120,36 +120,33 @@
         <div class="card"><div class="k">12-month cash, base</div><div class="v">${base ? money(base.cash[12]) : "unavailable"}</div><div class="s">${base ? (base.first_month_below_reserve ? `below reserve in month ${base.first_month_below_reserve}` : "stays above reserve") : esc(d.unavailable.join("; "))}</div></div>
         <div class="card"><div class="k">Opens</div><div class="v">${base ? "month " + base.opens : "—"}</div><div class="s">${base ? `delayed: month ${base.opens_if_delayed}` : ""}</div></div>
       </div>
-      <div class="explain">${esc(c.explain)}${c.delayed_required ? ` · with the ${d.inputs.delay}-month delay, required(base) = ${money(c.delayed_required.base)}` : ""}${c.flip ? ` · ${esc(c.flip.text)}` : ""}</div></div>`);
+      ${c.delayed_required || c.flip ? `<p class="muted">${c.delayed_required ? `With a ${d.inputs.delay}-month delay you'd need ${money(c.delayed_required.base)}. ` : ""}${c.flip ? esc(c.flip.text) : ""}</p>` : ""}</div>`);
 
-    html.push(`<div class="panel"><h2>Not modeled</h2><div class="notmodeled">${d.not_modeled.map((x) => `<span>${esc(x)}: NOT MODELED</span>`).join("")}</div><p class="muted">${esc(d.reading)}</p></div>`);
-
-    html.push(`<div class="panel"><h2>12-month cash balance</h2>${co ? chart(co, loan, c.reserve) : `<div class="warn">Unavailable: ${esc(d.unavailable.join("; "))}</div>`}
+    html.push(`<div class="panel"><h2>12-month cash balance</h2><p class="muted">Costs and rent only, no revenue or operating costs, so read it as runway, not profit.</p>${co ? chart(co, loan, c.reserve) : `<div class="warn">Unavailable: ${esc(d.unavailable.join("; "))}</div>`}
       ${co ? `<div class="scroll"><table><tr><th>Month</th>${base.cash.map((_, i) => `<th class="n">${i}</th>`).join("")}</tr>
         ${["low", "base", "high"].map((k) => `<tr><td>Cash only, ${k}</td>${co.cases[k].cash.map((v) => `<td class="n ${v < c.reserve ? "bad" : ""}">${money(v)}</td>`).join("")}</tr>`).join("")}
         ${loan?.cases ? `<tr><td>With loan, base</td>${loan.cases.base.cash.map((v) => `<td class="n ${v < c.reserve ? "bad" : ""}">${money(v)}</td>`).join("")}</tr>` : ""}
         <tr><td class="muted">Outflow, base</td><td></td>${base.outflows.map((v) => `<td class="n muted">${money(v)}</td>`).join("")}</tr></table></div>
-        <p class="muted">Monthly bills charged: ${co.monthly_bills.map((b) => `${esc(b.payee)} ${money(b.monthly)}`).join(" · ")}${loan?.cases ? ` · loan payment ${money(loan.monthly_payment)}` : ""}. Upfront (month 1, base): ${money(base.upfront)}. Engine: ${esc(co.engine)}.</p>
-        <p class="muted">${esc(co.note)}</p>` : ""}</div>`);
+        <p class="muted">Monthly: ${co.monthly_bills.map((b) => `${esc(b.payee)} ${money(b.monthly)}`).join(" · ")}${loan?.cases ? ` · loan ${money(loan.monthly_payment)}` : ""}. Opening costs (base, month 1): ${money(base.upfront)}.</p>` : ""}</div>`);
 
     if (loan) {
-      html.push(`<div class="panel"><h2>Loan analysis <span class="tag">${esc(loan.status)}</span></h2>
-        ${loan.note ? `<div class="warn">${esc(loan.note)}</div>` : ""}
+      html.push(`<div class="panel"><h2>Loan</h2>
+        ${loan.note ? `<p class="muted">${esc(loan.note)}</p>` : ""}
         <div class="cards">
-          <div class="card"><div class="k">Principal</div><div class="v">${money(loan.amount)}</div><div class="s">${esc(loan.amount_source)}</div></div>
-          <div class="card"><div class="k">APR · term</div><div class="v">${loan.apr}% · ${loan.term_months} mo</div><div class="s">assumption</div></div>
+          <div class="card"><div class="k">Principal</div><div class="v">${money(loan.amount)}</div><div class="s">${loan.amount === loan.suggested_amount ? "covers the gap" : "your amount"}</div></div>
+          <div class="card"><div class="k">APR · term</div><div class="v">${loan.apr}% · ${loan.term_months} mo</div></div>
           <div class="card"><div class="k">Monthly payment</div><div class="v">${money(loan.monthly_payment)}</div></div>
           <div class="card"><div class="k">Interest, first 12 months</div><div class="v">${money(loan.interest_12m)}</div><div class="s">principal repaid ${money(loan.principal_12m)}</div></div>
           <div class="card"><div class="k">Principal left after 12 months</div><div class="v">${money(loan.principal_remaining_12m)}</div></div>
           <div class="card"><div class="k">12-month cash with loan</div><div class="v">${loan.cases ? money(loan.cases.base.cash[12]) : "—"}</div><div class="s">${loan.cases ? (loan.cases.base.first_month_below_zero ? `below zero in month ${loan.cases.base.first_month_below_zero}` : loan.cases.base.first_month_below_reserve ? `below reserve in month ${loan.cases.base.first_month_below_reserve}` : "stays above reserve") : ""}</div></div>
         </div>
-        <div class="explain">${esc(loan.explain)}</div><p class="muted">${esc(loan.label)}</p>
-        ${d.inputs.nessie_account && loan.amount ? `<button type="button" id="createLoan">Create this loan in the Nessie sandbox…</button> <span class="muted" id="createStatus"></span>` : `<p class="muted">Enter a Nessie sandbox account to enable “Create this loan in the Nessie sandbox”. Running a scenario never creates one.</p>`}</div>`);
+        <p class="muted">Proposed loan at an assumed rate (Nessie sandbox).</p>
+        ${d.inputs.nessie_account && loan.amount ? `<button type="button" id="createLoan">Create in Nessie sandbox…</button> <span class="muted" id="createStatus"></span>` : ""}</div>`);
     }
 
     html.push(`<div class="panel"><h2>Where each input came from</h2><table><tr><th>Input</th><th>Value</th><th>Source</th></tr>
       ${Object.entries(d.provenance).map(([k, p]) => `<tr><td>${esc(k.replace(/_/g, " "))}</td><td class="n">${Array.isArray(p.value) ? (p.value.length ? p.value.map((b) => `${esc(b.payee)} ${money(b.monthly)}`).join("<br>") : "none") : (typeof p.value === "number" && k !== "build_months" ? money(p.value) : esc(p.value ?? "unknown"))}</td><td>${tag(p.kind)} ${esc(p.source)}</td></tr>`).join("")}
-      <tr><td>building fit</td><td class="n">${esc(d.building_fit.status)}</td><td>${tag("listed")} CoStar facts vs the registry's space needs (neighborhood.building_fit)</td></tr></table></div>`);
+      <tr><td>building fit</td><td class="n">${esc(d.building_fit.status)}</td><td>${tag("listed")} CoStar building facts</td></tr></table></div>`);
 
     const ledger = d.ledger.lines || [];
     html.push(`<div class="panel"><h2>Startup cost ledger <span class="muted">(${esc(d.ledger.basis_quality || "none")})</span></h2>
