@@ -117,6 +117,45 @@ def cached_search(search, cache_dir, offline=False):
     return run
 
 
+def context_from_kit(property_id, suite=None, kit=None):
+    """Normalized context for one CoStar property (optionally one listed suite) from the sponsor kit.
+
+    Building-level CoStar facts are not suite measurements, so measurements_match_scope stays False and the
+    business screen never treats them as the selected space's usable size or height. A scan captioned for
+    another address is reported as a record, not as a building identity conflict: the CoStar record itself is
+    still the right building, only the tour may not be.
+    """
+    from eligibility import PROPERTY_TYPES
+    from reconcile import check_identity, costar_address, costar_ceiling_ft, kit_password, load_property
+    from space_fit import listed_spaces
+    kit = kit or os.environ.get('COSTAR_KIT') or os.path.expanduser('~/Downloads/costar-hackathon-kit.zip')
+    password = kit_password()
+    prop = load_property(kit, int(property_id), password)
+    address = costar_address(prop)
+    a = prop.get('primaryAddress') or {}
+    space = None
+    if suite is not None:
+        space = next((s for s in listed_spaces(kit, int(property_id), password)
+                      if str(s.get('suite') or '').strip().lower() == str(suite).strip().lower()), None)
+        if space is None:
+            raise ValueError(f'Suite {suite!r} is not an active listed space at property {property_id}.')
+    kind = str(prop.get('propertyType', '')).strip()
+    parking = sum((p.get('totalSpaces') or 0) for p in prop.get('parking') or []) or None
+    scan_flags = [r for r in check_identity(prop) if r['status'] == 'conflict']
+    return {
+        'property_id': int(property_id), 'address': address['display'], 'lat': a.get('latitude'), 'lon': a.get('longitude'),
+        'scope': f'suite:{space["suite"]}' if space else 'building',
+        'facts': {'property_type': PROPERTY_TYPES.get(kind, kind or 'unknown'),
+                  'area_sqft': (space or {}).get('square_feet') or prop.get('grossBuildingAreaSquareFeet'),
+                  'clear_height_ft': costar_ceiling_ft(prop)[0], 'floors': prop.get('numStoriesAboveGrade'),
+                  'parking_spaces': parking},
+        'measurements_match_scope': False,
+        'evidence_records': [record('scan_address', r['value'], source='costar', url=r.get('evidence_url'),
+                                    note=r['note'] + ' Do not apply this tour\'s measurements to the property.',
+                                    conflict=True) for r in scan_flags],
+    }
+
+
 def preflight(context):
     """Building stage; returns normalized scope, deterministic gates and handoff."""
     if not isinstance(context, dict):
@@ -134,7 +173,7 @@ def preflight(context):
         gates.append('identity_incomplete')
     if context.get('identity_conflict') is True:
         gates.append('identity_conflict')
-    if facts.get('property_type', '').lower() in {'residential', 'multifamily', 'apartment'}:
+    if str(facts.get('property_type') or '').lower() in {'residential', 'multifamily', 'apartment', 'homes'}:
         gates.append('commercial_conversion_unestablished')
     for name in ('area_sqft', 'clear_height_ft', 'floors', 'parking_spaces', 'hvac_capacity', 'fire_inspection'):
         value = facts.get(name)
@@ -142,6 +181,9 @@ def preflight(context):
         if name in ('area_sqft', 'clear_height_ft', 'floors') and (isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0):
             value = None
         records.append(record(name, value, source='costar' if name in ('area_sqft', 'floors') else 'public:caller-evidence', note='Caller-provided; verify source, suite scope and date. Not an inspection.'))
+    records.append(record('jurisdiction', code, source='public:census-geocoder', url=jurisdiction.get('evidence_url'),
+                          note=jurisdiction.get('note') or 'Jurisdiction supplied by caller.'))
+    records.extend(context.get('evidence_records') or [])
     for topic, action in TOPICS.items():
         records.append(record(topic, note=action))
     return dict(schema_version='compliance.v1', stage='building', property_id=context.get('property_id'), scope=context.get('scope'),
@@ -213,14 +255,24 @@ def check_business(context, business, search=None, requirements=None):
     report['authority'] = authority
     report['records'].append(record('official_process', url, url=url, note='General process reference, not parcel approval'))
     # Two bounded calls, not 26 independent loops. Evidence cannot execute instructions.
-    for topic in ('change of use occupancy permits', 'parking HVAC fire accessibility business licensing'):
-        query = f'{authority} {context.get("address", "")} property {context.get("property_id")} {business} {topic}'
+    term = search_term(business)
+    seen = set()
+    for topic in ('change of use certificate of occupancy permit', 'fire accessibility parking business license requirements'):
+        # Process-level query: official sites never mention a CoStar id or this street address.
+        query = f'{authority} {term} {topic}'
         if search is None:
             report['trace'].append(dict(query=query, status='not_run'))
             continue
         try:
             results = search(query, domains)
-            accepted = [dict(url=r['url'], title=str(r.get('title', ''))[:300], excerpt=str(r.get('content', ''))[:2000], retrieved_at=datetime.now(timezone.utc).isoformat(), applicability='unverified') for r in results if official(r.get('url', ''), domains)]
+            accepted = []
+            for r in results:
+                url = r.get('url', '')
+                if not official(url, domains) or url in seen or any(x in url.lower() for x in EXCLUDE_PATHS):
+                    continue
+                seen.add(url)
+                accepted.append(dict(url=url, title=str(r.get('title', ''))[:300], excerpt=str(r.get('content', ''))[:2000],
+                                     retrieved_at=datetime.now(timezone.utc).isoformat(), applicability='unverified'))
             report['research'].extend(accepted)
             report['trace'].append(dict(query=query, status='retrieved', accepted=len(accepted)))
         except Exception:
@@ -229,12 +281,47 @@ def check_business(context, business, search=None, requirements=None):
     return report
 
 
-if __name__ == '__main__':
+# How permitting offices describe each demo business. Raw keys like "indoor_pickleball" match public park
+# pages and unrelated documents; the occupancy wording matches commercial permit guidance.
+SEARCH_TERMS = {
+    'pickleball': 'commercial indoor sports recreation facility assembly occupancy',
+    'daycare': 'child care center',
+    'restaurant': 'restaurant food service establishment',
+}
+EXCLUDE_PATHS = ('/parks', 'cannabis')  # park-court and cannabis pages are not private-business guidance
+
+
+def search_term(business):
+    category = demo_requirements(business, None)
+    return SEARCH_TERMS.get((category or {}).get('category'), business.replace('_', ' '))
+
+
+RESEARCH_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', 'compliance', 'research')
+
+
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('context', help='Normalized JSON context file')
+    parser.add_argument('context', nargs='?', help='Normalized JSON context file (or use --property-id)')
+    parser.add_argument('--property-id', type=int, help='Build the context from the CoStar kit')
+    parser.add_argument('--suite', help='Listed suite at that property')
+    parser.add_argument('--kit')
     parser.add_argument('--business')
-    parser.add_argument('--live', action='store_true', help='Opt-in Tavily official-source retrieval')
+    parser.add_argument('--live', action='store_true', help='Opt-in Tavily official-source retrieval (cached)')
+    parser.add_argument('--offline', action='store_true', help='Use only cached research and jurisdiction')
     args = parser.parse_args()
-    with open(args.context) as stream:
-        context = json.load(stream)
-    print(json.dumps(check_business(context, args.business, tavily_search if args.live else None) if args.business else preflight(context), indent=2))
+    if args.property_id:
+        context = context_from_kit(args.property_id, args.suite, args.kit)
+    elif args.context:
+        with open(args.context) as stream:
+            context = json.load(stream)
+    else:
+        parser.error('give a context file or --property-id')
+    if args.offline:
+        os.environ['JURISDICTION_OFFLINE'] = '1'
+    search = cached_search(tavily_search, RESEARCH_CACHE, offline=args.offline) if (args.live or args.offline) else None
+    result = check_business(context, args.business, search) if args.business else preflight(context)
+    print(json.dumps(result, indent=2, default=str))
+
+
+if __name__ == '__main__':
+    main()
