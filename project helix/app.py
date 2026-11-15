@@ -26,6 +26,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from costar_service import CoStarService
 from intake import build_intake
+from financing import attach_financing, handoff_financing
 from discovery import (
     CITY_CODES, apply_allocation_and_horizon, attach_explanations,
     confidence_assessment, make_discovery_response, nemotron_explanations,
@@ -398,6 +399,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             inventory = costar.discover_active_listings(city_name, policy["transaction_types"], limit=1000)
             raw_records = inventory["listings"]
             response = make_discovery_response(intake, raw_records)
+            attach_financing(response, intake)
             explanation_candidates = [r for r in response["results"]
                                       if r["budget_classification"] != "over_budget"][:24]
             explanations, model_trace = nemotron_explanations(
@@ -445,6 +447,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             response = make_discovery_response(
                 session["intake"], session["raw_records"], session["model_explanations"],
                 acquisition_percent=percent, preferred_horizon=horizon)
+            attach_financing(response, session["intake"])
             response["discovery_id"] = discovery_id
             response["intake_summary"] = session["response"]["intake_summary"]
             response["trace"] = {**session["response"]["trace"], "reclassified_without_provider_calls": True}
@@ -519,6 +522,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             "intake": session["intake"], "selected_listing": record,
             "property_facts": property_facts if property_facts_available else {},
             "property_facts_status": "available" if property_facts_available else "unavailable",
+            "financing": handoff_financing(record, session["intake"]),
             "message": "Selection saved for a future investigation stage. Stage 2 was not run.",
         }
         INVESTIGATION_HANDOFFS[handoff_id] = handoff

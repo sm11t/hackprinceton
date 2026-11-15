@@ -150,6 +150,14 @@
       appendFact(facts, "Recorded CoStar asking range", saleRange);
       appendFact(facts, "Maximum acquisition price", money.format(currentDiscovery?.policy?.maximum_sale_price_usd || 0));
       appendFact(facts, "Sale budget class", classificationLabel(r.sale_classification));
+      const loan = r.financing_option;
+      if (loan && loan.status === "financeable") {
+        appendFact(facts, "Capital One Nessie loan", `${money.format(loan.loan_amount_usd)} (${loan.loan_to_price_percent}% of price) · ${money.format(loan.monthly_payment_usd)}/mo · ${money.format(loan.first_year_interest_usd)} interest in year 1`);
+        text(card, "p", loan.label, "caveat");
+      } else if (loan && loan.status === "not_financeable") {
+        appendFact(facts, "Capital One Nessie loan", "Not financeable at assumed terms");
+        text(card, "p", `${loan.reason} ${loan.label}`, "caveat");
+      }
     }
     text(card, "p", r.explanation || "No generated explanation; canonical CoStar data is shown.", "grounded");
     if (r.total_occupancy_cost_status === "unknown" && r.transaction_type === "lease") {
