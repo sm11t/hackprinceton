@@ -13,20 +13,25 @@ Shared instructions for every coding agent on this team (Claude Code reads this 
 |---|---|
 | Code | This GitHub repo |
 | Idea, chosen track, stack, owners, API contracts, decisions | Slack canvas **"HackPrinceton F26 — Spec & Decisions"** (https://hackprincetonavengers.slack.com/docs/T0CHMBYM2VC/F0CHJ5NSHU5) |
-| Tasks | Slack list **"HackPrinceton Task Board"** (https://hackprincetonavengers.slack.com/lists/T0CHMBYM2VC/F0CHT5HKW9J) |
+| Tasks | Slack **#tasks** channel (ID `C0CHPFE4490`): one message per task |
 | Agent status updates | Slack **#agent-log** |
 
 If you have no Slack access, ask your human to paste the canvas/task info into the session.
 
 ## Session protocol
+**#tasks format** (keep it exactly like this so every agent can parse it):
+- Task = one message: `TASK: <what> | Owner: <name> | Branch: <branch or none>`
+- Status = reaction on the task message: 👀 in progress · ✅ done · 🚫 blocked
+- Updates, questions, PR links = replies in the task's thread
+
 **At start:**
-1. Read the Spec & Decisions canvas and the Task Board.
-2. Claim exactly one task: set Status → In Progress, fill Branch.
+1. Read the Spec & Decisions canvas and #tasks.
+2. Take exactly one task: reply in its thread "taking this, owner: <name>" and add 👀.
 3. Work on a branch named `feat/<short-name>` or `fix/<short-name>`.
 
 **At end:**
 1. Commit, push, open a PR (small and frequent).
-2. Update the Task Board row (Status, Notes).
+2. Reply in the task's thread with what changed; add ✅ when done (or 🚫 if blocked, with the reason).
 3. Post to #agent-log:
    ```
    [Agent: Claude/ChatGPT] [Owner: name]

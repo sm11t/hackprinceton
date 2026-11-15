@@ -14,7 +14,7 @@ Checks so far:
   identity     scan caption address vs CoStar address (e.g. 9750 vs 9700 Tanner Rd)
   scan_dates   CoStar's originationDate per scan (latest date the scan can show;
                Matterport's own `created` is the re-hosting date and must not be used)
-  clear_height CoStar ceiling height vs Matterport measured room heights
+  clear_height CoStar building ceiling and Matterport room dimensions, separately scoped
   flood        FEMA National Flood Hazard Layer zone at the CoStar pin
   occupancy    suite-named scan vs the CoStar tenancy covering that suite on the scan date
                (empty marketing scan + active lease = conflict; tenant moved in after = fine)
@@ -29,8 +29,8 @@ Add --offline to skip Matterport and FEMA network calls.
 """
 import argparse
 import base64
-import io
 import json
+import math
 import os
 import re
 import sys
@@ -49,6 +49,7 @@ STREET_WORDS = {
     "dr": "drive", "ln": "lane", "pkwy": "parkway", "pky": "parkway", "hwy": "highway",
     "fwy": "freeway", "ct": "court", "pl": "place", "cir": "circle", "trl": "trail",
     "n": "north", "s": "south", "e": "east", "w": "west", "ste": "suite",
+    "plz": "plaza", "expy": "expressway", "ter": "terrace",
 }
 SUFFIXES = ("road|rd|street|st|avenue|ave|av|boulevard|blvd|drive|dr|lane|ln|parkway|pkwy|pky|highway|hwy|"
             "freeway|fwy|court|ct|place|pl|circle|cir|trail|trl|way|loop|plaza|plz|expressway|expy|terrace|ter")
@@ -57,7 +58,7 @@ ADDRESS_RE = re.compile(
     rf"(?<![#\w])(\d{{1,6}}(?:\s*-\s*\d{{1,6}})?)\s+((?:[NSEW]\.?\s+)?(?:[A-Za-z0-9.']+\s+){{0,4}}?(?:{SUFFIXES}))\b\.?",
     re.I)
 UNIT_BEFORE_RE = re.compile(r"(?:suite|ste\.?|unit|#|floor|fl\.?|bldg\.?|building)\s*$", re.I)
-SUITE_RE = re.compile(r"\b(?:suite|ste\.?|unit|#)\s*([A-Za-z0-9-]+)", re.I)
+SUITE_RE = re.compile(r"(?:\b(?:suite|ste\.?|unit)\s*|#\s*)([A-Za-z0-9-]+)", re.I)
 M2_TO_FT = 3.28084
 
 
@@ -68,12 +69,16 @@ def record(fact, value, source, source_id=None, captured_at=None, confidence=0.5
     """One fact in the shared evidence contract. Keep every check on this shape."""
     if status not in {"agrees", "conflict", "unknown"}:
         raise ValueError(f"bad status {status!r}")
+    if value is None:
+        status = "unknown"
+    if not math.isfinite(float(confidence)) or not 0 <= float(confidence) <= 1:
+        raise ValueError("confidence must be finite and between zero and one")
     return {
         "fact": fact, "value": value, "source": source,
         "source_id": None if source_id is None else str(source_id),
         "captured_at": captured_at, "confidence": round(float(confidence), 2),
         "evidence_url": evidence_url, "status": status,
-        "needs_human": bool(needs_human), "note": note,
+        "needs_human": bool(needs_human or status in {"unknown", "conflict"}), "note": note,
     }
 
 
@@ -96,11 +101,30 @@ def load_property(kit_path, property_id, password=None):
     raise ValueError(f"CoStar property {property_id} is not in the kit.")
 
 
+def source_date(value):
+    """Accept an actual ISO calendar date, not a malformed or missing timestamp."""
+    try:
+        return date.fromisoformat(str(value)[:10]).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def positive_number(value):
+    """Missing, zero, negative, booleans and non-finite dimensions are unknown."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
 def scans_of(prop):
     """Matterport scan attachments, with the capture date CoStar recorded."""
     return [
         {"model_id": a.get("videoKey"), "caption": a.get("caption") or "",
-         "captured_at": (a.get("originationDate") or "")[:10] or None,
+         "captured_at": source_date(a.get("originationDate")),
          "attachment_id": a.get("attachmentMasterId"), "thumbnail": a.get("attachmentUri")}
         for a in prop.get("attachments") or []
         if a.get("videoExternalReferenceType") in MATTERPORT_TYPES and a.get("videoKey")
@@ -108,13 +132,23 @@ def scans_of(prop):
 
 
 def unique_scans(prop):
-    """One entry per model id (CoStar can attach the same scan twice), earliest date kept."""
-    best = {}
+    """One model, retaining every distinct caption and attachment provenance.
+
+    The earliest dated attachment bounds how late the scan could have existed;
+    it is not a verified camera capture date. Never discard conflicting captions.
+    """
+    groups = {}
     for scan in scans_of(prop):
-        seen = best.get(scan["model_id"])
-        if not seen or (scan["captured_at"] or "9") < (seen["captured_at"] or "9"):
-            best[scan["model_id"]] = scan
-    return list(best.values())
+        groups.setdefault(scan["model_id"], []).append(scan)
+    result = []
+    for scans in groups.values():
+        first = min(scans, key=lambda s: s["captured_at"] or "9999-12-31")
+        combined = dict(first)
+        combined["captions"] = list(dict.fromkeys(s["caption"] for s in scans))
+        combined["attachment_ids"] = list(dict.fromkeys(s["attachment_id"] for s in scans))
+        combined["attachment_dates"] = sorted({s["captured_at"] for s in scans if s["captured_at"]})
+        result.append(combined)
+    return result
 
 
 def tour_url(model_id):
@@ -141,7 +175,7 @@ def parse_caption(caption, home_street=None):
             found = (match.group(1), match.group(2))
             break
     if not found and home_street:
-        core = home_street.split()[0]  # e.g. "tanner" from "tanner road"
+        core = " ".join(home_street.split()[:-1]) or home_street
         m = re.search(rf"(?<![#\w])(\d{{1,6}}(?:\s*-\s*\d{{1,6}})?)\s+({re.escape(core)})\b", caption, re.I)
         if m and not UNIT_BEFORE_RE.search(caption[:m.start()]):
             found = (m.group(1), m.group(2))
@@ -180,17 +214,30 @@ GENERIC_STREET_WORDS = set(STREET_WORDS.values()) | {"freeway", "highway", "loop
 
 
 def same_street(a, b):
-    """True if the names match or share a distinctive word ("world houston parkway" ~ "world parkway");
-    None if they could still be aliases (highways: "n i 45" vs "north freeway"); False otherwise."""
+    """Exact normalized names agree; possible abbreviations/aliases are unknown.
+
+    Shared words do not establish identity: Main St != Main Rd, and East Main
+    St != West Main St. A highway alias requires an independent address match.
+    """
+    a, b = normalize_street(a), normalize_street(b)
     if not a or not b:
         return None
-    if a == b or a in b or b in a:
+    if a == b:
         return True
-    words_a, words_b = set(a.split()) - GENERIC_STREET_WORDS, set(b.split()) - GENERIC_STREET_WORDS
-    if words_a & words_b:
-        return True
+    directions = {"north", "south", "east", "west"}
+    da, db = set(a.split()) & directions, set(b.split()) & directions
+    if da and db and da != db:
+        return False
+    suffixes = {STREET_WORDS.get(word, word) for word in SUFFIXES.split("|")}
+    if a.split()[-1] in suffixes and b.split()[-1] in suffixes and a.split()[-1] != b.split()[-1]:
+        if not ({a.split()[-1], b.split()[-1]} <= {"freeway", "highway"}):
+            return False
     highway = re.compile(r"\b(i|ih|us|sh|fm|freeway|highway|interstate)\b|\bi ?\d+\b")
     if highway.search(a) or highway.search(b):
+        return None
+    distinctive_a = set(a.split()) - GENERIC_STREET_WORDS
+    distinctive_b = set(b.split()) - GENERIC_STREET_WORDS
+    if distinctive_a & distinctive_b:
         return None
     return False
 
@@ -198,52 +245,84 @@ def same_street(a, b):
 # --- Checks ---------------------------------------------------------------------
 
 def check_identity(prop):
-    """Does each scan's caption name the same address as the CoStar record?"""
+    """Compare CoStar attachment caption addresses, not physical suite identity."""
     home = costar_address(prop)
     out = []
     for scan in unique_scans(prop):
-        parsed = parse_caption(scan["caption"], home["street"])
-        common = dict(fact="scan_address", value=scan["caption"], source="matterport",
-                      source_id=scan["model_id"], captured_at=scan["captured_at"],
-                      evidence_url=tour_url(scan["model_id"]))
-        if not parsed["street_number"]:
-            out.append(record(**common, confidence=0.3, status="unknown",
-                              note=f"Scan caption names no street address; cannot confirm it is {home['display']}."))
-            continue
-        number_ok = number_matches(parsed["street_number"], home["street_number"])
-        street_ok = same_street(parsed["street"], home["street"])
-        if number_ok and street_ok is None:
-            out.append(record(**common, confidence=0.5, status="unknown", needs_human=True,
-                              note=(f"Same street number as CoStar ({home['display']}) but the street is written as "
-                                    f"'{parsed['street'].title()}', likely a highway alias. Confirm it is the same "
-                                    "building.")))
-            continue
-        if number_ok and street_ok:
-            out.append(record(**common, confidence=0.9, status="agrees",
-                              note=f"Caption address matches CoStar ({home['display']})."
-                                   + (f" Scan covers suite {parsed['suite']}." if parsed["suite"] else "")))
+        for caption in scan["captions"]:
+            parsed = parse_caption(caption, home["street"])
+            common = dict(fact="scan_address", value=caption, source="costar",
+                          source_id=scan["model_id"], captured_at=scan["captured_at"],
+                          evidence_url=tour_url(scan["model_id"]), needs_human=True)
+            provenance = (f"CoStar attachment caption for Matterport model {scan['model_id']}; "
+                          "not a surveyed address or suite join. ")
+            if not parsed["street_number"] or not home["street_number"] or not home["street"]:
+                out.append(record(**common, confidence=0.3, status="unknown",
+                                  note=provenance + "A complete address is missing; confirm the building and advertised suite."))
+                continue
+            number_ok = number_matches(parsed["street_number"], home["street_number"])
+            street_ok = same_street(parsed["street"], home["street"])
+            ranged = "-" in parsed["street_number"] or "-" in home["street_number"]
+            if number_ok and (street_ok is None or (street_ok and ranged)):
+                out.append(record(**common, confidence=0.4, status="unknown",
+                                  note=provenance + f"Caption is compatible with {home['display']}, but an address range "
+                                  "or street alias does not identify the exact building. Confirm before using measurements."))
+            elif number_ok and street_ok:
+                out.append(record(**common, confidence=0.8, status="agrees",
+                                  note=provenance + f"Caption address matches CoStar ({home['display']}). "
+                                  "This confirms address text only; suite identity and measurement coverage remain separate checks."
+                                  + (f" Caption names suite {parsed['suite']}." if parsed["suite"] else "")))
+            else:
+                out.append(record(**common, confidence=0.8, status="conflict",
+                                  note=provenance + f"Caption names {parsed['street_number']} {parsed['street'].title()}, "
+                                  f"but the property is {home['display']}. Confirm the building before applying scan measurements."))
+    if not out:
+        out.append(record("scan_address", None, "costar", prop["id"], needs_human=True,
+                          note="No linked Matterport scan attachment. Building and suite geometry are unverified."))
+    return out
+
+
+def check_suite_identity(prop, selected_suite=None):
+    """A caption can support a suite label, but never silently prove a physical join."""
+    out = []
+    identity = check_identity(prop)
+    for scan in unique_scans(prop):
+        suites = {parse_caption(c, costar_address(prop)["street"])["suite"] for c in scan["captions"]}
+        suites.discard(None)
+        normalized = {s.casefold().strip() for s in suites}
+        requested = str(selected_suite).casefold().strip() if selected_suite is not None else None
+        address_records = [r for r in identity if r["source_id"] == scan["model_id"]]
+        address_matches = bool(address_records) and all(r["status"] == "agrees" for r in address_records)
+        status = "unknown"
+        if requested and normalized and requested not in normalized:
+            status = "conflict"
+        elif requested and normalized == {requested} and address_matches:
+            status = "agrees"
+        note = (f"Caption suite labels: {', '.join(sorted(suites)) or 'not provided'}. "
+                f"Advertised suite selected: {selected_suite if selected_suite is not None else 'not specified'}. ")
+        if status == "agrees":
+            note += "Address and suite text correspond; broker confirmation of scan coverage and a dimensioned plan is still required."
         else:
-            what = "street number" if street_ok else "street number and street"
-            out.append(record(
-                **common, confidence=0.85 if street_ok else 0.6, status="conflict", needs_human=True,
-                note=(f"Scan is captioned {parsed['street_number']} {parsed['street'].title()} but CoStar's address is "
-                      f"{home['display']} (different {what}). It may be a sibling building in the same park or a "
-                      "mislinked scan. Confirm which building was scanned before using its rooms or measurements.")))
+            note += "Do not apply room measurements or court counts to the advertised suite until its scan coverage is confirmed."
+        out.append(record("scan_suite", sorted(suites) or None, "costar", scan["model_id"],
+                          scan["captured_at"], confidence=0.7 if status == "agrees" else 0.3,
+                          evidence_url=tour_url(scan["model_id"]), status=status, needs_human=True, note=note))
     return out
 
 
 def check_scan_dates(prop):
-    """Real capture date per scan, from CoStar's attachment record."""
+    """Report attachment provenance dates without mislabeling them camera dates."""
     out = []
     for scan in unique_scans(prop):
         out.append(record(
-            fact="scan_captured_at", value=scan["captured_at"], source="costar",
+            fact="scan_attachment_date", value=scan["captured_at"], source="costar",
             source_id=scan["attachment_id"], captured_at=scan["captured_at"],
             confidence=0.8 if scan["captured_at"] else 0.2, evidence_url=tour_url(scan["model_id"]),
-            status="agrees" if scan["captured_at"] else "unknown", needs_human=not scan["captured_at"],
-            note=("CoStar's originationDate for this scan attachment (when CoStar added it; the scan itself can be "
-                  "older). Use it, not Matterport's 'created' (the re-hosting date), as the latest date the scan can "
-                  "describe when comparing with tenancy or listing dates.")))
+            status="agrees" if scan["captured_at"] else "unknown", needs_human=True,
+            note=("CoStar originationDate is the attachment date, an upper bound for when the scan existed, "
+                  "not a verified camera capture date. Matterport created is a re-hosting date and is not used. "
+                  "A scan predating a tenancy cannot establish current vacancy. "
+                  f"Attachment IDs: {scan['attachment_ids']}; recorded dates: {scan['attachment_dates']}.")))
     return out
 
 
@@ -266,71 +345,95 @@ def matterport_rooms(model_id):
 
 def costar_ceiling_ft(prop):
     for key in ("propertyFlex", "propertyIndustrial", "propertyOffice", "propertyRetail"):
-        height = ((prop.get(key) or {}).get("structural") or {}).get("ceilingHeightFeet")
-        if height:
+        height = positive_number(((prop.get(key) or {}).get("structural") or {}).get("ceilingHeightFeet"))
+        if height is not None:
             return height, key
     return None, None
 
 
 def check_clear_height(prop, rooms_by_model):
-    """CoStar ceiling height vs Matterport measured heights (0 means not measured)."""
+    """Preserve building and room heights without comparing unlike spatial scopes.
+
+    A largest scanned room is not automatically the advertised suite or the
+    building's clear height. Even a positive room estimate cannot establish
+    unobstructed height under lights, beams and sprinklers.
+    """
     costar_ft, where = costar_ceiling_ft(prop)
     out = [record(fact="ceiling_height_ft", value=costar_ft, source="costar", source_id=prop["id"],
-                  confidence=0.6 if costar_ft else 0.2, status="unknown" if not costar_ft else "agrees",
-                  needs_human=True,
-                  note=(f"CoStar {where}.structural.ceilingHeightFeet. Researched value, not a site measurement; "
-                        "usable clear height under beams, sprinklers and lights must be verified on site.")
-                       if costar_ft else "CoStar has no ceiling height for this property.")]
-    for model_id, rooms in rooms_by_model.items():
-        # Compare the main space only: building ceiling height describes the big open area, and
-        # smaller measured rooms (offices with dropped ceilings) would raise false conflicts.
-        dims = [(r, r.get("dimensionEstimates") or {}) for r in rooms]
-        main_room, main = max(dims, key=lambda rd: rd[1].get("area") or 0, default=(None, {}))
-        label = (main_room or {}).get("label") or "unlabeled room"
-        area_ft2 = round((main.get("area") or 0) * M2_TO_FT ** 2)
-        height_m = main.get("height") or 0
-        if not main_room or height_m <= 0:
-            out.append(record(
-                fact="ceiling_height_ft", value=None, source="matterport", source_id=model_id,
-                confidence=0.1, evidence_url=tour_url(model_id), status="unknown", needs_human=True,
-                note=(f"Largest scanned space ({label}, ~{area_ft2:,} sq ft) has no measured height (Matterport "
-                      "reports 0, common in large open spaces). Clear height stays unverified; smaller rooms' "
-                      "heights are not used because they do not describe the main space.")))
+                  confidence=0.6 if costar_ft is not None else 0.2,
+                  status="unknown" if costar_ft is None else "agrees", needs_human=True,
+                  note=(f"Building-level CoStar {where}.structural.ceilingHeightFeet. Recorded ceiling height; "
+                        "not a verified advertised-suite measurement or unobstructed clear height.")
+                       if costar_ft is not None else "CoStar has no usable positive ceiling height for this property.")]
+    scans = {s["model_id"]: s for s in unique_scans(prop)}
+    for model_id in dict.fromkeys([*scans, *rooms_by_model]):
+        rooms = rooms_by_model.get(model_id)
+        scan = scans.get(model_id, {})
+        if not rooms:
+            out.append(record("ceiling_height_ft", None, "matterport", model_id,
+                              scan.get("captured_at"), confidence=0.1,
+                              evidence_url=tour_url(model_id), needs_human=True,
+                              note="Room measurements were not available for this linked scan. Verify suite coverage and clear height on a measured plan."))
             continue
-        main_ft = round(height_m * M2_TO_FT, 1)
-        agrees = costar_ft is not None and abs(main_ft - costar_ft) <= max(2.0, 0.15 * costar_ft)
-        out.append(record(fact="ceiling_height_ft", value=main_ft, source="matterport", source_id=model_id,
-                          confidence=0.7, evidence_url=tour_url(model_id),
-                          status="unknown" if costar_ft is None else ("agrees" if agrees else "conflict"),
-                          needs_human=not agrees,
-                          note=f"Measured height of the largest scanned space ({label}, ~{area_ft2:,} sq ft)."
-                               + (f" CoStar says {costar_ft} ft." if costar_ft else "")))
+        dims = [(r, r.get("dimensionEstimates") or {}) for r in rooms]
+        main_room, main = max(dims, key=lambda rd: positive_number(rd[1].get("area")) or 0)
+        label = main_room.get("label") or "unlabeled room"
+        area_m2 = positive_number(main.get("area"))
+        height_m = positive_number(main.get("height"))
+        area_description = f"~{round(area_m2 * M2_TO_FT ** 2):,} sq ft" if area_m2 is not None else "area unknown"
+        note = (f"Scan room {main_room.get('id') or 'ID unavailable'} ({label}, {area_description}). ")
+        if height_m is None:
+            note += "Height is missing, zero or invalid; it is unknown. Smaller rooms do not establish this room's height. "
+        else:
+            note += "Matterport dimension estimate for this room only, not measured unobstructed clear height. "
+        note += ("Do not compare with the building-level CoStar ceiling value or apply it to the advertised suite "
+                 "until identity, room coverage and measurement definitions are confirmed. The date is CoStar attachment provenance, not verified capture time.")
+        out.append(record("ceiling_height_ft", round(height_m * M2_TO_FT, 1) if height_m is not None else None,
+                          "matterport", model_id, scan.get("captured_at"), confidence=0.5 if height_m else 0.1,
+                          evidence_url=tour_url(model_id), status="unknown", needs_human=True, note=note))
     return out
 
 
 def check_flood(prop):
     home = costar_address(prop)
     lat, lon = home["latitude"], home["longitude"]
+    try:
+        lat, lon = float(lat), float(lon)
+        valid = math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180
+    except (ValueError, TypeError):
+        valid = False
+    if not valid:
+        return [record("flood_zone", None, "public:fema-nfhl", evidence_url=FEMA_NFHL,
+                       note="CoStar coordinates are missing or invalid; no flood lookup was performed.")]
     params = urlencode({"geometry": f"{lon},{lat}", "geometryType": "esriGeometryPoint", "inSR": 4326,
                         "spatialRel": "esriSpatialRelIntersects", "outFields": "FLD_ZONE,ZONE_SUBTY,SFHA_TF",
                         "returnGeometry": "false", "f": "json"})
     url = f"{FEMA_NFHL}?{params}"
     with urlopen(Request(url, headers={"User-Agent": "property-evidence-check"}), timeout=30) as resp:
         data = json.loads(resp.read())
-    zones = [f["attributes"] for f in data.get("features") or []]
+    if data.get("error"):
+        raise RuntimeError("FEMA returned a service error")
+    zones = [f.get("attributes") or {} for f in data.get("features") or []]
     today = date.today().isoformat()
     if not zones:
         return [record(fact="flood_zone", value=None, source="public:fema-nfhl", captured_at=today,
                        confidence=0.3, evidence_url=url, status="unknown", needs_human=True,
-                       note="No mapped FEMA flood zone at the CoStar pin (unmapped area or service gap).")]
-    zone = zones[0]
-    special = zone.get("SFHA_TF") == "T"
-    return [record(fact="flood_zone", value=zone.get("FLD_ZONE"), source="public:fema-nfhl", captured_at=today,
-                   confidence=0.8, evidence_url=url, status="agrees", needs_human=special,
-                   note=f"{zone.get('ZONE_SUBTY') or 'Zone ' + str(zone.get('FLD_ZONE'))}. "
-                        + ("Special Flood Hazard Area: flood insurance is typically required for financed purchases."
-                           if special else "Outside the Special Flood Hazard Area.")
-                        + " Point lookup at the CoStar pin; the building footprint can cross zones.")]
+                       note="No mapped FEMA flood zone returned at the pin. This does not establish low flood risk.")]
+    out = []
+    for zone in zones:
+        mapped = zone.get("FLD_ZONE")
+        sfha = zone.get("SFHA_TF")
+        special = ("Mapped Special Flood Hazard Area." if sfha == "T" else
+                   "Mapped outside the Special Flood Hazard Area." if sfha == "F" else
+                   "Special Flood Hazard Area flag unavailable.")
+        out.append(record(fact="flood_zone", value=mapped, source="public:fema-nfhl",
+                          source_id=f"pin:{lat},{lon}", captured_at=today,
+                          confidence=0.8 if mapped else 0.2, evidence_url=url,
+                          status="agrees" if mapped else "unknown", needs_human=True,
+                          note=f"{zone.get('ZONE_SUBTY') or 'FEMA mapped zone'}. {special} "
+                          "Point lookup only; the building footprint may cross zones. All returned zones are retained. "
+                          "Property flood history is unknown. Date is retrieval date, not the map effective date."))
+    return out
 
 
 # --- Time-aware occupancy -------------------------------------------------------
@@ -497,8 +600,12 @@ def check_size(prop):
                                               "wrong (or a mezzanine/basement is counted). Ask for a measured plan "
                                               "before pricing per sq ft."))))
     else:
+        missing = [label for label, value in (
+            ("gross building area", gba), ("typical floor area", typical), ("story count", stories),
+        ) if not value]
         out.append(record(fact="gross_area_vs_floors", value=None, **common, confidence=0.1, status="unknown",
-                          note="CoStar is missing gross area, typical floor or story count."))
+                          note=f"CoStar has no recorded {', '.join(missing)} for this property. "
+                               "The building area comparison is unresolved."))
     if gba and rba and rba > gba * 1.02:
         out.append(record(
             fact="rentable_vs_gross_area", value=round(rba / gba, 2), **common, confidence=0.7, status="conflict",
@@ -507,26 +614,47 @@ def check_size(prop):
     return out
 
 
-def reconcile(prop, offline=False, tenancies=None):
-    """All checks for one property. Pass tenancies (from load_tenancies) to add the occupancy check."""
-    results = {"property_id": prop["id"], "address": costar_address(prop)["display"],
-               "records": check_identity(prop) + check_scan_dates(prop) + check_size(prop), "errors": {}}
+def reconcile_evidence(prop, rooms_by_model=None, *, selected_suite=None, public_records=(), tenancies=None):
+    """Pure deterministic evidence adapter for LangChain/Deep Agents tools.
+
+    Accept already-fetched original records, avoiding repeated network calls.
+    No LLM is allowed to override these source and spatial-scope checks. The
+    grouped response and record keys are the agreed shared evidence contract.
+    """
+    records = (check_identity(prop) + check_suite_identity(prop, selected_suite)
+               + check_scan_dates(prop) + check_clear_height(prop, rooms_by_model or {})
+               + check_size(prop) + list(public_records))
     if tenancies is not None:
-        results["records"] += check_occupancy(prop, tenancies)
-    rooms_by_model = {}
-    if not offline:
+        records += check_occupancy(prop, tenancies)
+    return {"property_id": prop["id"], "address": costar_address(prop)["display"],
+            "records": records, "conflicts": sum(r["status"] == "conflict" for r in records), "errors": {}}
+
+
+def reconcile(prop, offline=False, tenancies=None, *, rooms_by_model=None, selected_suite=None):
+    """Collect missing sources then apply the same deterministic evidence checks."""
+    errors = {}
+    supplied_rooms = rooms_by_model is not None
+    rooms_by_model = dict(rooms_by_model or {})
+    if not offline and not supplied_rooms:
         for scan in unique_scans(prop):
             try:
                 rooms_by_model[scan["model_id"]] = matterport_rooms(scan["model_id"])
-            except Exception as error:  # provider errors are reported, never fatal
-                results["errors"][f"matterport:{scan['model_id']}"] = str(error)
-    results["records"] += check_clear_height(prop, rooms_by_model)
+            except Exception as error:  # do not echo provider URLs or credential-bearing exception text
+                errors[f"matterport:{scan['model_id']}"] = f"Room lookup failed ({type(error).__name__})."
+    public = []
     if not offline:
         try:
-            results["records"] += check_flood(prop)
+            public = check_flood(prop)
         except Exception as error:
-            results["errors"]["fema"] = str(error)
-    results["conflicts"] = sum(r["status"] == "conflict" for r in results["records"])
+            errors["fema"] = f"Flood lookup failed ({type(error).__name__})."
+            public = [record("flood_zone", None, "public:fema-nfhl", evidence_url=FEMA_NFHL,
+                             note="FEMA lookup failed; flood exposure remains unverified.")]
+    else:
+        public = [record("flood_zone", None, "public:fema-nfhl", evidence_url=FEMA_NFHL,
+                         note="Offline mode skipped the FEMA lookup; flood exposure remains unverified.")]
+    results = reconcile_evidence(prop, rooms_by_model, selected_suite=selected_suite, public_records=public,
+                                 tenancies=tenancies)
+    results["errors"] = errors
     return results
 
 
@@ -576,6 +704,7 @@ def main():
     parser.add_argument("--scan-identity", choices=sorted(MARKETS))
     parser.add_argument("--scan-occupancy", choices=sorted(MARKETS))
     parser.add_argument("--offline", action="store_true", help="Skip Matterport and FEMA network calls.")
+    parser.add_argument("--suite", help="Advertised suite label, when selected by the user.")
     parser.add_argument("--json", type=Path, help="Write results to this file.")
     args = parser.parse_args()
     if not (args.property_id or args.scan_identity or args.scan_occupancy):
@@ -589,7 +718,7 @@ def main():
         else:
             tenancies = load_tenancies(args.kit, {args.property_id}, password).get(args.property_id, [])
             result = reconcile(load_property(args.kit, args.property_id, password), offline=args.offline,
-                               tenancies=tenancies)
+                               tenancies=tenancies, selected_suite=args.suite)
     except (OSError, ValueError, RuntimeError) as error:
         parser.exit(1, f"{error}\n")
     text = json.dumps(result, indent=2)
