@@ -683,20 +683,20 @@
     function setDots(list) {
       dotLayers.forEach(function (m) { pinGroup.remove(m); m.geometry.dispose(); m.material.dispose(); });
       dotLayers = [];
-      var minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9, by = [[], [], [], []];
+      var minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9, by = [[], [], [], [], []];
       (list || []).forEach(function (d) {
         if (!d || !isFinite(d[0]) || !isFinite(d[1])) return;
-        var xz = proj(+d[0], +d[1]); by[Math.max(0, Math.min(3, d[2] | 0))].push(xz);
+        var xz = proj(+d[0], +d[1]); by[Math.max(0, Math.min(4, d[2] | 0))].push(xz);
         minX = Math.min(minX, xz.x); maxX = Math.max(maxX, xz.x); minZ = Math.min(minZ, xz.z); maxZ = Math.max(maxZ, xz.z);
       });
       var m4 = new THREE.Matrix4();
       by.forEach(function (pts, stage) {
-        var color = stage === 3 ? 0x5DB98A : grey(C.light);
+        var color = stage === 4 ? 0x5DB98A : stage === 3 ? 0xE2B341 : grey(C.light); // green passes all, amber: authority not identified
         var mesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.16, 0.16, 1, 6).translate(0, 0.5, 0),
-          new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: stage === 3 ? 0.95 : 0.7 }), Math.max(1, pts.length));
+          new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: stage >= 3 ? 0.95 : 0.7 }), Math.max(1, pts.length));
         pts.forEach(function (xz, i) { mesh.setMatrixAt(i, m4.makeTranslation(xz.x, 0.08, xz.z)); });
         mesh.count = pts.length;
-        mesh.userData = { stage: stage, h: stage === 3 ? 2.2 : 0.9, k: 1, target: 1 };
+        mesh.userData = { stage: stage, h: stage >= 3 ? 2.2 : 0.9, k: 1, target: 1 };
         mesh.instanceMatrix.needsUpdate = true;
         mesh.scale.y = mesh.userData.h;
         pinGroup.add(mesh); dotLayers.push(mesh);
@@ -719,7 +719,7 @@
         if (Math.abs(u.target - u.k) < 0.01) u.k = u.target;
         m.visible = u.k > 0.02;
         m.scale.y = Math.max(0.001, u.h * u.k);
-        m.material.opacity = (u.stage === 3 ? 0.95 : 0.7) * u.k;
+        m.material.opacity = (u.stage >= 3 ? 0.95 : 0.7) * u.k;
       });
       Object.keys(pins).forEach(function (id) {
         var P = pins[id], sel = selected != null && String(selected) === id;

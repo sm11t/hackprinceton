@@ -215,6 +215,7 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
               "cost_not_estimated": 0, "rent_not_listed": 0}
     pairs, unpriced = [], {}
     where, tally = {}, {"houston": 0, "harris_unincorporated": 0, "other_city": 0, "unverified": 0}
+    fate = {}  # business -> (furthest gate 0-3, reason), filled only when scanning chosen buildings
     reach = {}  # building -> furthest gate any business x space there passed (0 none, 1 building, 2 cash, 3 neighborhood)
     for pid, b in market.items():
         if center and radius_mi and nb.miles(center[0], center[1], b["lat"], b["lon"]) > radius_mi:
@@ -232,12 +233,17 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                 funnel["combinations"] += 1
                 fit = row["fits"].get(sp["value"], {}).get(key)
                 if not fit or fit["status"] == "no":
+                    if property_ids and fate.get(key, (-1,))[0] < 0:
+                        fate[key] = (0, "; ".join((fit or {}).get("reasons") or ["No space needs recorded"]))
                     continue
                 funnel["building_can_host"] += 1
                 reach[pid] = max(reach[pid], 1)
                 cost = cash_to_open(key, sp["sf"], rent["monthly"], budget=budget, reserve=reserve,
                                     building_type=b["facts"].get("type"))
                 if cost["affordability"] == "over":
+                    if property_ids and fate.get(key, (-1,))[0] < 1:
+                        fate[key] = (1, f"Cash to open + reserve is ${cost['required']['low']:,.0f} even in the low case, "
+                                        f"over the ${budget:,.0f} budget")
                     continue
                 demand = row["demand"].get(key)
                 if cost["affordability"] == "unknown":
@@ -252,6 +258,11 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                 reach[pid] = max(reach[pid], 2)
                 funnel["rent_not_listed"] += cost["affordability"] == "rent_unknown"
                 if not demand or not promising(demand):
+                    if property_ids and fate.get(key, (-1,))[0] < 2:
+                        verdict = (demand or {}).get("verdict") or "unknown"
+                        fate[key] = (2, "Neighborhood: not enough evidence to call it" if verdict == "unknown" else
+                                     f"Neighborhood: {verdict}" + (": " + demand["reasons"][0].lower()
+                                                                    if demand.get("reasons") else ""))
                     continue
                 funnel["neighborhood_support"] += 1
                 reach[pid] = max(reach[pid], 3)
@@ -321,7 +332,11 @@ def scan(budget, reserve=0, kit=None, center=None, radius_mi=None, exclude=(), i
                     "note": "One dot per building with listed space; it stays lit while any business x space there "
                             "passes the gate."},
             "cost_not_estimated": sorted(unpriced.values(), key=lambda u: -u["places"]),
-            "pairs": best[:top * 5], "all_pairs": len(best), "excluded_groups": excluded_groups, "businesses_considered": len(keys),
+            "pairs": best[:top * 5], "all_pairs": len(best),
+            "not_here": sorted(({"business": k, "label": INDUSTRIES[k]["label"], "group": INDUSTRIES[k]["group"],
+                                 "stopped_at": ["building", "cash", "neighborhood"][g], "why": why}
+                                for k, (g, why) in fate.items() if k not in {p["business"] for p in pairs}),
+                               key=lambda r: (["neighborhood", "cash", "building"].index(r["stopped_at"]), r["label"])), "excluded_groups": excluded_groups, "businesses_considered": len(keys),
             "elapsed_ms": round(1000 * (time.perf_counter() - started)),
             "basis": ("Gates in order: the building can host the business (CoStar facts vs space needs), cash to open "
                       "plus your reserve fits the budget (sourced opening-cost benchmarks, labelled; where the listing "

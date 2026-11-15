@@ -37,6 +37,9 @@ DEMO = [
     ("Childcare, 9700 Tanner Rd suite A ($750k)", "childcare", 23296, "A", 750000, 50000, "CONDITIONAL"),
     ("Pickleball, 6855 Wynnwood Ln", "indoor_pickleball", 13890701, None, 500000, 50000, "NO-GO"),
 ]
+# "I have a space": the building check (Jayant's preflight) before any business
+SITES = [("9721 Cypresswood Dr (residential, unincorporated Harris)", 966604, False, "harris_unincorporated"),
+         ("11220 Louetta Rd", 6017645, True, "houston"), ("14405 Walters Rd", 237365, True, "harris_unincorporated")]
 FUNNEL = {"combinations": 61620, "building_can_host": 13263, "affordable": 7399, "neighborhood_support": 1265}
 
 
@@ -75,6 +78,21 @@ def run(kit, offline):
               f"{sum(len(s.get('findings', [])) for s in r['trace'])} findings, {time.perf_counter() - t:.1f}s"
               + (f"; steps not ok: {broken}" if broken else ""))
         reviews[(business, pid)] = r
+    for label, pid, cont, code in SITES:
+        try:
+            s = venture_review.site_preflight(pid, kit)
+            good = s["can_continue"] == cont and s["jurisdiction"].get("code") == code
+        except Exception as error:  # noqa: BLE001
+            s, good = {"stops": [f"{type(error).__name__}: {error}"]}, False
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  building check {label}: "
+              + ("continues" if s.get("can_continue") else "stops: " + "; ".join(s.get("stops", []))[:90]))
+    for label, kwargs in (("one business (yoga)", {"include": ["yoga_pilates"]}),
+                          ("one building (11220 Louetta)", {"property_ids": {6017645}})):
+        o = opportunity.scan(500000, 50000, kit, top=20, **kwargs)
+        good = o["funnel"]["neighborhood_support"] > 0
+        ok &= good
+        print(f"  {'PASS' if good else 'FAIL'}  scan for {label}: {o['funnel']['authority_identified']} pass every gate")
     return ok, scan, reviews
 
 
@@ -110,6 +128,27 @@ def demo_ventures(scan, reviews):
                                           "inputs": base | {"reached": i},
                                           "shortlist": short if i >= 3 else []})
         made.append((stage, v["id"]))
+    # the other three starting points (one toolkit, different order)
+    salon = entry("salon_barber", 6017645, "listing:40882536:1200", "")
+    louetta = {"property_id": 6017645, "address": salon["address"], "lat": salon.get("lat"), "lon": salon.get("lon")}
+    extra = [
+        ("idea", "Demo: I know what to open (yoga), scan", "scan",
+         {**base, "business": "yoga_pilates", "businessLabel": "Yoga / pilates studio", "directions": ["yoga_pilates"],
+          "directionLabels": ["Yoga / pilates studio"], "reached": 1}, []),
+        ("space", "Demo: I have a space (11220 Louetta), building check", "scan",
+         {**base, "place": louetta, "reached": 1}, []),
+        ("space", "Demo: I have a space (Cypresswood), building check", "scan",
+         {**base, "place": {"property_id": 966604, "address": "9721 Cypresswood Dr"}, "reached": 1}, []),
+        ("both", "Demo: I know what and where (PT, 520 Post Oak), investigate", "investigate",
+         {**base, "business": "physical_therapy", "businessLabel": "Physical therapy / chiropractic",
+          "directions": ["physical_therapy"], "place": {"property_id": 239634, "address": "520 Post Oak Blvd"},
+          "suite": "625", "reached": 1}, [entry("physical_therapy", 239634, "625", "")]),
+    ]
+    for kind, name, stage, inputs, short_list in extra:
+        v = ventures.create("demo", kind, name)
+        ventures.update("demo", v["id"], {"stage": stage, "status": "investigating" if stage == "investigate" else
+                                          "exploring", "inputs": inputs, "shortlist": short_list})
+        made.append((f"{stage} ({kind})", v["id"]))
     v = ventures.create("demo", "budget", "Demo: $750k childcare, investigate")
     ventures.update("demo", v["id"], {"stage": "investigate", "status": "investigating",
                                       "inputs": {**base, "budget": 750000, "directions": ["childcare"], "reached": 4},
@@ -125,7 +164,10 @@ def warm_server(base):
     from urllib.request import urlopen
     ok = True
     for path in ["/api/opportunities?" + urlencode({"budget": 500000, "reserve": 50000, "top": 20}),
-                 "/api/signal-guide", "/api/neighborhood/industries"] + [
+                 "/api/signal-guide", "/api/neighborhood/industries",
+                 "/api/opportunities?" + urlencode({"budget": 500000, "reserve": 50000, "top": 20, "include": "yoga_pilates"}),
+                 "/api/opportunities?" + urlencode({"budget": 500000, "reserve": 50000, "top": 20, "property_id": 6017645})] + [
+            f"/api/site/preflight?property_id={pid}" for _, pid, _, _ in SITES] + [
             "/api/venture/review?" + urlencode({k: v for k, v in (("business", b), ("property_id", pid),
                                                                   ("suite", suite or ""), ("budget", budget),
                                                                   ("reserve", reserve))})

@@ -8,6 +8,17 @@
   const STAGES = ["budget", "scan", "opportunities", "shortlist", "investigate", "decide", "plan"];
   const STAGE_NAMES = { budget: "Budget", scan: "Scan", opportunities: "Opportunities", shortlist: "Shortlist",
     investigate: "Investigate", decide: "Decide", plan: "Plan & track" };
+  // Four starting points, one toolkit: the same stages and agents, in a different order (Jessenth's archetypes).
+  const FLOWS = { budget: STAGES, idea: ["budget", "scan", "shortlist", "investigate", "decide", "plan"],
+    space: ["budget", "scan", "opportunities", "investigate", "decide", "plan"], both: ["budget", "investigate", "decide", "plan"] };
+  const KIND_LABEL = { budget: "I have a budget", idea: "I know what to open", space: "I have a space", both: "I know what and where" };
+  const KIND_SHORT = { budget: "Budget", idea: "Business", space: "Space", both: "Business + space" };
+  const KIND_STAGE = { idea: { budget: "Business & budget", scan: "Scan places" },
+    space: { budget: "Your space", scan: "Building check", opportunities: "What fits here" }, both: { budget: "What & where" } };
+  const kindOf = (v) => { v = v === undefined ? state.v : v; return v && FLOWS[v.kind] ? v.kind : "budget"; };
+  const flow = (v) => FLOWS[kindOf(v)];
+  const stageName = (s, v) => (KIND_STAGE[kindOf(v)] || {})[s] || STAGE_NAMES[s];
+  const nextStage = (s) => { const f = flow(); return f[Math.min(f.length - 1, f.indexOf(s) + 1)]; };
   const STATUS_FOR = { budget: "exploring", scan: "exploring", opportunities: "exploring", shortlist: "shortlisted",
     investigate: "investigating", decide: "investigating", plan: "verifying" };
   const GROUPS = ["Sports & fitness", "Food & drink", "Health", "Personal services", "Children & education", "Retail",
@@ -44,7 +55,7 @@
   const src = (name) => `<span class="src" title="Source">${esc(name)}</span>`;
   const chip = (cls, text, title) => `<span class="chip ${cls}"${title ? ` title="${esc(title)}"` : ""}>${esc(text)}</span>`;
   const pairKey = (p) => `${p.business}|${p.property_id}|${p.suite ?? ""}`;
-  const stageIdx = (s) => Math.max(0, STAGES.indexOf(s));
+  const stageIdx = (s, v) => Math.max(0, flow(v).indexOf(s));
   const ago = (iso) => {
     const t = Date.parse(iso); if (!t) return "";
     const m = Math.round((Date.now() - t) / 60000);
@@ -149,8 +160,10 @@
   async function opportunities() {
     const i = inputs(), list = await industries();
     const exclude = list.filter((x) => (i.exclude || []).includes(x.group)).map((x) => x.key);
-    const q = new URLSearchParams({ budget: i.budget, reserve: i.reserve, top: 20 });
-    if (i.area && i.area.mode === "near" && i.area.lat) { q.set("lat", i.area.lat); q.set("lon", i.area.lon); q.set("radius", i.area.radius || 10); }
+    const q = new URLSearchParams({ budget: i.budget, reserve: i.reserve, top: 20 }), k = kindOf();
+    if (k !== "space" && i.area && i.area.mode === "near" && i.area.lat) { q.set("lat", i.area.lat); q.set("lon", i.area.lon); q.set("radius", i.area.radius || 10); }
+    if (k === "idea" && i.business) q.set("include", i.business);
+    if (k === "space" && i.place) q.set("property_id", i.place.property_id);
     if (exclude.length) q.set("exclude", exclude.join(","));
     const key = q.toString();
     if (state.opp && state.oppKey === key) return state.opp;
@@ -187,7 +200,7 @@
   async function goStage(stage) {
     const i = inputs(), idx = stageIdx(stage);
     const changes = { stage, inputs: Object.assign({}, i, { reached: Math.max(i.reached || 0, idx) }) };
-    if (!state.v.chosen || idx < 6) changes.status = STATUS_FOR[stage];
+    if (!state.v.chosen || idx < flow().length - 1) changes.status = STATUS_FOR[stage];
     if (state.v.status === "ready" && stage === "plan") delete changes.status;
     await save(changes);
     location.hash = `#/v/${state.v.id}/${stage}`;
@@ -204,7 +217,7 @@
           state.v = await api(`/api/ventures/${encodeURIComponent(parts[1])}?user=${USER}`);
           state.reviews = {}; state.reviewErr = {}; state.tab = null;
         }
-        const stage = STAGES.includes(parts[2]) ? parts[2] : state.v.stage || "budget";
+        const stage = flow().includes(parts[2]) ? parts[2] : flow().includes(state.v.stage) ? state.v.stage : "budget";
         return renderVenture(stage);
       }
       return renderHome();
@@ -225,12 +238,12 @@
     const committed = vs.filter((v) => v.chosen).length, ready = vs.filter((v) => v.status === "ready").length;
     const checks = vs.reduce((a, v) => { const g = v.summary && v.summary.progress; return g && g.total ? [a[0] + g.done, a[1] + g.total] : a; }, [0, 0]);
     const rows = vs.map((v) => {
-      const idx = stageIdx(v.stage), prog = v.summary && v.summary.progress;
-      const seg = STAGES.map((s, k) => `<span class="${k < idx ? "done" : k === idx ? "now" : ""}"></span>`).join("");
+      const f = flow(v), idx = stageIdx(v.stage, v), prog = v.summary && v.summary.progress;
+      const seg = f.map((s, k) => `<span class="${k < idx ? "done" : k === idx ? "now" : ""}"></span>`).join("");
       return `<tr data-id="${esc(v.id)}" tabindex="0">
         <td><div class="vn">${esc(v.name)}</div><div class="vs">${esc(((v.summary && v.summary.line) || summaryLine(v)).replace(/· (GO|CONDITIONAL|NO-GO)$/, (m, x) => "· " + VLABEL[x]))}</div></td>
-        <td class="hide-sm muted">${esc(v.kind === "budget" ? "Budget" : cap(v.kind))}</td>
-        <td><div class="seg7" title="Step ${idx + 1} of 7">${seg}</div><div class="small muted">${esc(STAGE_NAMES[v.stage] || v.stage)}</div></td>
+        <td class="hide-sm muted">${esc(KIND_SHORT[kindOf(v)])}</td>
+        <td><div class="seg7" title="Step ${idx + 1} of ${f.length}">${seg}</div><div class="small muted">${esc(stageName(v.stage, v) || v.stage)}</div></td>
         <td>${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}</td>
         <td class="hide-sm">${prog && prog.total ? `<div class="meter"><div class="check-bar"><i style="width:${Math.round(100 * prog.done / prog.total)}%"></i></div><span class="small num">${prog.done}/${prog.total}</span></div>` : `<span class="faint">—</span>`}</td>
         <td class="hide-sm muted small" style="white-space:nowrap">${esc(ago(v.updated_at))}</td>
@@ -266,26 +279,38 @@
       <div class="page-head"><div><div class="eyebrow">New venture</div><h1>What do you start with?</h1>
         <p class="lede">We start from what you already know and check everything else against CoStar listings and public data.</p></div>
         <a class="btn ghost" href="#/">${ic("left")}My ventures</a></div>
-      <div class="grid chooser">
-        <button class="card clickable choice" id="kind-budget">
+      <div class="grid chooser four">
+        <button class="card clickable choice" data-kind="budget">
           <div class="icon">${ic("wallet", 20)}</div><h3>I have a budget</h3>
           <p>You know what you can put in, not what to open or where. We scan every listed Houston space against 26 kinds of business.</p>
-          ${chip("blue", "Available")}
+          ${chip("blue", "Knows neither")}
         </button>
-        <div class="card choice soon" aria-disabled="true"><div class="icon">${ic("bulb", 20)}</div><h3>I have an idea</h3>
-          <p>You know the business. We find where it works.</p>${chip("grey", "Coming soon")}</div>
-        <div class="card choice soon" aria-disabled="true"><div class="icon">${ic("building", 20)}</div><h3>I have a space</h3>
-          <p>You have a building. We find what it can become.</p>${chip("grey", "Coming soon")}</div>
-      </div>`;
-    document.getElementById("kind-budget").onclick = async (ev) => {
-      ev.currentTarget.disabled = true;
+        <button class="card clickable choice" data-kind="idea">
+          <div class="icon">${ic("bulb", 20)}</div><h3>I know what to open</h3>
+          <p>You know the business, not where. We check every listed space for it: fit, cash, neighborhood and who permits it.</p>
+          ${chip("blue", "Knows the business")}
+        </button>
+        <button class="card clickable choice" data-kind="space">
+          <div class="icon">${ic("building", 20)}</div><h3>I have a space</h3>
+          <p>You have a building in mind. We check the building first (who permits it, can it be commercial), then what fits and pays there.</p>
+          ${chip("blue", "Knows the place")}
+        </button>
+        <button class="card clickable choice" data-kind="both">
+          <div class="icon">${ic("check", 20)}</div><h3>I know what and where</h3>
+          <p>One business in one space: straight to the 13-agent review and a Go, Conditional or No-go with every reason.</p>
+          ${chip("blue", "Knows both")}
+        </button>
+      </div>
+      <p class="muted small" style="margin-top:12px">Same agents and gates in every case; only the order changes with what you already know.</p>`;
+    app.querySelectorAll(".choice[data-kind]").forEach((btn) => btn.onclick = async () => {
+      const kind = btn.dataset.kind; btn.disabled = true;
       try {
         const n = (await api(`/api/ventures?user=${USER}`)).length + 1;
-        state.v = await post("/api/ventures", { user: USER, kind: "budget", name: `Budget venture ${n}` });
+        state.v = await post("/api/ventures", { user: USER, kind, name: `${KIND_SHORT[kind]} venture ${n}` });
         state.reviews = {}; state.opp = null;
         location.hash = `#/v/${state.v.id}/budget`;
-      } catch (e) { toast(e.message); ev.currentTarget.disabled = false; }
-    };
+      } catch (e) { toast(e.message); btn.disabled = false; }
+    });
   }
 
   // ---------- venture shell: header + stepper ----------
@@ -293,8 +318,8 @@
     const v = state.v, o = state.opp;
     const reviewed = Object.values(state.reviews);
     return {
-      budget: i.budget ? `<b>${kmoney(i.budget - i.reserve)}</b> to open with` : "",
-      scan: o ? `<b>${num(o.funnel.neighborhood_support)}</b> pass every gate` : (i.reached >= 1 ? "Scanned" : ""),
+      budget: kindOf() === "space" && i.place ? esc(i.place.address.split(",")[0]) : kindOf() === "both" && i.place && i.businessLabel ? `${esc(i.businessLabel)} · ${esc(i.place.address.split(",")[0])}` : kindOf() === "idea" && i.businessLabel ? `${esc(i.businessLabel)} · <b>${kmoney(i.budget - i.reserve)}</b>` : i.budget ? `<b>${kmoney(i.budget - i.reserve)}</b> to open with` : "",
+      scan: kindOf() === "space" ? (i.site ? (i.site.ok ? "Building checked" : "Stopped here") : "") : o ? `<b>${num(o.funnel.authority_identified ?? o.funnel.neighborhood_support)}</b> pass every gate` : (i.reached >= 1 ? "Scanned" : ""),
       opportunities: (i.directionLabels || []).length ? esc(i.directionLabels.join(", ")) : "",
       shortlist: (v.shortlist || []).length ? `<b>${v.shortlist.length}</b> place${v.shortlist.length > 1 ? "s" : ""}` : "",
       investigate: reviewed.length ? reviewed.map((r) => `<b>${esc(VLABEL[r.verdict] || r.verdict)}</b>`).join(" · ") : "",
@@ -306,36 +331,37 @@
   function vtop(stage) {
     const i = inputs(), v = state.v, cur = stageIdx(stage), reached = Math.max(i.reached || 0, cur), lock = lockIns(i);
     const area = i.area && i.area.mode === "near" && i.area.place ? `${i.area.place} · ${i.area.radius} mi` : "All of Houston";
-    const steps = STAGES.map((s, k) => {
+    const steps = flow().map((s, k) => {
       const cls = k === cur ? "now" : k <= reached ? "done" : "locked";
       return `<li class="step ${cls}"><button data-stage="${s}" ${k > reached ? "disabled" : ""} aria-current="${k === cur ? "step" : "false"}">
-        <span class="idx">${k !== cur && k <= reached ? ic("check", 13) : k + 1}</span><span class="label">${STAGE_NAMES[s]}</span>
+        <span class="idx">${k !== cur && k <= reached ? ic("check", 13) : k + 1}</span><span class="label">${esc(stageName(s))}</span>
         <span class="sub">${k === cur ? "In progress" : lock[s] || ""}</span></button></li>`;
     }).join("");
     return `<div class="glass vhead">
         <div class="vhead-main"><input id="vname" class="vname" value="${esc(v.name)}" aria-label="Venture name" maxlength="80">
-          <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>I have a budget</span><span class="saved">${savedText()}</span></div></div>
+          <div class="vhead-sub">${chip(STATUS_CHIP[v.status] || "grey", cap(v.status))}<span>${esc(KIND_LABEL[kindOf()])}</span><span class="saved">${savedText()}</span></div></div>
         <dl class="facts">
           <div><dt>Budget</dt><dd>${kmoney(i.budget)}</dd></div>
           <div><dt>Reserve</dt><dd>${kmoney(i.reserve)}</dd></div>
           <div><dt>To open with</dt><dd>${kmoney(i.budget - i.reserve)}</dd></div>
-          <div><dt>Area</dt><dd>${esc(area)}</dd></div>
+          ${i.businessLabel && kindOf() !== "budget" ? `<div><dt>Business</dt><dd>${esc(i.businessLabel)}</dd></div>` : ""}
+          ${i.place && (kindOf() === "space" || kindOf() === "both") ? `<div><dt>Place</dt><dd>${esc(i.place.address.split(",")[0])}</dd></div>` : i.businessLabel && kindOf() === "idea" ? "" : `<div><dt>Area</dt><dd>${esc(area)}</dd></div>`}
         </dl>
       </div>
       <ol class="glass stepper" aria-label="Steps">${steps}</ol>`;
   }
   function bindTop(stage) {
-    crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [STAGE_NAMES[stage]]]);
+    crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [stageName(stage)]]);
     app.querySelectorAll(".step button[data-stage]").forEach((b) => { b.onclick = () => { if (!b.disabled) goStage(b.dataset.stage); }; });
     const name = document.getElementById("vname");
-    name.onchange = () => { const n = name.value.trim(); if (n) save({ name: n }).then(() => crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [STAGE_NAMES[stage]]])); };
+    name.onchange = () => { const n = name.value.trim(); if (n) save({ name: n }).then(() => crumbs([["My ventures", "#/"], [state.v.name, `#/v/${state.v.id}`], [stageName(stage)]])); };
   }
   async function renderVenture(stage) {
     app.innerHTML = `<div class="venture"><div id="vtop" class="venture">${vtop(stage)}</div><section id="stage"><div class="loading"><span class="spinner"></span>Loading…</div></section></div>`;
     bindTop(stage);
     const el = document.getElementById("stage");
     try {
-      await ({ budget: stageBudget, scan: stageScan, opportunities: stageOpportunities, shortlist: stageShortlist,
+      await ({ budget: stageBudget, scan: kindOf() === "space" ? stageSite : stageScan, opportunities: stageOpportunities, shortlist: stageShortlist,
         investigate: stageInvestigate, decide: stageDecide, plan: stagePlan })[stage](el);
     } catch (e) {
       el.innerHTML = `<div class="error">${esc(e.message)}</div>`;
@@ -346,17 +372,33 @@
     const t = document.getElementById("vtop"); if (!t) return;
     t.innerHTML = vtop(stage); bindTop(stage);
   }
-  const head = (n, title, lede, right) => `<div class="stage-head"><div><div class="eyebrow">Step ${n} of 7 · ${STAGE_NAMES[STAGES[n - 1]]}</div>
+  const head = (stage, title, lede, right) => `<div class="stage-head"><div><div class="eyebrow">Step ${flow().indexOf(stage) + 1} of ${flow().length} · ${esc(stageName(stage))}</div>
     <h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ""}</div>${right ? `<div class="actions">${right}</div>` : ""}</div>`;
 
   // ---------- Stage 1: budget ----------
   async function stageBudget(el) {
-    const i = inputs();
+    const i = inputs(), kind = kindOf(), list = await industries();
+    const wantBiz = kind === "idea" || kind === "both", wantPlace = kind === "space" || kind === "both";
+    const groups = [...new Set(list.map((x) => x.group))];
+    const bizField = wantBiz ? `<div class="field"><label for="biz">What do you want to open?</label>
+        <select class="select" id="biz"><option value="">Choose a business…</option>${groups.map((g) => `<optgroup label="${esc(g)}">${list.filter((x) => x.group === g).map((x) => `<option value="${esc(x.key)}" ${x.key === i.business ? "selected" : ""}>${esc(x.label)}</option>`).join("")}</optgroup>`).join("")}</select>
+        <span class="hint">26 kinds of business, each with its own space needs, sourced opening costs and neighborhood signals.</span></div>` : "";
+    const placeField = wantPlace ? `<div class="field"><label for="place-q">Which building?</label>
+        <input id="place-q" class="text-input" autocomplete="off" placeholder="Street address, e.g. 11220 Louetta" value="${esc(i.place ? i.place.address : "")}">
+        <div id="place-results" class="place-results"></div>
+        ${kind === "both" ? `<select class="select hidden" id="suite" aria-label="Listed space"></select>` : ""}
+        <span class="hint">Any Houston building in the CoStar kit. Buildings with space listed for lease come first.</span></div>` : "";
+    let place = i.place || null;
     const area = Object.assign({ mode: "anywhere", radius: 10 }, i.area || {});
     const ex = new Set(i.exclude || []);
-    el.innerHTML = `${head(1, "What can you put in?", "Your total cash and what you want to keep in reserve. We'll find what that can open, and where.")}
+    const titles = { budget: ["What can you put in?", "Your total cash and what you want to keep in reserve. We'll find what that can open, and where."],
+      idea: ["What do you want to open, and with how much?", "Pick the business and your cash. We'll check every listed Houston space for it."],
+      space: ["Which building, and how much can you put in?", "Pick the building. We check it first (who permits it, can it be commercial), then what fits and pays there."],
+      both: ["What, where, and how much?", "One business in one listed space. Thirteen agents review it and give a verdict with every reason."] }[kind];
+    el.innerHTML = `${head("budget", titles[0], titles[1])}
       <div class="budget-layout">
         <div class="panel">
+          ${bizField}${placeField}
           <div class="field"><label for="cash">Total cash you can put in</label>
             <div class="money-input"><span>$</span><input id="cash" inputmode="numeric" value="${num(i.budget)}"></div>
             <input type="range" id="cash-range" min="50000" max="2000000" step="10000" value="${i.budget}" aria-label="Total cash">
@@ -369,14 +411,14 @@
             <div class="seg"><button class="on" type="button">Lease</button><button type="button" disabled title="Buying is not built yet">Buy</button></div>
             <span class="hint">Lease only for now. Buying is not built yet.</span>
           </div>
-          <div class="field"><span class="label">Where</span>
+          <div class="field ${wantPlace ? "hidden" : ""}"><span class="label">Where</span>
             <div class="seg" id="area-mode"><button type="button" data-m="anywhere" class="${area.mode !== "near" ? "on" : ""}">Anywhere in Houston</button><button type="button" data-m="near" class="${area.mode === "near" ? "on" : ""}">Near a place</button></div>
             <div id="near" class="${area.mode === "near" ? "" : "hidden"}" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
               <select class="select" id="place" aria-label="Place">${PLACES.map(([n]) => `<option ${n === area.place ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
               <select class="select" id="radius" aria-label="Radius">${[3, 5, 10, 15, 25].map((r) => `<option value="${r}" ${+area.radius === r ? "selected" : ""}>within ${r} mi</option>`).join("")}</select>
             </div>
           </div>
-          <div class="field"><span class="label">Leave out (optional)</span>
+          <div class="field ${wantBiz ? "hidden" : ""}"><span class="label">Leave out (optional)</span>
             <div class="toggle-chips" id="exclude">${GROUPS.map((g) => `<button type="button" data-g="${esc(g)}" class="${ex.has(g) ? "on" : ""}">${esc(g)}</button>`).join("")}</div>
             <span class="hint">Tap a group you'd never run. Everything else is considered: 26 kinds of business.</span>
           </div>
@@ -386,7 +428,7 @@
           <div class="big" id="open-with">${kmoney(i.budget - i.reserve)}</div>
           <div class="eq" id="open-eq">${money(i.budget)} cash − ${money(i.reserve)} reserve</div>
           <div class="note">Opening costs come from sourced franchise disclosure benchmarks, scaled to each space, plus the deposit and rent while you build. No revenue forecast: we show how many months of rent you'd have left.</div>
-          <button class="btn primary block" id="go-scan">Scan Houston${ic("right")}</button>
+          <button class="btn primary block" id="go-scan">${{ budget: "Scan Houston", idea: "Scan Houston for it", space: "Check the building", both: "Review it" }[kind]}${ic("right")}</button>
           <div class="muted small" id="budget-err"></div>
         </div>
       </div>`;
@@ -413,8 +455,54 @@
       el.querySelector("#near").classList.toggle("hidden", b.dataset.m !== "near");
     });
     el.querySelectorAll("#exclude button").forEach((b) => b.onclick = () => b.classList.toggle("on"));
+    // Building search (I have a space / I know both): any Houston kit building; listed ones first.
+    const loadSuites = async (pid) => {
+      const sel = el.querySelector("#suite"); if (!sel) return;
+      sel.innerHTML = `<option>Loading listed spaces…</option>`; sel.classList.remove("hidden");
+      try {
+        const pre = await api(`/api/site/preflight?property_id=${pid}`);
+        sel.innerHTML = pre.spaces.length ? pre.spaces.map((x) => `<option value="${esc(x.value)}" ${x.value === i.suite ? "selected" : ""}>${esc(x.label)} · ${num(x.sf)} sq ft${x.monthly_rent ? ` · ${money(x.monthly_rent)}/mo` : " · rent not listed"}</option>`).join("")
+          : `<option value="">Nothing listed for lease here</option>`;
+        if (place) Object.assign(place, { lat: pre.lat, lon: pre.lon });
+      } catch (e) { sel.innerHTML = `<option value="">${esc(e.message)}</option>`; }
+    };
+    const pq = el.querySelector("#place-q");
+    if (pq) {
+      let pt;
+      pq.oninput = () => { clearTimeout(pt); place = null; pt = setTimeout(async () => {
+        const box = el.querySelector("#place-results"), q = pq.value.trim();
+        if (q.length < 3) { box.innerHTML = ""; return; }
+        try {
+          const r = await api(`/api/places?q=${encodeURIComponent(q)}`);
+          box.innerHTML = r.places.length ? r.places.map((x) => `<button type="button" class="place-row" data-id="${x.property_id}" data-a="${esc(x.address)}"><span>${esc(x.address)}</span>${x.listed_spaces ? chip("green", `${x.listed_spaces} listed`) : chip("grey", "nothing listed")}</button>`).join("") : `<div class="faint small">No Houston building matches.</div>`;
+          box.querySelectorAll(".place-row").forEach((b) => b.onclick = () => {
+            place = { property_id: +b.dataset.id, address: b.dataset.a }; pq.value = b.dataset.a; box.innerHTML = "";
+            loadSuites(place.property_id);
+          });
+        } catch (e) { box.innerHTML = `<div class="error">${esc(e.message)}</div>`; }
+      }, 250); };
+      if (place && kind === "both") loadSuites(place.property_id);
+    }
     el.querySelector("#go-scan").onclick = async () => {
       const s = sync(); if (s.bad) return;
+      const bizSel = el.querySelector("#biz"), biz = bizSel ? bizSel.value : null;
+      if (wantBiz && !biz) { toast("Choose a business first"); return; }
+      if (wantPlace && !place) { toast("Pick a building from the list"); return; }
+      const suiteSel = el.querySelector("#suite"), suite = suiteSel ? suiteSel.value : null;
+      if (kind === "both" && !suite) { toast("This building has no space listed for lease to review"); return; }
+      const bizLabel = biz ? list.find((x) => x.key === biz).label : null;
+      if (kind !== "budget") {
+        const changedPick = biz !== (i.business || null) || (place && place.property_id) !== (i.place && i.place.property_id) || (suite || null) !== (i.suite || null);
+        await setInputs(Object.assign({ budget: s.b, reserve: s.r, business: biz, businessLabel: bizLabel, place, suite },
+          biz ? { directions: [biz], directionLabels: [bizLabel] } : {}));
+        if (changedPick || s.b !== i.budget || s.r !== i.reserve) { state.reviews = {}; state.opp = null; await save({ shortlist: [], chosen: null }); }
+        if (kind === "both") {
+          const sel = suiteSel.options[suiteSel.selectedIndex], g = list.find((x) => x.key === biz).group;
+          await save({ shortlist: [{ business: biz, label: bizLabel, group: g, property_id: place.property_id, suite,
+            suite_label: sel.text.split(" · ")[0], address: place.address, lat: place.lat, lon: place.lon, building: { reasons: [] } }] });
+        }
+        goStage(nextStage("budget")); return;
+      }
       const near = el.querySelector("#area-mode .on").dataset.m === "near";
       const placeName = el.querySelector("#place").value, p = PLACES.find(([n]) => n === placeName);
       const areaOut = near ? { mode: "near", place: placeName, lat: p[1], lon: p[2], radius: +el.querySelector("#radius").value } : { mode: "anywhere", radius: 10 };
@@ -428,29 +516,65 @@
     };
   }
 
+  // ---------- Stage 2 (I have a space): building check before any business ----------
+  async function stageSite(el) {
+    const i = inputs();
+    if (!i.place) { el.innerHTML = `${head("scan", "Check the building first", "")}<div class="panel">Pick a building first. <button class="link-btn" id="back">${ic("left", 14)}Your space</button></div>`; el.querySelector("#back").onclick = () => goStage("budget"); return; }
+    el.innerHTML = `${head("scan", "Check the building first", "Before any business: who permits this address, and can the building be used commercially? From the pin's official boundary, not the postal city. Nothing here is an approval.")}<div class="loading"><span class="spinner"></span>Checking ${esc(i.place.address)}…</div>`;
+    const s = await api(`/api/site/preflight?property_id=${i.place.property_id}`);
+    const j = s.jurisdiction || {}, f = s.facts || {};
+    const state3 = s.stops.length ? ["red", "We stop here", "v-no-go"] : s.checks.length ? ["amber", "Continue, with checks", "v-conditional"] : ["green", "Clear to look at businesses", "v-go"];
+    await setInputs({ place: Object.assign({}, i.place, { lat: s.lat, lon: s.lon }), site: { ok: s.can_continue, code: j.code } }, true);
+    refreshRail("scan");
+    el.innerHTML = `${head("scan", "Check the building first", "Before any business: who permits this address, and can the building be used commercially? From the pin's official boundary, not the postal city. Nothing here is an approval.")}
+      <div class="inv"><div class="inv-main">
+        <div class="panel verdict-panel"><div class="verdict-top"><div class="verdict ${state3[2]}"><span class="verdict-k">Building check</span><span class="verdict-v"><i></i>${esc(state3[1])}</span></div>
+          <div class="verdict-id"><div class="eyebrow">${esc(f.property_type || "")} · CoStar ${s.property_id}</div><h2>${esc(s.address || i.place.address)}</h2></div></div>
+          <ul class="verdict-reasons">${s.stops.map((x) => `<li class="blk">${esc(x)}</li>`).join("")}${s.checks.map((x) => `<li>${esc(x)}</li>`).join("")}${!s.stops.length && !s.checks.length ? `<li>Inside a jurisdiction we model, a commercial building, with space listed for lease.</li>` : ""}</ul>
+          <div class="verdict-foot"><span class="faint small">${esc(s.computed_by)}</span></div></div>
+        <div class="panel"><div class="ph">Who permits it</div><ul class="plain">
+          ${li(j.verified ? "green" : "grey", j.verified ? "✓" : "?", `${esc(j.place || (j.county ? "Unincorporated " + j.county : "Not verified"))} ${srcChip({ name: "U.S. Census geocoder", url: j.evidence_url, retrieved_at: j.retrieved_at })}<br><span class="muted small">${esc(j.note || "")}</span>`)}
+          ${s.authority ? li("grey", "→", `Permits go through <b>${esc(s.authority.name)}</b> ${ext(s.authority.url, "Official page")}`) : ""}
+        </ul></div>
+        <div class="panel"><div class="ph">Still to verify with the authority<span class="aside">none counted as cleared</span></div><ul class="plain">${(s.to_verify || []).map((x) => li("grey", "?", esc(x))).join("")}</ul></div>
+      </div><aside class="inv-side">
+        <div class="panel"><div class="ph">Building facts</div><dl class="figures">
+          <div><dt>Property type</dt><dd>${esc(f.property_type || "—")}</dd><span class="sub">${src("CoStar")}</span></div>
+          <div><dt>Building area</dt><dd>${f.area_sqft ? num(f.area_sqft) + " sq ft" : "—"}</dd><span class="sub">${src("CoStar")}</span></div>
+          <div><dt>Floors</dt><dd>${f.floors ?? "—"}</dd><span class="sub">${src("CoStar")}</span></div>
+          <div><dt>Parking</dt><dd>${f.parking_spaces ?? "not recorded"}</dd><span class="sub">${src("CoStar")}</span></div>
+        </dl></div>
+        <div class="panel"><div class="ph">Listed for lease<span class="aside">${s.spaces.length}</span></div>${s.spaces.length ? `<ul class="plain">${s.spaces.slice(0, 8).map((x) => li("grey", "·", `${esc(x.label)}${/sq ft/.test(x.label) ? "" : ` · ${num(x.sf)} sq ft`}${x.monthly_rent ? ` · ${money(x.monthly_rent)}/mo` : " · rent not listed"}`)).join("")}</ul>${s.spaces.length > 8 ? `<div class="faint small">+${s.spaces.length - 8} more</div>` : ""}` : `<div class="muted small">Nothing listed for lease in CoStar.</div>`}</div>
+      </aside></div>
+      <div class="sticky-bar"><span class="muted small">${s.can_continue ? "Next: every business this building can host, priced and checked against the neighborhood." : "No business is suggested for a building that fails this check."}</span>
+        ${s.can_continue ? `<button class="btn primary" id="next">See what fits here${ic("right")}</button>` : `<button class="btn ghost" id="next">${ic("left")}Pick another building</button>`}</div>`;
+    el.querySelector("#next").onclick = () => goStage(s.can_continue ? "opportunities" : "budget");
+  }
+
   // ---------- Stage 2: scan ----------
   async function stageScan(el) {
     const i = inputs();
-    const agents = ["site", "building", "money", "residents", "competitors", "momentum", "lookalike", "coordinator"];
-    el.innerHTML = `${head(2, "Our agents check every combination", `Every listed Houston space against every business, with ${kmoney(i.budget - i.reserve)} to open with. Three gates, in order: can the building host it, can you afford it, does the neighborhood support it.`,
+    const agents = ["site", "building", "money", "residents", "competitors", "momentum", "lookalike", "coordinator", "permits"];
+    el.innerHTML = `${head("scan", kindOf() === "idea" ? `Where a ${esc((i.businessLabel || "").toLowerCase())} works` : "Our agents check every combination", `${kindOf() === "idea" ? `Every listed Houston space checked for a ${esc((i.businessLabel || "").toLowerCase())}` : "Every listed Houston space against every business"}, with ${kmoney(i.budget - i.reserve)} to open with. Four gates, in order: can the building host it, can you afford it, does the neighborhood support it, and who permits it.`,
       `<button class="btn ghost small" id="skip">Skip animation</button>`)}
       <div class="scan">
         <div class="panel"><div class="ph">Combinations left after each gate<span class="aside">Houston · lease</span></div><div class="funnel" id="funnel"><div class="loading"><span class="spinner"></span>Scanning…</div></div></div>
         <div class="panel scan-map"><div class="ph">Houston, gate by gate<span class="aside" id="map-count"></span></div><div class="map" id="scan-map"></div>
-          <div class="map-legend"><span id="map-note">One dot per building with listed space</span><span>Green: passes every gate</span></div></div>
+          <div class="map-legend"><span id="map-note">One dot per building with listed space</span><span>Green: passes every gate · amber: permitting authority not identified</span></div></div>
         <div class="panel scan-agents"><div class="ph">Agents<span class="aside">${agents.length} on this scan</span></div><div class="agents">${agents.map((a) => `<div class="agent" data-a="${a}">${agentImg(a)}<div class="name">${a[0].toUpperCase() + a.slice(1)}</div><div class="job">${esc(AGENT_JOBS[a])}</div></div>`).join("")}</div>
           <div class="note-line">${ic("info", 14)}<span>Every number and gate is computed in code. No AI decides who passes.</span></div></div>
       </div>
-      <div class="sticky-bar hidden" id="next-bar"><span id="next-note" class="muted small"></span><button class="btn primary" id="next">See what ${kmoney(i.budget - i.reserve)} can become${ic("right")}</button></div>`;
+      <div class="sticky-bar hidden" id="next-bar"><span id="next-note" class="muted small"></span><button class="btn primary" id="next">${kindOf() === "idea" ? "Pick where" : `See what ${kmoney(i.budget - i.reserve)} can become`}${ic("right")}</button></div>`;
     let o;
     try { o = await opportunities(); } catch (e) { el.querySelector("#funnel").innerHTML = `<div class="error">${esc(e.message)}</div>`; return; }
     const f = o.funnel;
     const rows = [
       [f.spaces, "Listed Houston spaces", "CoStar listings with a space you can lease", "CoStar", ["site"]],
-      [f.combinations, "Business × space combinations", `${num(f.spaces)} spaces × ${o.businesses_considered} businesses`, "26-business registry", ["site"]],
+      [f.combinations, "Business × space combinations", o.businesses_considered === 1 ? `${num(f.spaces)} spaces × ${esc(i.businessLabel || "1 business")}` : `${num(f.spaces)} spaces × ${o.businesses_considered} businesses`, "26-business registry", ["site"]],
       [f.building_can_host, "The building can host it", "Property type, floor, size and ceiling vs each business's needs", "CoStar", ["building"]],
       [f.affordable, `Cash to open + reserve fits ${kmoney(i.budget)}`, "Sourced opening-cost benchmarks scaled to the space, plus deposit and rent while building", "FDD benchmark", ["money"]],
       [f.neighborhood_support, "The neighborhood supports it", "Residents, competitors, who's moving in, lookalike areas", "ACS · OSM · CoStar", ["residents", "competitors", "momentum", "lookalike", "coordinator"]],
+      [f.authority_identified ?? f.neighborhood_support, "Compliance preflight: who permits it", "Official boundary from the pin, not the postal city: City of Houston or Harris County (Jayant's compliance engine)", "Census geocoder", ["permits"]],
     ];
     const max = Math.sqrt(f.combinations);
     // The map: buildings drop out gate by gate (real per-building results from the same scan).
@@ -461,7 +585,7 @@
       if (mapCtl) { state.ctrls.push(mapCtl); mapCtl.setDots(M.buildings); }
     }
     if (!mapCtl) el.querySelector(".scan-map").classList.add("hidden");
-    const GATE_FOR_ROW = [0, 0, 1, 2, 3], GATE_NAME = ["listed", "can host a business", "affordable for one", "neighborhood-supported"];
+    const GATE_FOR_ROW = [0, 0, 1, 2, 3, 4], GATE_NAME = ["listed", "can host a business", "affordable for one", "neighborhood-supported", "with a known permitting authority"];
     const mapGate = (k) => {
       const g = GATE_FOR_ROW[k]; if (mapCtl) mapCtl.showGate(g);
       const n = M.after_gate[g];
@@ -472,6 +596,9 @@
         <div class="bar"><i data-w="${Math.max(2, 100 * Math.sqrt(n) / max)}"></i></div><div class="what">${esc(what)}</div></div>`).join("") +
       `<div class="funnel-foot">${f.rent_not_listed ? chip("grey", `${num(f.rent_not_listed)} with no listed rent: judged on cost before rent`) : ""}
         ${f.cost_not_estimated ? chip("grey", `${num(f.cost_not_estimated)} pass but cost not estimated`, "No comparable opening-cost benchmark (e.g. car wash)") : ""}
+        ${f.compliance && f.compliance.harris_unincorporated ? chip("amber", `${num(f.compliance.harris_unincorporated)} in unincorporated Harris County: county permits, not the city's`) : ""}
+        ${f.compliance && f.compliance.other_city ? chip("amber", `${num(f.compliance.other_city)} inside another city: that city permits it`) : ""}
+        ${f.compliance && f.compliance.unverified ? chip("grey", `${num(f.compliance.unverified)} jurisdiction not looked up`) : ""}
         <span class="muted small">Bar length on a square-root scale. Answered in ${o.elapsed_ms} ms.</span></div>`;
     const count = (b, n) => {
       const t0 = performance.now();
@@ -492,14 +619,14 @@
       rows.forEach((_, k) => light(k, true));
       el.querySelectorAll(".agent").forEach((a) => { a.classList.remove("on"); a.classList.add("done"); });
       el.querySelector("#next-bar").classList.remove("hidden");
-      el.querySelector("#next-note").innerHTML = `<b class="num">${num(f.neighborhood_support)}</b> combinations pass every gate, across <b class="num">${o.directions.length}</b> kinds of business.`;
+      el.querySelector("#next-note").innerHTML = `<b class="num">${num(f.authority_identified ?? f.neighborhood_support)}</b> combinations pass every gate${o.businesses_considered > 1 ? `, across <b class="num">${o.directions.length}</b> kinds of business` : ""}.`;
       el.querySelector("#skip").classList.add("hidden");
       refreshRail("scan");
     };
     rows.forEach((_, k) => later(() => light(k), 250 + k * 600));
     later(finish, 250 + rows.length * 600 + 300);
     el.querySelector("#skip").onclick = finish;
-    el.querySelector("#next").onclick = () => goStage("opportunities");
+    el.querySelector("#next").onclick = () => goStage(nextStage("scan"));
   }
 
   // ---------- Stage 3: opportunities ----------
@@ -544,7 +671,7 @@
         <div class="metrics">
           <div><span class="k">Places</span><span class="v">${d.places}</span></div>
           <div><span class="k">Within budget</span><span class="v">${d.within_budget || 0}</span></div>
-          <div class="wide"><span class="k">Cash to open</span><span class="v">${kmoney(d.cash_to_open_range[0])}–${kmoney(d.cash_to_open_range[1])}${src(costSrc(d.cost_basis))}</span></div>
+          <div class="wide"><span class="k">Cash to open</span><span class="v">${d.cash_to_open_range[0] === d.cash_to_open_range[1] ? kmoney(d.cash_to_open_range[0]) : `${kmoney(d.cash_to_open_range[0])}–${kmoney(d.cash_to_open_range[1])}`}${src(costSrc(d.cost_basis))}</span></div>
         </div>
         <div class="chips">${d.supported ? chip("green", `${d.supported} neighborhood-supported`) : chip("amber", "Mixed neighborhoods, net positive")}
           ${d.only_low_case ? chip("amber", `${d.only_low_case} low case only`) : ""}${d.rent_not_listed ? chip("grey", `${d.rent_not_listed} rent not listed`) : ""}${basis}</div>
@@ -553,16 +680,19 @@
       </div>`;
     }).join("");
     const cne = (o.cost_not_estimated || []).map((u) => `<div><b>${esc(u.label)}</b>: ${u.places} place${u.places > 1 ? "s" : ""} pass the building and neighborhood gates. ${esc(u.why)} We don't guess a number.</div>`).join("");
-    el.innerHTML = `${head(3, `Here's what ${kmoney(i.budget - i.reserve)} can become`, `${o.directions.length} kinds of business have at least one Houston space that fits, is affordable and has neighborhood support. Pick 1–3 directions to explore.`)}
+    const here = kindOf() === "space";
+    const notHere = here ? (o.not_here || []).map((x) => `<div class="nh"><span class="mk ${x.stopped_at === "neighborhood" ? "amber" : "red"}">${x.stopped_at === "neighborhood" ? "!" : "✗"}</span><span><b>${esc(x.label)}</b> <span class="faint small">stopped at the ${esc(x.stopped_at)} gate</span><br><span class="muted small">${esc(tidy(x.why))}</span></span></div>`).join("") : "";
+    el.innerHTML = `${head("opportunities", here ? `What ${esc(i.place.address.split(",")[0])} can become` : `Here's what ${kmoney(i.budget - i.reserve)} can become`, here ? `${o.directions.length} of 26 kinds of business fit this building, are affordable with ${kmoney(i.budget - i.reserve)} and have neighborhood support. Pick 1–3 to investigate; the rest show where they stopped.` : `${o.directions.length} kinds of business have at least one Houston space that fits, is affordable and has neighborhood support. Pick 1–3 directions to explore.`)}
       <div class="opps">
         <div>
           ${o.directions.length ? `<div class="grid directions">${cards}</div>` : `<div class="panel">Nothing passes every gate at this budget. Try more cash, a smaller reserve, or a wider area.</div>`}
           ${cne ? `<div class="panel not-estimated"><div class="ph">Cost not estimated</div><div class="muted" style="display:flex;flex-direction:column;gap:6px">${cne}</div></div>` : ""}
+          ${notHere ? `<details class="panel not-here"><summary class="ph" style="cursor:pointer">Didn't make it here<span class="aside">${(o.not_here || []).length} businesses · why each one stopped</span></summary><div class="nh-list">${notHere}</div></details>` : ""}
         </div>
         <div class="glass map-wrap" style="border-radius:var(--r)"><div class="ph">Where they are<span class="aside">Best spaces per direction</span></div><div class="map" id="map"></div>
           <div class="map-legend"><span>Rings ≈ I-610 and Beltway 8</span><span>Drag to rotate · select a pin</span></div></div>
       </div>
-      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Pick where${ic("right")}</button></div>`;
+      <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">${here ? "Investigate" : "Pick where"}${ic("right")}</button></div>`;
     const pairs = directionPairs(o).filter((p) => o.directions.some((d) => d.business === p.business));
     const pinsFor = () => pairs.map((p) => ({ id: pairKey(p), lat: p.lat, lon: p.lon, label: `${p.label} · ${p.address}`,
       color: !picked.length || picked.includes(p.business) ? "#D9DCE1" : "#4A4F57" }));
@@ -592,6 +722,13 @@
       const labels = picked.map((k) => o.directions.find((d) => d.business === k).label);
       const keep = (state.v.shortlist || []).filter((s) => picked.includes(s.business));
       await setInputs({ directions: picked, directionLabels: labels });
+      if (here) { // one building: each picked business goes straight to review at its best space here
+        const list = picked.map((k) => o.directions.find((d) => d.business === k).pairs[0]).filter(Boolean).map((p) => ({
+          business: p.business, label: p.label, group: p.group, property_id: p.property_id, suite: p.suite, suite_label: p.suite_label,
+          address: p.address, sf: p.sf, lat: p.lat, lon: p.lon, building: { reasons: p.building.reasons } }));
+        await save({ shortlist: list });
+        goStage("investigate"); return;
+      }
       if (keep.length !== (state.v.shortlist || []).length) await save({ shortlist: keep });
       goStage("shortlist");
     };
@@ -616,7 +753,7 @@
     el.innerHTML = `<div class="loading"><span class="spinner"></span>Ranking places…</div>`;
     const o = await opportunities();
     const keys = (i.directions || []).filter((k) => o.directions.some((d) => d.business === k));
-    if (!keys.length) { el.innerHTML = `${head(4, "Pick where", "")}<div class="panel">Pick at least one direction first. <button class="link-btn" id="back">${ic("left", 14)}Opportunities</button></div>`; el.querySelector("#back").onclick = () => goStage("opportunities"); return; }
+    if (!keys.length) { el.innerHTML = `${head("shortlist", "Pick where", "")}<div class="panel">Pick at least one direction first. <button class="link-btn" id="back">${ic("left", 14)}Opportunities</button></div>`; el.querySelector("#back").onclick = () => goStage(kindOf() === "idea" ? "budget" : "opportunities"); return; }
     const pairs = directionPairs(o, keys);
     let chosen = (state.v.shortlist || []).map(pairKey).filter((k) => pairs.some((p) => pairKey(p) === k));
     const filter = keys.includes(state.filter) ? state.filter : "all";
@@ -634,7 +771,7 @@
           ${runway != null ? `<div title="Months of rent your remaining cash would cover after opening, with zero revenue">${runway} mo of rent in reserve</div>` : ""}</div>
       </div>`;
     }).join("");
-    el.innerHTML = `${head(4, "Pick where", "The best spaces for your directions, ranked: neighborhood support first, then cash. Four gates on each. Pick up to 3 to investigate.")}
+    el.innerHTML = `${head("shortlist", "Pick where", "The best spaces for your directions, ranked: neighborhood support first, then cash. Four gates on each. Pick up to 3 to investigate.")}
       <div class="filter-row"><div class="seg" id="filter"><button data-f="all" class="${filter === "all" ? "on" : ""}">All (${pairs.length})</button>${keys.map((k) => { const d = o.directions.find((x) => x.business === k); return `<button data-f="${esc(k)}" class="${filter === k ? "on" : ""}">${esc(d.label)} (${pairs.filter((p) => p.business === k).length})</button>`; }).join("")}</div></div>
       <div class="pairs">${rows ? `<div class="pairs-head"><span></span><span>Place and gates</span><span>Cash to open</span></div>${rows}` : `<div class="panel">No ranked spaces for this direction.</div>`}</div>
       <div class="sticky-bar"><span class="muted" id="pick-note"></span><button class="btn primary" id="next">Investigate${ic("right")}</button></div>`;
@@ -866,12 +1003,12 @@
   }
   async function stageInvestigate(el) {
     const list = state.v.shortlist || [];
-    if (!list.length) { el.innerHTML = `${head(5, "Investigate", "")}<div class="panel">Shortlist at least one place first.</div>`; return; }
+    if (!list.length) { el.innerHTML = `${head("investigate", "Investigate", "")}<div class="panel">Shortlist at least one place first.</div>`; return; }
     const keys = list.map(pairKey);
     if (!keys.includes(state.tab)) state.tab = keys[0];
     await industries();
     const tabs = () => list.map((p) => { const k = pairKey(p), r = state.reviews[k]; return `<button data-k="${esc(k)}" class="${k === state.tab ? "on" : ""}">${r ? chip(VERDICT_CHIP[r.verdict] || "grey", VLABEL[r.verdict] || r.verdict) : state.reviewErr[k] ? chip("red", "error") : `<span class="spinner" style="width:12px;height:12px"></span>`}${esc(p.label)} · ${esc(p.address.split(",")[0])}</button>`; }).join("");
-    el.innerHTML = `${head(5, "Investigate", "Thirteen agents review each place: the space, the money, the deal, the records, the permits and the neighborhood. Verdict first; open any section for the evidence.")}
+    el.innerHTML = `${head("investigate", "Investigate", "Thirteen agents review each place: the space, the money, the deal, the records, the permits and the neighborhood. Verdict first; open any section for the evidence.")}
       <div class="tabs" id="tabs">${tabs()}</div><div id="review"></div>
       <div class="sticky-bar"><span class="muted" id="rev-note"></span><button class="btn primary" id="next">Compare and decide${ic("right")}</button></div>`;
     const bindTabs = () => el.querySelectorAll("#tabs button").forEach((b) => b.onclick = () => { state.tab = b.dataset.k; el.querySelector("#tabs").innerHTML = tabs(); bindTabs(); show(true); });
@@ -955,7 +1092,7 @@
     const ch = state.v.chosen ? pairKey(state.v.chosen) : null, budget = inputs().budget;
     const isCh = (p) => pairKey(p) === ch;
     const cell = (fn) => rows.map(({ p, r }) => `<td class="${isCh(p) ? "chosen" : ""}">${fn(p, r)}</td>`).join("");
-    el.innerHTML = `${head(6, "Decide", "Side by side: the deciding reason and what would flip each one. Commit to one and its open checks become your plan.")}
+    el.innerHTML = `${head("decide", "Decide", "Side by side: the deciding reason and what would flip each one. Commit to one and its open checks become your plan.")}
       ${rows.length ? `<div class="glass cmp-card"><div class="table-scroll"><table class="cmp">
         <thead><tr><th></th>${rows.map(({ p, r }) => `<th class="${isCh(p) ? "chosen" : ""}"><div class="eyebrow">${esc(r.label)}</div><div class="ct">${esc(r.address.split(",")[0])} · ${esc(p.suite_label)}</div>${verdictBadge(r.verdict, true)}</th>`).join("")}</tr></thead>
         <tbody>
@@ -994,7 +1131,7 @@
   }
   async function stagePlan(el) {
     const c = state.v.chosen;
-    if (!c) { el.innerHTML = `${head(7, "Plan & track", "")}<div class="panel">Commit to one place in Decide first.</div>`; return; }
+    if (!c) { el.innerHTML = `${head("plan", "Plan & track", "")}<div class="panel">Commit to one place in Decide first.</div>`; return; }
     el.innerHTML = `<div class="loading"><span class="spinner"></span>Building your plan…</div>`;
     const k = pairKey(c);
     if (!state.reviews[k]) state.reviews[k] = await review(c);
@@ -1003,7 +1140,7 @@
       .map(([id, name, icon]) => ({ id, name, icon, items: items.filter((x) => x.who === id) })).filter((g) => g.items.length);
     const render = () => {
       const n = items.filter((x) => done[x.id]).length;
-      el.innerHTML = `${head(7, "Plan & track", `Every open question for <b>${esc(c.label)}</b> at ${esc(c.address)}, grouped by who can answer it. Tick them off as answers come in; progress shows on your venture card.`)}
+      el.innerHTML = `${head("plan", "Plan & track", `Every open question for <b>${esc(c.label)}</b> at ${esc(c.address)}, grouped by who can answer it. Tick them off as answers come in; progress shows on your venture card.`)}
         <div class="panel plan-progress">${verdictBadge(r.verdict)}
           <div class="pp"><div style="display:flex;justify-content:space-between;gap:12px"><b>${n} of ${items.length} checks answered</b><span class="muted small">${n === items.length ? "Ready to sign" : `${items.length - n} open`}</span></div><div class="check-bar"><i style="width:${items.length ? Math.round(100 * n / items.length) : 0}%"></i></div></div></div>
         <div class="grid who">${groups.map((g) => `<div class="panel"><div class="ph">${ic(g.icon)}${esc(g.name)}<span class="count">${g.items.filter((x) => done[x.id]).length} / ${g.items.length}</span></div>

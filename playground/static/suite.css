@@ -570,3 +570,15 @@ dialog.legend::backdrop { background: rgba(0, 0, 0, .6); }
 .scan-agents { grid-column: 1 / -1; }
 .scan-agents .agents { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
 @media (max-width: 560px) { .scan-map .map { height: 280px; } }
+
+/* Four starting points; building search */
+.chooser.four { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.text-input { width: 100%; height: 40px; padding: 0 12px; border-radius: var(--r-sm); border: 1px solid var(--line-2); background: var(--well); color: var(--text); }
+.text-input:focus { outline: none; border-color: var(--accent); }
+.place-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 260px; overflow: auto; }
+.place-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--well); cursor: pointer; text-align: left; }
+.place-row:hover { border-color: var(--line-3); }
+#suite { margin-top: 6px; width: 100%; }
+.not-here .nh-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.not-here .nh { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; font-size: 13px; }
+.not-here summary::-webkit-details-marker { display: none; }
