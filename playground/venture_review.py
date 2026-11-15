@@ -281,6 +281,31 @@ def signal_refs(key, name):
                      else "residents_growth", "business arrivals": f"{key}.kit_net"}.get(name, ""))]
 
 
+def tours_from(findings, suite):
+    """The building's linked Matterport tours, from the records agent's findings (links only; nothing fetched)."""
+    tours = {}
+    for f in findings:
+        url = f.get("evidence_url") or ""
+        if "matterport.com" not in url:
+            continue
+        t = tours.setdefault(url, {"url": url, "model_id": url.split("m=")[-1], "caption": None, "suites": [],
+                                   "captured_at": None, "status": "agrees"})
+        if f["fact"] == "scan_address":
+            t["caption"] = f["value"]
+        if f["fact"] == "scan_suite" and isinstance(f["value"], list):
+            t["suites"] = f["value"]
+        t["captured_at"] = t["captured_at"] or f.get("captured_at")
+        if f["status"] == "conflict" or (f["status"] == "unknown" and t["status"] == "agrees"):
+            t["status"] = f["status"]
+    for t in tours.values():
+        other = t["suites"] and suite and str(suite) not in t["suites"]
+        t["note"] = (f"Captioned for suite {', '.join(t['suites'])}, not the listed suite {suite}: use it to see the "
+                     "building, not this space's measurements." if other else
+                     "Caption is not a surveyed join: confirm it shows this space." if t["status"] != "agrees" else
+                     "Linked to this property in CoStar.")
+    return sorted(tours.values(), key=lambda t: t["captured_at"] or "", reverse=True)
+
+
 def licenses_for(key):
     try:
         from venture_license_data import LICENSES
@@ -610,6 +635,7 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
             "permits": permits_step.get("steps", []),
             "records": [r for r in next((s for s in trace if s["agent"] == "records"), {}).get("findings", [])
                         if r["status"] != "agrees"],
+            "tours": tours_from((records_step or {}).get("findings", []), space.get("suite")),
         },
         "checks": checks, "narration": hood.get("narration"), "narration_label": hood.get("narration_label"),
         "jurisdiction": permits_step.get("jurisdiction"), "permit_authority": permits_step.get("authority"),

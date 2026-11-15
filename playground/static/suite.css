@@ -563,3 +563,5 @@ dialog.legend::backdrop { background: rgba(0, 0, 0, .6); }
 @media (max-width: 1180px) { .inv-side { max-height: none; overflow: visible; } .why-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 560px) { .why-grid { grid-template-columns: minmax(0, 1fr); } .legend-btn { display: none; } .vrule div { grid-template-columns: 1fr; } }
 .findings .fs { margin-top: 3px; }
+.tours { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.tour { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px; }
