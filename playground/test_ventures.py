@@ -333,3 +333,20 @@ class SitePreflight(unittest.TestCase):
         out = self.run_preflight("Retail", "houston", spaces=False)
         self.assertFalse(out["can_continue"])
         self.assertIn("Nothing is listed", out["stops"][0])
+
+
+class CashMonths(unittest.TestCase):
+    """The 12-month view: zero revenue, real cost and rent, Jayant's simulator; a delay moves the opening only."""
+    def test_zero_revenue_balance_and_reserve_month(self):
+        cost = {"cash_to_open": {"low": 300000, "base": 400000, "high": 500000}, "build_months": 3,
+                "lines": [{"label": "Rent while you build out", "low": 15000, "base": 30000, "high": 45000}]}
+        out = vr.cash_months(cost, {"monthly": 10000}, budget=500000, reserve=50000)
+        base = out["cases"]["base"]
+        self.assertEqual(base["cash"][0], 500000)
+        self.assertEqual(base["upfront"], 370000)
+        self.assertEqual(base["cash"][1], 500000 - 370000 - 10000)
+        self.assertEqual(base["cash"][12], 500000 - 370000 - 120000)
+        self.assertEqual(base["first_month_below_reserve"], 9)   # 130k - 10k*m < 50k from month 9
+        self.assertEqual((base["opens"], base["opens_if_delayed"]), (4, 7))
+        self.assertLess(out["cases"]["high"]["first_month_below_reserve"], 9)
+        self.assertIsNone(vr.cash_months(cost, {"monthly": None}, 500000, 50000))

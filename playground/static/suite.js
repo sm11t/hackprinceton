@@ -970,6 +970,7 @@
             <div class="stat well"><div class="k">Months of rent left after opening, zero revenue</div><div class="v ${m.months_of_rent_after_opening == null ? "" : m.months_of_rent_after_opening < 6 ? "red" : m.months_of_rent_after_opening < 12 ? "amber" : "green"}">${m.months_of_rent_after_opening ?? "—"}</div></div>
             ${dw.required ? `<div class="stat well"><div class="k">If opening slips 3 months (base)</div><div class="v ${dw.affordability === "within" ? "green" : dw.affordability === "stretch" ? "amber" : "red"}">${kmoney(dw.required.base)}</div><div class="k">${esc(look(AFFORD, dw.affordability)[1])} · ${dw.months_of_rent_after_opening ?? "—"} mo left</div></div>` : ""}
           </div>
+          <div class="cash-one" data-cash="1"></div>
           <table class="ledger"><thead><tr><th>What you pay before opening</th><th>Low</th><th>Base</th><th>High</th></tr></thead>
             <tbody>${ledger}<tr class="total"><td>Cash to open</td><td>${money(m.cash_to_open.low)}</td><td>${money(m.cash_to_open.base)}</td><td>${money(m.cash_to_open.high)}</td></tr></tbody></table>
           ${m.excludes ? `<div>${chip("amber", "Excludes " + m.excludes)}</div>` : ""}${m.note ? `<div class="muted small">${esc(m.note)}</div>` : ""}
@@ -1045,6 +1046,8 @@
         };
         row.onclick = go; row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
       });
+      const one = box.querySelector("[data-cash]");
+      if (one) { const items = [{ label: r.label.split(" / ")[0], c: r.pillars.money.cash_12m }]; const draw = () => { one.innerHTML = `<div class="ph" style="margin-bottom:6px">Next 12 months, zero revenue</div>` + cashChart(items); bindCash(one, items, draw); }; draw(); }
       const space = box.querySelector(".space3d");
       box.querySelector('details[data-p="space"]').addEventListener("toggle", function onT(ev) {
         if (!ev.target.open || space.dataset.drawn) return;
@@ -1083,6 +1086,81 @@
   }
 
   // ---------- Stage 6: decide ----------
+  // ---------- 12-month cash, zero revenue (Jayant's Nessie-pilot simulator on the real cost + rent) ----------
+  const SERIES = ["#3987e5", "#d95926", "#199e70"]; // categorical slots 1-3, validated on this dark surface
+  function cashSentence(c, label) {
+    const k = c.cases[cashCase], open = k.opens, late = k.opens_if_delayed;
+    if (k.first_month_below_zero) return `<b>${esc(label)}</b> ${k.first_month_below_reserve && k.first_month_below_reserve < k.first_month_below_zero ? `dips into your reserve in month ${k.first_month_below_reserve} and ` : ""}runs out of cash in month ${k.first_month_below_zero}${k.first_month_below_zero < open ? ", before it even opens" : ""}.`;
+    if (k.first_month_below_reserve) {
+      const after = k.first_month_below_reserve - open, afterLate = k.first_month_below_reserve - late;
+      return `<b>${esc(label)}</b> dips into your reserve in month ${k.first_month_below_reserve}: ${after > 0 ? `${after} month${after > 1 ? "s" : ""} after opening` : "before opening"}${after > 0 ? `; ${afterLate > 0 ? `${afterLate}` : "0"} if opening slips ${c.delay} months` : ""}.`;
+    }
+    return `<b>${esc(label)}</b> stays above your reserve for all ${c.months} months with zero revenue (${kmoney(k.cash[c.months])} left).`;
+  }
+  let cashCase = "base";
+  function cashChart(items) { // items: [{label, c}] with c = pillars.money.cash_12m
+    items = items.filter((x) => x.c);
+    if (!items.length) return `<div class="muted small">No 12-month view: the listing has no asking rent to bill.</div>`;
+    const c0 = items[0].c, M = c0.months, W = 1100, H = 340, L = 64, R = 150, T = 16, B = 36;
+    const axm = (v) => (Math.abs(v) < 1 ? "$0" : (v < 0 ? "−" : "") + kmoney(Math.abs(v)));
+    const vals = items.flatMap((x) => x.c.cases[cashCase].cash).concat([0, c0.reserve, c0.budget]);
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    const pad = (hi - lo) * 0.06; lo -= pad; hi += pad;
+    const x = (m) => L + (W - L - R) * m / M, y = (v) => T + (H - T - B) * (hi - v) / (hi - lo);
+    const ticks = []; const step = Math.pow(10, Math.floor(Math.log10((hi - lo) / 4))) * ([1, 2, 5].find((f) => (hi - lo) / (Math.pow(10, Math.floor(Math.log10((hi - lo) / 4))) * f) <= 5) || 10);
+    for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) ticks.push(v);
+    const k0 = c0.cases[cashCase];
+    // nudge line-end labels apart so they never overlap (direct labels, <= 3 series)
+    const ends = items.map((it, j) => ({ j, yy: y(it.c.cases[cashCase].cash[M]) })).sort((a, b) => a.yy - b.yy);
+    const labelNudge = items.map(() => 0);
+    ends.forEach((e, n) => { if (n && e.yy + labelNudge[e.j] - (ends[n - 1].yy + labelNudge[ends[n - 1].j]) < 15) labelNudge[e.j] = ends[n - 1].yy + labelNudge[ends[n - 1].j] + 15 - e.yy; });
+    const lines = items.map((it, j) => {
+      const k = it.c.cases[cashCase], pts = k.cash.map((v, m) => `${x(m).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+      const end = k.cash[M], dip = k.first_month_below_reserve;
+      return `<polyline points="${pts}" fill="none" stroke="${SERIES[j]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+        ${dip ? `<circle cx="${x(dip)}" cy="${y(k.cash[dip])}" r="5" fill="${SERIES[j]}" stroke="#141518" stroke-width="2"><title>${esc(it.label)}: below the reserve in month ${dip}</title></circle>` : ""}
+        <text x="${x(M) + 8}" y="${y(end) + 4 + labelNudge[j]}" class="cc-lab">${esc(it.label.split(" · ")[0].slice(0, 20))}</text>`;
+    }).join("");
+    const svg = `<svg class="cc" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cash balance over ${M} months with zero revenue">
+      <rect x="${x(0)}" y="${T}" width="${x(k0.opens - 1) - x(0)}" height="${H - T - B}" class="cc-build"/>
+      <text x="${x(0) + 6}" y="${T + 14}" class="cc-note">building out</text>
+      ${ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="cc-grid"/><text x="${L - 8}" y="${y(v) + 4}" class="cc-ax" text-anchor="end">${axm(v)}</text>`).join("")}
+      <line x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}" class="cc-zero"/><text x="${W - R - 4}" y="${y(0) + 14}" class="cc-note" text-anchor="end">out of cash</text>
+      <line x1="${L}" x2="${W - R}" y1="${y(c0.reserve)}" y2="${y(c0.reserve)}" class="cc-res"/><text x="${W - R - 4}" y="${y(c0.reserve) + 14}" class="cc-note" text-anchor="end">your ${kmoney(c0.reserve)} reserve</text>
+      <line x1="${x(k0.opens - 1)}" x2="${x(k0.opens - 1)}" y1="${T}" y2="${H - B}" class="cc-open"/><text x="${x(k0.opens - 1) + 4}" y="${H - B - 6}" class="cc-note">opens</text>
+      <line x1="${x(k0.opens_if_delayed - 1)}" x2="${x(k0.opens_if_delayed - 1)}" y1="${T}" y2="${H - B}" class="cc-late"/><text x="${x(k0.opens_if_delayed - 1) + 4}" y="${H - B - 6}" class="cc-note">opens if ${c0.delay} mo late</text>
+      ${Array.from({ length: M + 1 }, (_, m) => `<text x="${x(m)}" y="${H - 12}" class="cc-ax" text-anchor="middle">${m}</text>`).join("")}
+      <text x="${(L + W - R) / 2}" y="${H}" class="cc-ax" text-anchor="middle">month</text>
+      ${lines}
+      <line class="cc-cross" x1="0" x2="0" y1="${T}" y2="${H - B}" visibility="hidden"/>
+      <rect class="cc-hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/>
+    </svg>`;
+    const legend = items.length > 1 ? `<div class="cc-legend">${items.map((it, j) => `<span><i style="background:${SERIES[j]}"></i>${esc(it.label)}</span>`).join("")}</div>` : "";
+    const table = `<details class="cc-table"><summary class="link-btn">Table view</summary><div class="table-scroll"><table class="findings"><thead><tr><th>Month</th>${items.map((it) => `<th>${esc(it.label)}</th>`).join("")}</tr></thead><tbody>${Array.from({ length: M + 1 }, (_, m) => `<tr><td>${m}</td>${items.map((it) => `<td class="num">${money(it.c.cases[cashCase].cash[m])}</td>`).join("")}</tr>`).join("")}</tbody></table></div></details>`;
+    return `<div class="cc-wrap" data-n="${items.length}">
+      <div class="cc-top"><div class="seg cc-case">${["low", "base", "high"].map((k) => `<button type="button" data-case="${k}" class="${k === cashCase ? "on" : ""}">${cap(k)} cost</button>`).join("")}</div>${legend}</div>
+      <div class="cc-plot">${svg}<div class="cc-tip" hidden></div></div>
+      <ul class="plain cc-says">${items.map((it, j) => `<li><span class="mk" style="color:${SERIES[j]}">●</span><span>${cashSentence(it.c, it.label)}</span></li>`).join("")}</ul>
+      <div class="faint small">Starts from your ${kmoney(c0.budget)}; opening costs from the sourced ledger are paid up front, then the CoStar asking rent every month. <b>Zero revenue</b>, and no payroll or utilities, so real runway is shorter. Computed with Jayant's Nessie-pilot simulator. ${table}</div>
+    </div>`;
+  }
+  function bindCash(root, items, rerender) {
+    root.querySelectorAll(".cc-case button").forEach((b) => b.onclick = () => { cashCase = b.dataset.case; rerender(); });
+    root.querySelectorAll(".cc-plot").forEach((plot) => {
+      const svg = plot.querySelector("svg"), hit = plot.querySelector(".cc-hit"), tip = plot.querySelector(".cc-tip"), cross = plot.querySelector(".cc-cross");
+      if (!svg || !hit) return;
+      const its = items.filter((x) => x.c), M = its[0].c.months, vb = svg.viewBox.baseVal, L = 64, R = 150;
+      hit.onmousemove = (ev) => {
+        const r = svg.getBoundingClientRect(), sx = (ev.clientX - r.left) * vb.width / r.width;
+        const m = Math.max(0, Math.min(M, Math.round((sx - L) / (vb.width - L - R) * M))), xx = L + (vb.width - L - R) * m / M;
+        cross.setAttribute("x1", xx); cross.setAttribute("x2", xx); cross.setAttribute("visibility", "visible");
+        tip.hidden = false; tip.style.left = Math.min(r.width - 190, (xx * r.width / vb.width) + 12) + "px";
+        tip.innerHTML = `<b>Month ${m}</b>${its.map((it, j) => `<div><i style="background:${SERIES[j]}"></i>${esc(it.label)} <span class="num">${money(it.c.cases[cashCase].cash[m])}</span></div>`).join("")}`;
+      };
+      hit.onmouseleave = () => { tip.hidden = true; cross.setAttribute("visibility", "hidden"); };
+    });
+  }
+
   async function stageDecide(el) {
     const list = state.v.shortlist || [];
     el.innerHTML = `<div class="loading"><span class="spinner"></span>Gathering verdicts…</div>`;
@@ -1103,7 +1181,11 @@
           <tr><th>Neighborhood</th>${cell((p, r) => { const d = look(DEMAND, r.pillars.demand.verdict); return chip(d[0], d[1]) + src(demandSrc(r.business)); })}</tr>
           <tr><th>Open checks</th>${cell((p, r) => `<span class="num">${(r.checks || []).length + (r.pillars.permits || []).length}</span>`)}</tr>
           <tr class="act"><th></th>${cell((p) => { const k = pairKey(p); return `<button class="btn ${isCh(p) ? "" : "primary"} block" data-k="${esc(k)}">${isCh(p) ? ic("check", 14) + "Committed" : "Commit to this one"}</button>`; })}</tr>
-        </tbody></table></div></div>` : `<div class="panel">No reviews yet.</div>`}`;
+        </tbody></table></div></div>
+        <div class="panel cash-panel"><div class="ph">The next 12 months with zero revenue<span class="aside">which pick dips into your reserve, and when</span></div><div id="cash12"></div></div>` : `<div class="panel">No reviews yet.</div>`}`;
+    const cashItems = rows.map(({ p, r }) => ({ label: `${r.label.split(" / ")[0]} · ${r.address.split(",")[0]}`, c: r.pillars.money.cash_12m }));
+    const drawCash = () => { const box = el.querySelector("#cash12"); if (!box) return; box.innerHTML = cashChart(cashItems); bindCash(box, cashItems, drawCash); };
+    drawCash();
     el.querySelectorAll("button[data-k]").forEach((b) => b.onclick = async () => {
       const p = list.find((x) => pairKey(x) === b.dataset.k), r = state.reviews[b.dataset.k];
       if (r.verdict === "NO-GO" && !confirm("This one is NO-GO. Commit anyway and plan around the blocker?")) return;
