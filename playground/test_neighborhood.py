@@ -1,5 +1,6 @@
 """Tests for the neighborhood demand pipeline. No network: tables are synthetic or cached."""
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -141,6 +142,45 @@ class Residents(unittest.TestCase):
             out = n.residents_agent(29.80, -95.40, "childcare")
         self.assertIn("residents_under_5", {r["fact"] for r in out["findings"]})
         self.assertTrue(out["signal"]["reason"].startswith("Under-5"))
+
+
+def facility(lat, lon, name=None, indoor=False, commercial=False, osm="node/1"):
+    return {"lat": lat, "lon": lon, "name": name, "indoor": indoor, "commercial": commercial,
+            "osm_ids": [osm], "features": 1, "osm_id": osm}
+
+
+class Competitors(unittest.TestCase):
+    def test_cluster_merges_courts_but_keeps_named_neighbours_apart(self):
+        points = [facility(29.8, -95.4, None, osm="way/1"), facility(29.8005, -95.4, None, osm="way/2"),
+                  facility(29.8, -95.4005, "Club A", True, True, "way/3"), facility(29.8, -95.401, "Club B", osm="n/4")]
+        out = n.cluster(points, 0.15)
+        names = sorted(f["name"] for f in out)
+        self.assertEqual(names, ["Club A", "Club B"])
+        club_a = next(f for f in out if f["name"] == "Club A")
+        self.assertEqual(club_a["features"], 3)  # the two unnamed courts joined Club A
+        self.assertTrue(club_a["indoor"])
+
+    def test_competitors_agent_counts_ratio_and_stance(self):
+        local = [facility(29.80, -95.40, "A", osm="n/1"), facility(29.805, -95.40, "B", osm="n/2")]
+        far = [facility(30.30, -95.40, "C", osm="n/3")]
+        with FakeTables(), mock.patch.object(n, "osm_facilities", lambda use: (
+                local + far, (("url", "https://overpass.test"), ("retrieved_at", "2026-11-14T00:00:00"),
+                              ("cached", True)))):
+            out = n.competitors_agent(29.80, -95.40, "indoor pickleball")
+        facts = {r["fact"]: r for r in out["findings"]}
+        self.assertEqual(facts["competitors_within_radius"]["value"], 2)
+        # Local: 2 per 10,000 residents = 2.0; area: 3 per 15,000 = 2.0 per 10k -> ratio 1.0, neutral
+        self.assertEqual(facts["supply_per_10k_residents"]["value"], 2.0)
+        self.assertEqual(out["signal"]["stance"], 0)
+        self.assertEqual(facts["nearest_competitor"]["value"]["name"], "A")
+        self.assertTrue(facts["nearest_competitor"]["evidence_url"].startswith("https://www.openstreetmap.org/"))
+
+    def test_no_local_facilities_reads_underserved(self):
+        with FakeTables(), mock.patch.object(n, "osm_facilities", lambda use: (
+                [facility(30.30, -95.40, "C")], (("url", "u"), ("retrieved_at", "2026-11-14"), ("cached", True)))):
+            out = n.competitors_agent(29.80, -95.40, "indoor pickleball")
+        self.assertEqual(out["signal"]["stance"], 1)
+        self.assertIn("underserved", out["signal"]["reason"])
 
 
 class Planner(unittest.TestCase):

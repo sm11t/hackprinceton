@@ -456,6 +456,129 @@ def residents_agent(lat, lon, use, radius=RADIUS_MI):
             "handoff": "Residents profile and trend to the lookalike agent (features) and coordinator (trend signal)."}
 
 
+# --- OpenStreetMap facilities ----------------------------------------------------
+
+def overpass_query(selectors):
+    s, w, n_, e = BBOX
+    body = "".join(f"{sel}({s},{w},{n_},{e});" for sel in selectors)
+    return f"[out:json][timeout:120];({body});out center tags;"
+
+
+def element_point(element):
+    if "lat" in element:
+        return element["lat"], element["lon"]
+    center = element.get("center") or {}
+    return center.get("lat"), center.get("lon")
+
+
+def is_indoor(tags):
+    return (tags.get("indoor") == "yes" or tags.get("leisure") in ("sports_centre", "sports_hall", "fitness_centre")
+            or tags.get("building") not in (None, "no", "roof"))
+
+
+def is_commercial(tags):
+    return tags.get("fee") == "yes" or tags.get("access") == "customers" or tags.get("leisure") == "sports_centre"
+
+
+def cluster(points, radius_mi):
+    """Merge OSM features into facilities: courts in one park become one facility.
+
+    Two features merge when they are within `radius_mi` and their names do not
+    conflict (same name, or one is unnamed).
+    """
+    facilities = []
+    for p in sorted(points, key=lambda p: (p["name"] is None, p["name"] or "")):
+        for f in facilities:
+            if miles(p["lat"], p["lon"], f["lat"], f["lon"]) <= radius_mi and (
+                    p["name"] is None or f["name"] is None or p["name"].casefold() == f["name"].casefold()):
+                f["features"] += 1
+                f["osm_ids"].append(p["osm_id"])
+                f["indoor"] = f["indoor"] or p["indoor"]
+                f["commercial"] = f["commercial"] or p["commercial"]
+                f["name"] = f["name"] or p["name"]
+                break
+        else:
+            facilities.append({**p, "features": 1, "osm_ids": [p["osm_id"]]})
+    return facilities
+
+
+CLUSTER_MI = {"indoor pickleball": 0.15, "fitness studio": 0.03, "childcare": 0.03}
+
+
+@lru_cache(maxsize=None)
+def osm_facilities(use):
+    """All facilities for a use across the Houston area, clustered. Returns (facilities, meta)."""
+    query = overpass_query(USES[use]["osm"])
+    payload, meta = fetch(OVERPASS, form={"data": query})
+    points = []
+    for e in payload.get("elements", []):
+        lat, lon = element_point(e)
+        if lat is None:
+            continue
+        tags = e.get("tags") or {}
+        points.append({"lat": lat, "lon": lon, "name": tags.get("name"), "osm_id": f"{e['type']}/{e['id']}",
+                       "indoor": is_indoor(tags), "commercial": is_commercial(tags)})
+    facilities = cluster(points, CLUSTER_MI.get(use, 0.03))
+    # Keep facilities inside the Houston area: within 2 miles of a Houston-area tract point.
+    rows, _ = tract_table(2024)
+    facilities = [f for f in facilities if near(rows, f["lat"], f["lon"], 2.0)]
+    meta = {**meta, "url": OVERPASS + "?data=" + query}
+    return facilities, tuple(sorted(meta.items()))
+
+
+def osm_link(osm_id):
+    return f"https://www.openstreetmap.org/{osm_id}"
+
+
+def competitors_agent(lat, lon, use, radius=RADIUS_MI):
+    """Who already serves it: facilities near the site and supply per 10k residents vs the Houston area."""
+    facilities, meta = osm_facilities(use)
+    meta = dict(meta)
+    word = USES[use]["facility_word"]
+    sources = [source(f"OpenStreetMap via Overpass ({word})", meta,
+                      "Volunteer-mapped; coverage is incomplete, so absence on the map is not proof of absence.")]
+    local = sorted(near(facilities, lat, lon, radius), key=lambda x: x[0])
+    wider = near(facilities, lat, lon, 5.0)
+    profile = area_profile(lat, lon, radius)
+    totals = area_totals()
+    area_rate = len(facilities) / totals["population"] * 10_000
+    local_rate = len(local) / profile["population"] * 10_000 if profile and profile["population"] else None
+    ratio = local_rate / area_rate if local_rate is not None and area_rate else None
+    nearest = min(((miles(lat, lon, f["lat"], f["lon"]), f) for f in facilities), key=lambda x: x[0], default=None)
+    when = meta["retrieved_at"][:10]
+    findings = [
+        record("competitors_within_radius", len(local), "public:osm", f"overpass-{use}", when, 0.6,
+               meta["url"], "agrees",
+               note=f"{word.capitalize()} within {radius:g} miles ({sum(f['indoor'] for _, f in local)} indoor or in a "
+                    f"building, {sum(f['commercial'] for _, f in local)} fee/customer-only). Courts in one place count "
+                    "as one facility. OpenStreetMap is incomplete."),
+        record("competitors_within_5mi", len(wider), "public:osm", f"overpass-{use}", when, 0.6, meta["url"], "agrees",
+               note="Same count at 5 miles."),
+        record("supply_per_10k_residents", None if local_rate is None else round(local_rate, 2), "computed",
+               "osm-count / acs-population", when, 0.5, meta["url"], "agrees" if local_rate is not None else "unknown",
+               note=f"Houston area: {area_rate:.2f} per 10k ({len(facilities)} facilities / "
+                    f"{totals['population']:,.0f} residents). Ratio here vs area: "
+                    f"{'unknown' if ratio is None else f'{ratio:.2f}x'}."),
+    ]
+    if nearest:
+        d, f = nearest
+        findings.append(record("nearest_competitor", {"name": f["name"] or "(unnamed on the map)",
+                                                      "miles": round(d, 2), "indoor": f["indoor"]},
+                               "public:osm", f["osm_ids"][0], when, 0.6, osm_link(f["osm_ids"][0]), "agrees",
+                               note="Straight-line distance, not drive time."))
+    signal = {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
+              "stance": None if ratio is None else (1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
+              "reason": ("Supply unknown" if ratio is None else
+                         f"{len(local)} {word} within {radius:g} mi = {ratio:.1f}x the Houston-area rate per resident"
+                         + (" (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""))}
+    nearest_text = (f"; nearest {nearest[1]['name'] or 'unnamed'} at {nearest[0]:.1f} mi" if nearest else "")
+    return {"sources": sources, "findings": findings, "signal": signal, "confidence": 0.5,
+            "summary": f"{len(local)} {word} within {radius:g} mi, {len(wider)} within 5 mi{nearest_text}.",
+            "handoff": "Supply ratio to the coordinator; facility locations are the lookalike agent's training data.",
+            "nearby": [{"name": f["name"], "miles": round(d, 2), "indoor": f["indoor"], "commercial": f["commercial"],
+                        "lat": f["lat"], "lon": f["lon"], "url": osm_link(f["osm_ids"][0])} for d, f in local[:15]]}
+
+
 @lru_cache(maxsize=None)
 def us_population_6_plus_record():
     """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""
