@@ -35,6 +35,252 @@ HOUSTON_STEPS = [  # Houston process (approvals_timeline.REFERENCES), applied to
 ]
 
 
+HARRIS_STEPS = [  # unincorporated Harris County: the county permits, not the City of Houston
+    ("Allowed use and deed restrictions", "Unincorporated Harris County has no zoning, but recorded deed "
+     "restrictions can limit a use. Ask the landlord and check the deed restrictions."),
+    ("Commercial building permit and plan review", "Outside city limits, Harris County's Office of the County "
+     "Engineer handles commercial building permits; City of Houston permits don't apply."),
+    ("Fire and accessibility review", "Fire review, exits and the accessible route go through the county; ask the "
+     "county which reviews apply to this use."),
+    ("Final inspections and occupancy", "Final sign-offs before opening."),
+]
+AUTHORITY = {"houston": ("City of Houston (Houston Permitting Center)",
+                         "https://www.houstontx.gov/business/plan/permits-inspections.html"),
+             "harris_unincorporated": ("Harris County Office of the County Engineer",
+                                       "https://oce.harriscountytx.gov/Services/Permits/Permits-A-to-Z/Commercial-Building")}
+COMPLIANCE_FACTS = ("identity", "occupancy", "fire", "accessibility", "parking", "mep", "business_space_fit",
+                    "official_process", "scan_address")
+
+
+def compliance(property_id, suite, key, kit=None):
+    """Jayant's compliance engine (PR #17), called as is: building preflight + business check, with the official
+    research replayed from its cache (live search only when COMPLIANCE_LIVE=1). Never raises: None if unavailable."""
+    import os
+    try:
+        import compliance_engine as ce
+        from jurisdiction import offline
+    except ImportError:
+        return None
+    try:
+        try:
+            context = ce.context_from_kit(property_id, suite, str(kit) if kit else None)
+        except ValueError:  # the suite label isn't a listed suite the engine can match: building scope
+            context = ce.context_from_kit(property_id, None, str(kit) if kit else None)
+        live = os.environ.get("COMPLIANCE_LIVE") == "1" and not offline()
+        search = ce.cached_search(ce.tavily_search, ce.RESEARCH_CACHE, offline=not live)
+        return ce.check_business(context, key, search)
+    except Exception as error:  # noqa: BLE001  any engine failure leaves permits on the stated assumption
+        return {"jurisdiction": {"code": None, "verified": False,
+                                 "note": f"compliance engine unavailable ({type(error).__name__})"},
+                "records": [], "research": [], "gates": []}
+
+
+def jurisdiction_record(where):
+    code = where.get("code")
+    return record("jurisdiction", where.get("place") or where.get("county") or code, "public:census-geocoder",
+                  "census-geocoder", (where.get("retrieved_at") or "")[:10] or None, 0.9 if where.get("verified") else 0.3,
+                  where.get("evidence_url"), "agrees" if where.get("verified") or where.get("place") else "unknown",
+                  note=where.get("note") or "")
+
+
+SOURCE_NAMES = {"public:acs": "U.S. Census ACS 5-year", "costar": "CoStar kit", "computed": "computed in code",
+                "public:census-geocoder": "U.S. Census geocoder", "venture_costs": "cost ledger (sourced benchmarks)"}
+SIGNAL_AGENT = {"lookalike": "lookalike", "local supply": "competitors", "population trend": "residents",
+                "business arrivals": "momentum"}
+
+
+def money_text(x):
+    return "unknown" if x is None else f"${x:,.0f}"
+
+
+def signal_display(name, value):
+    if value is None:
+        return "unknown"
+    if name == "lookalike":
+        return f"{value}th percentile"
+    if name == "local supply":
+        return f"{value:g}x the Houston-area rate"
+    if name == "population trend":
+        return f"{value * 100:+.1f} pts vs the Houston area"
+    if name == "business arrivals":
+        return f"{value:+d} net arrivals"
+    return str(value)
+
+
+def signal_rule(name):
+    return {
+        "lookalike": f"+1 at the {nb.LOOKALIKE_PLUS}th percentile or above, -1 at the {nb.LOOKALIKE_MINUS}th or "
+                     f"below; votes only if its held-out AUC >= {nb.VALIDATED_AUC}",
+        "local supply": f"+1 at <= {nb.SUPPLY_UNDER:g}x the area rate, -1 at >= {nb.SUPPLY_OVER:g}x, only if "
+                        f"Poisson p < {nb.SUPPLY_P:g}",
+        "population trend": f"+/-1 beyond {nb.TREND_POINTS * 100:g} pts vs the Houston area and beyond the ACS "
+                            "margin of error",
+        "business arrivals": "+1 if more arrived than left in 3 years, -1 if fewer (needs 2+ moves)",
+    }.get(name, "")
+
+
+def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, signals, deal_step, records_step, permits_step,
+            blockers, conditions, verdict):
+    """Every reason behind the verdict as rows {text, effect, decides, agent, signal{name, value, rule}, refs}.
+
+    effect: blocks | check | supports | unknown. `decides` marks the rows the verdict rule actually used (every
+    blocker and condition, and the GO criteria); the others inform. `refs` are (agent, fact prefix) pairs that
+    review() turns into indexes into evidence[]. Built from the same values as the verdict, so the UI never
+    re-derives logic.
+    """
+    rows = []
+
+    def add(effect, agent, text, name, value, rule, refs=(), decides=False):
+        rows.append({"text": text, "effect": effect, "decides": decides, "agent": agent,
+                     "signal": {"name": name, "value": value, "rule": rule}, "refs": list(refs)})
+    need = INDUSTRIES[key]["space"]
+    typical = (f"typical {need['min_sf']:,}-{need['max_sf']:,} sq ft" if need.get("max_sf")
+               else f"at least {need['min_sf']:,} sq ft")
+    size = f"{fit['space_sf']:,.0f} sq ft" if fit.get("space_sf") else "size not recorded"
+    fit_refs = [("building", f"{key}.building_fit")]
+    if fit["status"] == "fits":
+        add("supports", "building", "The space fits: " + "; ".join(fit["reasons"])
+            + (f". Room for {fit['capacity']}" if fit.get("capacity") else ""), "building fit", size,
+            f"{typical}; a building type that commonly hosts it", fit_refs, decides=True)
+    elif fit["status"] == "check":
+        for u in fit["unknowns"]:
+            add("check", "building", u, "building fit", size, typical, fit_refs, decides=True)
+    else:
+        add("blocks", "building", "The space can't host it: " + "; ".join(fit["reasons"]), "building fit", size,
+            typical, fit_refs, decides=True)
+
+    afford = cost.get("affordability", "unknown")
+    req, total = cost.get("required") or {}, cost.get("cash_to_open") or {}
+    money_refs = [("money", f"{key}.cash_to_open"), ("money", f"{key}.budget_check")]
+    rule = f"cash to open + {money_text(reserve)} reserve <= {money_text(budget)} budget"
+    if afford == "within":
+        months = cost.get("months_of_rent_after_opening")
+        add("supports", "money", f"Affordable: {money_text(total.get('base'))} to open + {money_text(reserve)} "
+            f"reserve = {money_text(req.get('base'))}, {money_text(cost.get('headroom'))} under budget"
+            + (f" (about {months:g} months of rent to spare with zero revenue)" if months else ""),
+            "cash to open + reserve (base)", money_text(req.get("base")), rule, money_refs, decides=True)
+    elif afford == "stretch":
+        add("check", "money", f"Only affordable in the low-cost case: low {money_text(req.get('low'))}, base "
+            f"{money_text(req.get('base'))}", "cash to open + reserve (base)", money_text(req.get("base")), rule,
+            money_refs, decides=True)
+    elif afford == "over":
+        add("blocks", "money", f"Cash to open plus reserve, {money_text(req.get('low'))} even in the low case, "
+            f"exceeds the {money_text(budget)} budget", "cash to open + reserve (low)", money_text(req.get("low")),
+            rule.replace("cash to open", "low-case cash to open"), money_refs, decides=True)
+    elif afford == "rent_unknown":
+        add("check", "money", "The listing has no asking rent: cash excludes the deposit and rent while building; "
+            "ask the broker", "monthly rent", "not listed", rule, money_refs, decides=True)
+    else:
+        add("check", "money", "Cash to open is unknown (no comparable cost benchmark for this business): get quotes",
+            "cash to open", "unknown", rule, money_refs, decides=True)
+    for gap in cost.get("unpriced") or []:
+        add("check", "money", gap, "unpriced cost line", "not priced", "every cost line priced from a source",
+            money_refs, decides=True)
+    if afford == "within" and stress and stress.get("required", {}).get("base") is not None:
+        late = stress["required"]["base"]
+        add("supports" if stress["affordability"] == "within" else "check", "money",
+            (f"Survives a 3-month opening delay: {money_text(late)} needed, still within budget"
+             if stress["affordability"] == "within" else
+             f"A 3-month opening delay raises the need to {money_text(late)}, over budget: keep a buffer"),
+            "3-month delay", money_text(late), rule, [("money", f"{key}.three_month_delay")])
+
+    demand = (decision or {}).get("verdict", "unknown")
+    for r in (decision or {}).get("reasons", []):
+        if r["stance"] == 0:
+            continue  # neutral: shown in the agent run, not a reason
+        agent = SIGNAL_AGENT.get(r["signal"], "coordinator")
+        effect = "supports" if r["stance"] > 0 else "blocks" if demand == "weak" else "check"
+        add(effect, agent, r["reason"], r["signal"], signal_display(r["signal"], (signals.get(r["signal"]) or {}).get("value")),
+            signal_rule(r["signal"]), signal_refs(key, r["signal"]))
+    for u in (decision or {}).get("unknown", []):
+        add("unknown", SIGNAL_AGENT.get(u["signal"], "coordinator"), u["reason"], u["signal"], "unknown",
+            signal_rule(u["signal"]), signal_refs(key, u["signal"]))
+    verdict_rule = (f"supported: total >= +{nb.VERDICT_TOTAL} incl. a business-specific +1 (lookalike or supply), "
+                    "no lookalike -1")
+    score = (f"{demand} (total {decision['score']:+d})" if decision and decision.get("score") is not None
+             else demand)
+    voted = [ref for r in (decision or {}).get("reasons", []) if r["stance"] for ref in signal_refs(key, r["signal"])]
+    if demand == "supported":
+        add("supports", "coordinator", decision["headline"], "neighborhood verdict", score, verdict_rule, voted,
+            decides=True)
+    elif demand == "weak":
+        add("blocks", "coordinator", decision["headline"], "neighborhood verdict", score, verdict_rule, voted,
+            decides=True)
+    else:
+        add("check", "coordinator", f"Neighborhood demand is {demand}: "
+            + (decision["headline"] if decision else "no verdict"), "neighborhood verdict", score, verdict_rule,
+            voted, decides=True)
+
+    deal_findings = (deal_step or {}).get("findings", [])
+    vs = next((f for f in deal_findings if f["fact"] == "asking_rent_vs_market"), None)
+    if vs:
+        inside = vs["status"] == "agrees"
+        add("supports" if inside else "check", "deal", ("Asking rent is inside the market range: " if inside else
+            "Asking rent is outside the market range (negotiate or ask why): ") + vs["note"], "asking rent",
+            f"${vs['value']:.2f}/sq ft/yr", "inside the 10-90% range of similar signed deals",
+            [("deal", "asking_rent_vs_market")])
+    elif rent.get("kind") == "estimate":
+        add("unknown", "deal", rent["source"] + ": rent is an estimate until the broker quotes it", "asking rent",
+            "not listed", "asking rent from the listing", [("deal", "monthly_base_rent")])
+    if any("lease is pending" in c for c in conditions):
+        add("check", "deal", "A lease is pending on this space: confirm it is still available", "lease pending",
+            "yes", "space available to lease", [("deal", "monthly_base_rent")], decides=True)
+
+    rec = (records_step or {}).get("findings", [])
+    conflicts = [r for r in rec if r["status"] == "conflict"]
+    for r in conflicts[:3]:
+        add("check", "records", "Records disagree: " + r["note"], r["fact"].replace("_", " "), str(r["value"]),
+            "CoStar and the linked scans agree", [("records", r["fact"], r["value"])], decides=True)
+    if rec and not conflicts:
+        add("supports", "records", f"CoStar's record and the linked scans agree ({len(rec)} checks, no conflicts)",
+            "records agree", f"0 of {len(rec)} conflict", "no conflicts between CoStar and the scans",
+            [("records", "")])
+    unknown_records = [r for r in rec if r["status"] == "unknown"]
+    if unknown_records:
+        add("unknown", "records", f"{len(unknown_records)} record fact(s) can't be confirmed from the data, e.g. "
+            + unknown_records[0]["note"][:140], "unconfirmed records", str(len(unknown_records)),
+            "each fact confirmed by a second record", [("records", unknown_records[0]["fact"])])
+
+    where = (permits_step or {}).get("jurisdiction") or {}
+    j_rule = "permits follow the official boundary (Census), not the postal city"
+    j_refs = [("permits", "jurisdiction")]
+    if where.get("code") == "houston":
+        add("supports", "permits", "Inside City of Houston limits (Census boundary): Houston's permit path applies",
+            "jurisdiction", where.get("place") or "Houston", j_rule, j_refs)
+    elif where.get("code") == "harris_unincorporated":
+        add("check", "permits", "Unincorporated Harris County: City of Houston permits don't apply; Harris County "
+            "does", "jurisdiction", "unincorporated " + (where.get("county") or "Harris County"), j_rule, j_refs,
+            decides=True)
+    elif where.get("place"):
+        add("check", "permits", f"Inside {where['place']}, which has its own permitting office", "jurisdiction",
+            where["place"], j_rule, j_refs, decides=True)
+    else:
+        add("unknown", "permits", "Jurisdiction not verified: Houston's path is shown as an assumption ("
+            + (where.get("note") or "not looked up") + ")", "jurisdiction", "not verified", j_rule, j_refs)
+    if "commercial_conversion_unestablished" in ((permits_step or {}).get("gates") or []) and fit["status"] != "no":
+        add("blocks", "permits", "CoStar records this as a residential building: commercial use is not established",
+            "building gate", "residential", "a commercial building", [("permits", "compliance.")], decides=True)
+
+    # Every blocker and condition must appear as a deciding row (guards against drift between the two lists).
+    shown = " ".join(r["text"] for r in rows if r["decides"])
+    for text in blockers:
+        if text[:40] not in shown:
+            add("blocks", "verdict", text, "blocker", "", "", decides=True)
+    for text in conditions:
+        if text[:40] not in shown:
+            add("check", "verdict", text, "condition", "", "", decides=True)
+    order = {"blocks": 0, "check": 1, "supports": 2, "unknown": 3}
+    rows.sort(key=lambda r: (order[r["effect"]], not r["decides"]))
+    return rows
+
+
+def signal_refs(key, name):
+    agent = SIGNAL_AGENT.get(name, "coordinator")
+    return [(agent, {"lookalike": f"{key}.lookalike_percentile", "local supply": f"{key}.supply",
+                     "population trend": f"{key}.residents_" if INDUSTRIES[key]["demand_band"]
+                     else "residents_growth", "business arrivals": f"{key}.kit_net"}.get(name, ""))]
+
+
 def licenses_for(key):
     try:
         from venture_license_data import LICENSES
@@ -173,7 +419,7 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
             conditions.append("A lease is pending on this space: confirm it is still available.")
         return {"summary": summary, "findings": findings, "confidence": 0.6,
                 "handoff": "Rent feeds the money agent; a pending lease becomes a condition."}
-    step(trace, "deal", "Is the asking rent fair for this space?", deal)
+    deal_step = step(trace, "deal", "Is the asking rent fair for this space?", deal)
 
     def records():
         from reconcile import check_identity, check_scan_dates, check_size, check_suite_identity
@@ -186,27 +432,81 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
                 "summary": (f"{len(conflicts)} conflict(s) between CoStar and the linked scans" if conflicts
                             else f"No conflicts in {len(rows)} checks") + f"; {building['tours']} linked tour(s).",
                 "handoff": "Conflicts become conditions on the verdict."}
-    step(trace, "records", "Do CoStar's record and the linked scans agree?", records)
+    records_step = step(trace, "records", "Do CoStar's record and the linked scans agree?", records)
+
+    compliance_holder = {}
 
     def permits():
         from approvals_timeline import REFERENCES
-        steps = [{"title": t, "detail": d, "authority": "City of Houston", "url": REFERENCES[ref][1],
-                  "status": "to verify"} for t, d, ref in HOUSTON_STEPS]
+        report = compliance(int(property_id), space.get("suite"), key, kit)
+        compliance_holder["report"] = report
+        where = (report or {}).get("jurisdiction") or {}
+        code = where.get("code")
+        authority, authority_url = AUTHORITY.get(code, AUTHORITY["houston"])
+        if code == "harris_unincorporated":
+            steps = [{"title": t, "detail": d, "authority": authority, "url": authority_url, "status": "to verify"}
+                     for t, d in HARRIS_STEPS]
+        else:
+            steps = [{"title": t, "detail": d, "authority": "City of Houston", "url": REFERENCES[ref][1],
+                      "status": "to verify"} for t, d, ref in HOUSTON_STEPS]
         licenses = licenses_for(key)
         for lic in licenses:
-            steps.insert(-1, {"title": lic["name"], "detail": lic.get("applies_when") or "", "authority": lic["authority"],
-                              "url": lic["url"], "status": "to verify"})
-        findings = [record(f"{key}.license.{i}", lic["name"], "public:" + lic["authority"], lic["url"], None, 0.7,
-                           lic["url"], "agrees", note=f"{lic.get('applies_when') or 'Required'}: \"{lic.get('quote', '')}\"")
-                    for i, lic in enumerate(licenses)]
-        return {"findings": findings, "steps": steps, "confidence": 0.6,
-                "summary": f"{len(steps)} steps: Houston change-of-use path + {len(licenses)} business-specific "
-                           "license(s). No timelines are claimed.",
-                "sources": [{"name": lic["authority"], "url": lic["url"], "retrieved_at": None, "cached": True,
-                             "note": lic["name"]} for lic in licenses],
-                "handoff": "Steps go to the plan; none are counted as cleared."}
-    permits_step = step(trace, "permits", "What must be approved before opening (Houston + business licenses)?",
+            city_only = code == "harris_unincorporated" and "Houston" in lic["authority"]
+            steps.insert(-1, {"title": lic["name"], "detail": (lic.get("applies_when") or "") + (
+                ". This is a City of Houston permit; outside city limits ask Harris County for the county "
+                "equivalent." if city_only else ""), "authority": lic["authority"], "url": lic["url"],
+                "status": "to verify"})
+        findings = [jurisdiction_record(where)] if report else []
+        findings += [record(f"{key}.license.{i}", lic["name"], "public:" + lic["authority"], lic["url"], None, 0.7,
+                            lic["url"], "agrees", note=f"{lic.get('applies_when') or 'Required'}: \"{lic.get('quote', '')}\"")
+                     for i, lic in enumerate(licenses)]
+        for r in (report or {}).get("records", []):  # the compliance engine's own records, as it returned them
+            if r["fact"] in COMPLIANCE_FACTS:
+                findings.append({**r, "fact": "compliance." + r["fact"]})
+        for i, page in enumerate((report or {}).get("research", [])[:4]):
+            findings.append(record(f"compliance.official_page.{i}", page["title"] or page["url"],
+                                   "public:" + (report.get("authority") or "official site"), page["url"],
+                                   (page.get("retrieved_at") or "")[:10], 0.5, page["url"], "unknown",
+                                   needs_human=True, note="Official process page (applicability unverified): "
+                                                          + page["excerpt"][:240]))
+        gates = (report or {}).get("gates") or []
+        where_text = ("not looked up (" + (where.get("note") or "compliance engine unavailable") + "): Houston's "
+                      "path is shown as an assumption" if not where.get("verified") and not where.get("place")
+                      else where.get("note", ""))
+        sources = []
+        if where.get("evidence_url"):
+            sources.append({"name": "U.S. Census geocoder (incorporated places, counties)",
+                            "url": where["evidence_url"], "retrieved_at": where.get("retrieved_at"), "cached": True,
+                            "note": where.get("note", "")})
+        sources += [{"name": lic["authority"], "url": lic["url"], "retrieved_at": None, "cached": True,
+                     "note": lic["name"]} for lic in licenses]
+        sources += [{"name": page["title"][:80] or "Official page", "url": page["url"],
+                     "retrieved_at": page.get("retrieved_at"), "cached": True, "note": "applicability unverified"}
+                    for page in (report or {}).get("research", [])[:4]]
+        return {"findings": findings, "steps": steps, "confidence": 0.6, "sources": sources,
+                "inputs": {"lat": building["lat"], "lon": building["lon"], "suite": space.get("suite")},
+                "jurisdiction": {k: where.get(k) for k in ("code", "verified", "place", "county", "note",
+                                                         "evidence_url", "retrieved_at")},
+                "authority": {"name": authority, "url": authority_url}, "gates": gates,
+                "summary": f"{where_text.split('. Census TIGER')[0]}. {len(steps)} steps with {authority} + "
+                           f"{len(licenses)} business-specific license(s). No timelines claimed; nothing is "
+                           "counted as approved.",
+                "handoff": "Steps go to the plan; none are counted as cleared. Jurisdiction and building gates go "
+                           "to the verdict."}
+    permits_step = step(trace, "permits", "Who permits this address, and what must be approved before opening?",
                         permits)
+    where = (permits_step.get("jurisdiction") or {})
+    gates = permits_step.get("gates") or []
+    if where.get("code") == "harris_unincorporated":
+        conditions.append("Outside Houston city limits (unincorporated Harris County): City of Houston permits "
+                          "don't apply; Harris County does")
+    elif not where.get("code") and where.get("place"):
+        conditions.append(f"Inside {where['place']}, which has its own permitting office: Houston's path does "
+                          "not apply")
+    if "commercial_conversion_unestablished" in gates and fit["status"] != "no":
+        blockers.append("CoStar records this as a residential building: commercial use is not established")
+    if "identity_conflict" in gates:
+        conditions.append("The compliance check found an identity conflict: confirm the building and suite")
 
     # --- Verdict -------------------------------------------------------------------------
     cost = money_holder.get("cost") or {}
@@ -264,12 +564,41 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
              "money", "deal", "records", "permits", "narrator", "verdict"]
     trace = sorted(trace + neighborhood_steps, key=lambda s: order.index(s["agent"]) if s["agent"] in order else 99)
     checks = list(dict.fromkeys(fit.get("unknowns", []) + fit.get("verify", []) + conditions))
+    for s in trace:  # lift this business's signal onto its neighborhood step, for the readable agent run
+        own = (s.get("per_industry") or {}).get(key) or {}
+        if own.get("signal") and not s.get("signal"):
+            s["signal"] = own["signal"]
+    signals = {s["signal"]["name"]: s["signal"] for s in trace if s.get("signal")}
+    because = because_rows(key=key, budget=budget, reserve=reserve, fit=fit, cost=cost, stress=money_holder.get("stress"),
+                      rent=rent, decision=decision, signals=signals, deal_step=deal_step, records_step=records_step,
+                      permits_step=permits_step, blockers=blockers, conditions=conditions, verdict=verdict)
+    evidence, owner = [], []
+    for s in trace:
+        for r in s.get("findings", []):
+            evidence.append(r)
+            owner.append(s["agent"])
+    steps_by_agent = {s["agent"]: s for s in trace}
+    for row in because:
+        hits = []
+        for agent, prefix, *value in row.pop("refs"):
+            hits += [i for i, r in enumerate(evidence) if owner[i] == agent and r["fact"].startswith(prefix)
+                     and (not value or r["value"] == value[0]) and i not in hits]
+        row["evidence"] = hits[:4]
+        first = evidence[hits[0]] if hits else {}
+        sources = (steps_by_agent.get(owner[hits[0]] if hits else row["agent"]) or {}).get("sources") or []
+        src = next((x for x in sources if first.get("evidence_url") and x.get("url") == first["evidence_url"]),
+                   sources[0] if sources and not first.get("evidence_url") else {})
+        row["source"] = {"name": src.get("name") or SOURCE_NAMES.get(first.get("source"), first.get("source"))
+                         or "computed in code",
+                         "url": first.get("evidence_url") or src.get("url"),
+                         "retrieved_at": first.get("captured_at") or (src.get("retrieved_at") or "")[:10] or None,
+                         "confidence": first.get("confidence")}
     return {
         "business": key, "label": spec["label"], "group": spec["group"],
         "property_id": int(property_id), "address": building["address"], "lat": building["lat"], "lon": building["lon"],
         "suite": suite, "space": {k: space.get(k) for k in ("suite", "sf", "available_on", "lease_basis", "lease_pending")},
         "budget": budget, "reserve": reserve,
-        "verdict": verdict, "reasons": reasons, "blockers": blockers, "conditions": conditions, "flips": flips,
+        "verdict": verdict, "because": because, "reasons": reasons, "blockers": blockers, "conditions": conditions, "flips": flips,
         "pillars": {
             "space": {"status": fit["status"], "capacity": fit.get("capacity"), "reasons": fit["reasons"],
                       "unknowns": fit.get("unknowns", []), "verify": fit.get("verify", [])},
@@ -283,7 +612,8 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
                         if r["status"] != "agrees"],
         },
         "checks": checks, "narration": hood.get("narration"), "narration_label": hood.get("narration_label"),
-        "trace": trace, "evidence": [r for s in trace for r in s.get("findings", [])],
+        "jurisdiction": permits_step.get("jurisdiction"), "permit_authority": permits_step.get("authority"),
+        "trace": trace, "evidence": evidence,
         "elapsed_ms": round(1000 * (time.perf_counter() - started)),
         "computed_by": "All numbers and verdicts are computed in code. Only the optional summary is LLM-written.",
     }

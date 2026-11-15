@@ -116,8 +116,19 @@ class Scan(unittest.TestCase):
         self.assertNotIn("fitness_gym", [d["business"] for d in out["directions"]])
 
 
+def compliance_report(code, gates=()):
+    """A compliance-engine report as Jayant's check_business returns it (only the fields the review reads)."""
+    where = {"code": code, "verified": code is not None, "place": "Houston city" if code == "houston" else None,
+             "county": "Harris County", "evidence_url": "https://geocoding.test/x" if code else None,
+             "retrieved_at": "2026-11-15T00:00:00+00:00", "note": "test boundary" if code else "offline, not cached"}
+    return {"jurisdiction": where, "gates": list(gates), "research": [], "authority": "Test authority",
+            "records": [{"fact": "occupancy", "value": None, "source": "public:compliance-triage",
+                         "source_id": "occupancy", "captured_at": None, "confidence": None, "evidence_url": None,
+                         "status": "unknown", "needs_human": True, "note": "Retrieve approved occupancy"}]}
+
+
 class Verdict(unittest.TestCase):
-    def run_review(self, fit_status="fits", demand="supported", budget=1_000_000):
+    def run_review(self, fit_status="fits", demand="supported", budget=1_000_000, where="houston", gates=()):
         building, _ = market()
         b = building[1]
         decision = {"verdict": demand, "headline": "h", "reasons": [{"signal": "lookalike", "stance": 1, "reason": "r"}],
@@ -130,7 +141,8 @@ class Verdict(unittest.TestCase):
                 mock.patch.object(nb, "investigate", lambda *a, **k: hood), \
                 mock.patch.object(vc, "costs", lambda: FAKE), \
                 mock.patch.object(vr, "property_record", lambda pid, kit="": {"id": 1, "attachments": []}), \
-                mock.patch.object(vc, "rent_estimates", lambda: None):
+                mock.patch.object(vc, "rent_estimates", lambda: None), \
+                mock.patch.object(vr, "compliance", lambda *a, **k: compliance_report(where, gates)):
             return vr.review("fitness_gym", 1, "A", budget=budget, reserve=50000)
 
     def test_go_needs_everything_clear(self):
@@ -185,3 +197,86 @@ class Store(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Because(unittest.TestCase):
+    """The 'why this verdict' rows: same values as the verdict, every blocker and condition shown, evidence linked."""
+    run_review = Verdict.run_review
+
+    def check_shape(self, out):
+        self.assertTrue(out["because"])
+        for row in out["because"]:
+            self.assertIn(row["effect"], {"blocks", "check", "supports", "unknown"})
+            self.assertTrue(row["text"] and row["agent"])
+            self.assertEqual(set(row["signal"]), {"name", "value", "rule"})
+            self.assertTrue(all(0 <= i < len(out["evidence"]) for i in row["evidence"]))
+            self.assertEqual(set(row["source"]), {"name", "url", "retrieved_at", "confidence"})
+        deciding = {r["effect"] for r in out["because"] if r["decides"]}
+        for text in out["blockers"]:
+            self.assertTrue(any(r["effect"] == "blocks" and text[:40] in r["text"] for r in out["because"]), text)
+        for text in out["conditions"]:
+            self.assertTrue(any(r["effect"] == "check" and r["decides"] and text[:40] in r["text"]
+                                for r in out["because"]), text)
+        return deciding
+
+    def test_go_has_only_supporting_deciding_rows(self):
+        out = self.run_review()
+        self.assertEqual(out["verdict"], "GO")
+        self.assertEqual(self.check_shape(out), {"supports"})
+        agents = {r["agent"] for r in out["because"] if r["effect"] == "supports"}
+        self.assertTrue({"building", "money", "coordinator", "permits"} <= agents)
+        money = next(r for r in out["because"] if r["agent"] == "money" and r["decides"])
+        self.assertIn("<=", money["signal"]["rule"])
+        self.assertTrue(money["evidence"])
+        self.assertEqual(money["source"]["url"], "https://example.test/fdd")
+
+    def test_blocks_and_checks_match_the_verdict(self):
+        poor = self.run_review(budget=100000)
+        self.assertEqual(poor["verdict"], "NO-GO")
+        self.assertIn("blocks", self.check_shape(poor))
+        self.assertEqual(poor["because"][0]["effect"], "blocks")  # blocks sort first
+        mixed = self.run_review(demand="mixed")
+        self.assertIn("check", self.check_shape(mixed))
+        self.assertNotIn("blocks", self.check_shape(mixed))
+
+    def test_unincorporated_harris_is_a_check_and_switches_the_authority(self):
+        out = self.run_review(where="harris_unincorporated")
+        self.assertEqual(out["verdict"], "CONDITIONAL")
+        self.check_shape(out)
+        row = next(r for r in out["because"] if r["agent"] == "permits")
+        self.assertEqual(row["effect"], "check")
+        self.assertIn("Harris County does", row["text"])
+        self.assertTrue(all("Harris County" in s["authority"] for s in out["pillars"]["permits"][:2]))
+        self.assertNotIn("approved", " ".join(s["title"] + s["detail"] for s in out["pillars"]["permits"]).lower())
+
+    def test_unverified_jurisdiction_stays_unknown_without_changing_the_verdict(self):
+        out = self.run_review(where=None)
+        self.assertEqual(out["verdict"], "GO")
+        row = next(r for r in out["because"] if r["agent"] == "permits")
+        self.assertEqual(row["effect"], "unknown")
+        self.assertIn("assumption", row["text"])
+
+    def test_residential_gate_blocks(self):
+        out = self.run_review(gates=("commercial_conversion_unestablished",))
+        self.assertEqual(out["verdict"], "NO-GO")
+        self.check_shape(out)
+
+
+class SignalGuide(unittest.TestCase):
+    def test_thresholds_come_from_the_code(self):
+        import signal_guide as sg
+        with mock.patch.object(nb, "industry_catalog", lambda: [
+                {"key": "yoga_pilates", "label": "Yoga", "lookalike_auc": 0.83, "validated": True},
+                {"key": "childcare", "label": "Childcare", "lookalike_auc": 0.52, "validated": False}]), \
+                mock.patch.object(sg, "rent_estimates", lambda: None):
+            g = sg.guide()
+        self.assertEqual(g["thresholds"]["validated_auc"], nb.VALIDATED_AUC)
+        self.assertEqual(g["thresholds"]["lookalike_plus"], nb.LOOKALIKE_PLUS)
+        supply = next(s for s in g["signals"] if s["name"] == "local supply")
+        self.assertIn(f"{nb.SUPPLY_UNDER:g}x", supply["supports"])
+        self.assertIn(f"p < {nb.SUPPLY_P:g}", supply["supports"])
+        self.assertEqual([r["business"] for r in g["lookalike_accuracy"]], ["yoga_pilates", "childcare"])
+        self.assertFalse(g["lookalike_accuracy"][1]["votes"])
+        self.assertIsNone(g["rent_accuracy"])
+        for s in g["signals"]:
+            self.assertTrue(all(s[k] for k in ("measures", "source", "supports", "against", "unknown", "accuracy")))
