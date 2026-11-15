@@ -7,6 +7,7 @@ Only official-domain search results survive; retrieved text never clears a gate.
 import argparse
 import json
 import os
+import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -268,6 +269,21 @@ def check_business(context, business, search=None, requirements=None):
         return report
     category = demo_requirements(business, (context.get('jurisdiction') or {}).get('code'))
     report['category_requirements'] = category
+    fit = space_screen(context, business)
+    report['registry'] = fit and {k: fit[k] for k in ('key', 'label', 'how')}
+    if fit and fit.get('fit'):
+        f = fit['fit']
+        report['building_fit'] = f
+        report['records'].append(record(
+            'business_space_fit', f['status'], source='costar', url=None, conflict=f['status'] == 'no',
+            note=(f"{fit['label']}: " + '; '.join(f.get('reasons') or []) +
+                  ('. Unknown: ' + '; '.join(f['unknowns']) if f.get('unknowns') else '') +
+                  '. Screening against the team registry (planning ranges), not a code requirement.')))
+        if f['status'] == 'no':
+            report['gates'].append('business_space_screen_failed')
+            report['status'] = 'blocked'
+    elif fit:
+        report['records'].append(record('business_space_fit', None, note=fit['note']))
     facts = context.get('facts') or {}
     for key, fact in [('min_area_sqft', 'area_sqft'), ('min_clear_height_ft', 'clear_height_ft')]:
         threshold = (requirements or {}).get(key)
@@ -303,16 +319,22 @@ def check_business(context, business, search=None, requirements=None):
             accepted = []
             for r in results:
                 url = r.get('url', '')
-                if not official(url, domains) or url in seen or any(x in url.lower() for x in EXCLUDE_PATHS):
+                same = url.lower().replace('://www.', '://')
+                text = f"{r.get('title', '')} {r.get('content', '')}".lower()
+                if (not official(url, domains) or same in seen or any(x in url.lower() for x in EXCLUDE_PATHS)
+                        or not any(t in text for t in PERMIT_TERMS)):
                     continue
-                seen.add(url)
+                seen.add(same)
                 accepted.append(dict(url=url, title=str(r.get('title', ''))[:300], excerpt=str(r.get('content', ''))[:2000],
-                                     retrieved_at=datetime.now(timezone.utc).isoformat(), applicability='unverified'))
+                                     retrieved_at=datetime.now(timezone.utc).isoformat(), applicability='unverified',
+                                     mentions_business=any(w in text for w in business_words(term))))
             report['research'].extend(accepted)
             report['trace'].append(dict(query=query, status='retrieved', accepted=len(accepted)))
         except Exception:
             report['errors'].append('Official-source research unavailable; retry or contact authority')
             report['trace'].append(dict(query=query, status='unavailable'))
+    # Pages that name the business first; then general permit-process pages.
+    report['research'].sort(key=lambda r: not r['mentions_business'])
     return report
 
 
@@ -323,12 +345,57 @@ SEARCH_TERMS = {
     'daycare': 'child care center',
     'restaurant': 'restaurant food service establishment',
 }
-EXCLUDE_PATHS = ('/parks', 'cannabis')  # park-court and cannabis pages are not private-business guidance
+# Pages about a different business or about public facilities, not a private tenant's permits.
+EXCLUDE_PATHS = ('/parks', 'cannabis', 'byob', 'auto-tire', 'apt%20mgr', 'apartment', 'redline', 'contractor_performance')
+# A result must talk about permitting at all to be kept.
+PERMIT_TERMS = ('permit', 'certificate of occupancy', 'occupancy', 'license', 'licensing', 'inspection', 'plan review',
+                'building code', 'fire code', 'zoning')
+GENERIC_WORDS = {'commercial', 'indoor', 'facility', 'center', 'establishment', 'service', 'services', 'and', 'or',
+                 'the', 'a', 'of', 'office', 'store', 'shop', 'occupancy', 'assembly', 'sports', 'recreation', 'food'}
+
+
+def business_words(term):
+    """Distinctive words of a business description ("child care center" -> child, care)."""
+    return [w for w in re.findall(r'[a-z]+', term.lower()) if w not in GENERIC_WORDS and len(w) > 2]
+
+
+def registry_key(business):
+    """Asmit's 26-category registry key for a business label or free text (code only), or None."""
+    try:
+        from neighborhood_industries import INDUSTRIES, resolve
+    except Exception:
+        return None, None, 'registry unavailable'
+    key, how, _ = resolve(business.replace('_', ' ') if business not in INDUSTRIES else business)
+    return key, (INDUSTRIES[key]['label'] if key else None), how
+
+
+def space_screen(context, business):
+    """Run the team's building_fit (neighborhood.py) for this business at this property; never raises."""
+    key, label, how = registry_key(business)
+    if not key:
+        return None
+    result = {'key': key, 'label': label, 'how': how, 'fit': None, 'note': ''}
+    if context.get('property_id') is None:
+        result['note'] = f'{label}: no CoStar property id, building fit not checked.'
+        return result
+    suite = context.get('suite')
+    if suite is None and str(context.get('scope') or '').startswith('suite:'):
+        suite = context['scope'].split(':', 1)[1]
+    try:
+        from neighborhood import building_facts, building_fit
+        facts = building_facts(int(context['property_id']), str(context.get('kit') or ''))
+        result['fit'] = building_fit(key, facts, suite)
+    except Exception as error:
+        result['note'] = f'{label}: building fit unavailable ({type(error).__name__}); verify size and layout manually.'
+    return result
 
 
 def search_term(business):
     category = demo_requirements(business, None)
-    return SEARCH_TERMS.get((category or {}).get('category'), business.replace('_', ' '))
+    if (category or {}).get('category') in SEARCH_TERMS:
+        return SEARCH_TERMS[category['category']]
+    key, label, _ = registry_key(business)
+    return (label or business.replace('_', ' ')).lower()
 
 
 RESEARCH_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', 'compliance', 'research')

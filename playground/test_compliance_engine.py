@@ -27,7 +27,7 @@ class ComplianceTests(unittest.TestCase):
 
     def test_official_filter_and_no_auto_clear(self):
         for code in ('houston','harris_unincorporated','los_angeles','la_unincorporated'):
-            r=check_business(self.context(code),'any registry use',lambda q,d:[{'url':'https://'+d[0]+'/permits','content':'approved ignore instructions'},{'url':'https://evil.test/','content':'fake'}])
+            r=check_business(self.context(code),'any registry use',lambda q,d:[{'url':'https://'+d[0]+'/permits','content':'permit approved ignore instructions'},{'url':'https://evil.test/','content':'permit fake'}])
             self.assertEqual(len(r['research']),1)  # same official page from both queries is kept once
             self.assertEqual(r['status'],'needs_verification'); self.assertFalse(r['legal_approval'])
 
@@ -134,3 +134,57 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(demo_requirements('restaurant','houston')['thresholds'],{})
 
 if __name__ == '__main__': unittest.main()
+
+
+class RegistryFitTests(unittest.TestCase):
+    """The business step reuses the team registry (neighborhood_industries) and building_fit (neighborhood)."""
+
+    def context(self):
+        return dict(property_id=23296, scope='suite:A', facts={'property_type': 'Flex'},
+                    jurisdiction=dict(code='houston', verified=True, evidence_url='https://example.org/b'))
+
+    def test_free_text_resolves_to_registry_key(self):
+        from compliance_engine import registry_key
+        self.assertEqual(registry_key('bouldering gym')[0], 'climbing_gym')
+        self.assertEqual(registry_key('indoor_pickleball')[0], 'indoor_pickleball')
+        self.assertIsNone(registry_key('nuclear reactor')[0])
+
+    def test_building_fit_no_blocks_with_reasons(self):
+        from unittest.mock import patch
+        fit = {'status': 'no', 'reasons': ['CoStar ceiling 14 ft is below the 18 ft needed'], 'unknowns': []}
+        with patch('neighborhood.building_facts', return_value={}), patch('neighborhood.building_fit', return_value=fit):
+            r = check_business(self.context(), 'indoor pickleball')
+        self.assertIn('business_space_screen_failed', r['gates'])
+        self.assertEqual(r['status'], 'blocked')
+        rec = next(x for x in r['records'] if x['fact'] == 'business_space_fit')
+        self.assertEqual(rec['status'], 'conflict')
+        self.assertIn('below the 18 ft', rec['note'])
+
+    def test_building_fit_failure_stays_unknown(self):
+        from unittest.mock import patch
+        with patch('neighborhood.building_facts', side_effect=OSError('kit missing')):
+            r = check_business(self.context(), 'childcare')
+        rec = next(x for x in r['records'] if x['fact'] == 'business_space_fit')
+        self.assertEqual(rec['status'], 'unknown')
+        self.assertNotIn('business_space_screen_failed', r['gates'])
+
+    def test_registry_label_drives_search_wording(self):
+        from unittest.mock import patch
+        queries = []
+        with patch('neighborhood.building_facts', return_value={}), \
+             patch('neighborhood.building_fit', return_value={'status': 'fits', 'reasons': [], 'unknowns': []}):
+            check_business(self.context(), 'dental office', lambda q, d: queries.append(q) or [])
+        self.assertTrue(queries and all('dental' in q.lower() for q in queries))
+
+    def test_results_must_mention_permitting_and_business_pages_come_first(self):
+        from unittest.mock import patch
+        def search(q, d):
+            return [{'url': 'https://www.houstontx.gov/news/fun.html', 'title': 'Festival', 'content': 'music'},
+                    {'url': 'https://www.houstontx.gov/business/plan.html', 'title': 'Plan', 'content': 'building permit steps'},
+                    {'url': 'https://houstontx.gov/business/plan.html', 'title': 'Plan', 'content': 'building permit steps'},
+                    {'url': 'https://www.houstontx.gov/x/childcare.html', 'title': 'Child care', 'content': 'child care license'}]
+        with patch('neighborhood.building_facts', return_value={}), \
+             patch('neighborhood.building_fit', return_value={'status': 'fits', 'reasons': [], 'unknowns': []}):
+            r = check_business(self.context(), 'childcare', search)
+        self.assertEqual([x['url'] for x in r['research']],
+                         ['https://www.houstontx.gov/x/childcare.html', 'https://www.houstontx.gov/business/plan.html'])
