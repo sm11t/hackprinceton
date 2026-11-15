@@ -66,10 +66,10 @@ VALIDATED_AUC = 0.6       # below this on the spatial hold-out, the lookalike is
 MAX_TRAINING_POSITIVES = 600  # subsample big industries (restaurants): same signal, bounded training time
 
 ACS = "https://api.census.gov/data/{year}/acs/acs5"
-GAZETTEER = {  # tract internal points; ACS 2015-2019 uses 2010 tracts, 2020-2024 uses 2020 tracts
-    2024: "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2024_Gazetteer/2024_gaz_tracts_48.txt",
-    2019: "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2019_Gazetteer/2019_gaz_tracts_48.txt",
-}
+GAZETTEER = {2024: "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2024_Gazetteer/2024_gaz_tracts_48.txt"}
+# ACS 2015-2019 is published on 2010 tracts and 2020-2024 on 2020 tracts. This Census relationship
+# file (land area of every 2010/2020 tract piece) moves 2015-2019 counts onto 2020 tracts.
+RELATIONSHIP = "https://www2.census.gov/geo/docs/maps-data/data/rel2020/tract/tab20_tract20_tract10_st48.txt"
 GEOCODER = "https://geocoding.geo.census.gov/geocoder/geographies/onelineaddress"
 OVERPASS = "https://overpass-api.de/api/interpreter"
 
@@ -80,6 +80,9 @@ AGE_BANDS = {
 }
 BAND_LABEL = {"under_5": "Under-5", "age_5_17": "School-age (5-17)", None: "Population"}
 AGE_VARS = [f"B01001_{n + offset:03d}E" for band in AGE_BANDS.values() for n in band for offset in (0, 24)]
+# 90% margins of error for the bands whose trends vote (summed in quadrature).
+MOE_BANDS = ("under_5", "age_5_17")
+MOE_VARS = [f"B01001_{n + offset:03d}M" for band in MOE_BANDS for n in AGE_BANDS[band] for offset in (0, 24)]
 # population (+MOE), households, median household income, occupied units, renter-occupied units
 BASE_VARS = ["B01003_001E", "B01003_001M", "B11001_001E", "B19013_001E", "B25003_001E", "B25003_003E"]
 
@@ -244,7 +247,7 @@ def census_key_params(query):
 def acs(year):
     """{GEOID: {variable: value}} for every Houston-area tract in the ACS 5-year release ending `year`."""
     table, metas = {}, []
-    for variables in (BASE_VARS, AGE_VARS):
+    for variables in (BASE_VARS, AGE_VARS, MOE_VARS):
         query = census_key_params({"get": ",".join(variables), "for": "tract:*",
                                    "in": f"state:{STATE} county:{','.join(COUNTIES)}"})
         rows, meta = fetch(ACS.format(year=year), query)
@@ -257,9 +260,20 @@ def acs(year):
     return table, metas
 
 
+def counts(v):
+    """Population and age-band counts from one ACS tract row, with squared 90% MOEs ("<name>_moe2")."""
+    out = {"pop": v["B01003_001E"], "pop_moe2": (v.get("B01003_001M") or 0) ** 2}
+    for band, cells in AGE_BANDS.items():
+        out[band] = sum((v.get(f"B01001_{n:03d}E") or 0) + (v.get(f"B01001_{n + 24:03d}E") or 0) for n in cells)
+    for band in MOE_BANDS:
+        out[f"{band}_moe2"] = sum((v.get(f"B01001_{n:03d}M") or 0) ** 2 + (v.get(f"B01001_{n + 24:03d}M") or 0) ** 2
+                                  for n in AGE_BANDS[band])
+    return out
+
+
 @lru_cache(maxsize=None)
-def tract_table(year):
-    """Tracts joined to their ACS values (tuple of rows, tuple of source metas)."""
+def tract_table(year=2024):
+    """2020 tracts joined to their 2020-2024 ACS values (tuple of rows, tuple of source metas)."""
     points, gaz_meta = tracts(year)
     values, acs_metas = acs(year)
     rows = []
@@ -267,23 +281,54 @@ def tract_table(year):
         v = values.get(geoid)
         if not v or v.get("B01003_001E") is None:
             continue
-        bands = {band: sum((v.get(f"B01001_{n:03d}E") or 0) + (v.get(f"B01001_{n + 24:03d}E") or 0) for n in cells)
-                 for band, cells in AGE_BANDS.items()}
-        rows.append({**point, "pop": v["B01003_001E"], "pop_moe": v.get("B01003_001M"),
+        rows.append({**point, **counts(v), "pop_moe": v.get("B01003_001M"),
                      "households": v.get("B11001_001E"), "income": v.get("B19013_001E"),
-                     "occupied": v.get("B25003_001E"), "renters": v.get("B25003_003E"), **bands})
+                     "occupied": v.get("B25003_001E"), "renters": v.get("B25003_003E")})
     return tuple(rows), tuple(tuple(sorted(m.items())) for m in [gaz_meta, *acs_metas])
 
 
 @lru_cache(maxsize=None)
-def tract_index(year):
+def old_on_new():
+    """2015-2019 ACS counts moved onto 2020 tracts by land-area share. Returns ({geoid20: counts}, metas).
+
+    Each 2010 tract's counts are split across the 2020 tracts it overlaps in proportion to
+    shared land area (assumes residents are spread evenly within a 2010 tract). County
+    totals are preserved, and a site's trend compares the same 2020 tracts in both periods.
+    """
+    text, rel_meta = fetch(RELATIONSHIP, kind="text")
+    values, acs_metas = acs(2019)
+    out = {}
+    for line in text.splitlines()[1:]:
+        c = line.split("|")
+        if len(c) < 16 or c[1][2:5] not in COUNTIES:
+            continue
+        geoid20, geoid10 = c[1], c[8]
+        land10, part = float(c[10] or 0), float(c[14] or 0)
+        v = values.get(geoid10)
+        if not v or v.get("B01003_001E") is None or land10 <= 0 or part <= 0:
+            continue
+        share = part / land10
+        dst = out.setdefault(geoid20, {})
+        for k, value in counts(v).items():
+            dst[k] = dst.get(k, 0.0) + value * (share ** 2 if k.endswith("_moe2") else share)
+    return out, tuple(tuple(sorted(m.items())) for m in [rel_meta, *acs_metas])
+
+
+@lru_cache(maxsize=None)
+def tract_index(year=2024):
     return GridIndex(tract_table(year)[0])
 
 
 def census_sources(year):
-    _, metas = tract_table(year)
-    names = ["Census Gazetteer tract points", f"ACS {year - 4}-{year} 5-year (population, households, income, tenure)",
-             f"ACS {year - 4}-{year} 5-year (sex by age, B01001)"]
+    if year == 2019:
+        _, metas = old_on_new()
+        names = ["Census 2010-to-2020 tract relationship file (land-area shares)",
+                 "ACS 2015-2019 5-year (population, households, income, tenure)",
+                 "ACS 2015-2019 5-year (sex by age, B01001)"]
+    else:
+        _, metas = tract_table(year)
+        names = ["Census Gazetteer tract points", f"ACS {year - 4}-{year} 5-year (population, households, income, tenure)",
+                 f"ACS {year - 4}-{year} 5-year (sex by age, B01001)"]
     return [source(n, dict(m)) for n, m in zip(names, metas)]
 
 
@@ -314,13 +359,17 @@ def area_profile(lat, lon, radius=RADIUS_MI):
     for band in AGE_BANDS:
         out[band] = sum(r[band] for r in hits)
         out[f"share_{band}"] = round(out[band] / pop, 4) if pop else None
-    old = [row for _, row in tract_index(2019).near(lat, lon, radius)]
-    old_pop = sum(r["pop"] for r in old)
-    out["population_2019"] = old_pop or None
-    out["growth"] = round(pop / old_pop - 1, 4) if old_pop else None
-    for band in ("under_5", "age_5_17"):
-        before = sum(r[band] for r in old)
-        out[f"{band}_growth"] = round(out[band] / before - 1, 4) if before else None
+    before, _ = old_on_new()  # 2015-2019 counts on the same 2020 tracts
+    old = [before.get(r["geoid"], {}) for r in hits]
+    for name, growth in (("pop", "growth"), ("under_5", "under_5_growth"), ("age_5_17", "age_5_17_growth")):
+        now_, prior = sum(r[name] for r in hits), sum(o.get(name, 0) for o in old)
+        out[growth] = round(now_ / prior - 1, 4) if prior else None
+        # 90% MOE of the growth ratio: ratio x sqrt((MOE_new/new)^2 + (MOE_old/old)^2), sums in quadrature
+        moe_new = math.sqrt(sum(r.get(f"{name}_moe2", 0) for r in hits))
+        moe_old = math.sqrt(sum(o.get(f"{name}_moe2", 0) for o in old))
+        out[f"{growth}_moe"] = (round(now_ / prior * math.sqrt((moe_new / now_) ** 2 + (moe_old / prior) ** 2), 4)
+                                if prior and now_ else None)
+    out["population_2019"] = round(sum(o.get("pop", 0) for o in old)) or None
     return out
 
 
@@ -328,20 +377,21 @@ def area_profile(lat, lon, radius=RADIUS_MI):
 def area_totals():
     """Whole Houston-area totals (county sums are comparable across tract vintages)."""
     new, _ = tract_table(2024)
-    old, _ = tract_table(2019)
-    out = {"population": sum(r["pop"] for r in new), "population_2019": sum(r["pop"] for r in old)}
+    before, _ = old_on_new()
+    old = [before.get(r["geoid"], {}) for r in new]
+    out = {"population": sum(r["pop"] for r in new), "population_2019": round(sum(o.get("pop", 0) for o in old))}
     out["growth"] = round(out["population"] / out["population_2019"] - 1, 4)
     for band in ("under_5", "age_5_17"):
-        now_, before = sum(r[band] for r in new), sum(r[band] for r in old)
+        now_, prior = sum(r[band] for r in new), sum(o.get(band, 0) for o in old)
         out[band] = now_
-        out[f"{band}_growth"] = round(now_ / before - 1, 4)
+        out[f"{band}_growth"] = round(now_ / prior - 1, 4)
     return out
 
 
 @lru_cache(maxsize=None)
 def reference_profiles(radius=RADIUS_MI):
     """The same profile around every Houston-area tract point: the distribution a site is compared to."""
-    path = CACHE / f"reference-profiles-v2-{radius}.json"
+    path = CACHE / f"reference-profiles-v4-{radius}.json"
     if path.exists():
         return json.loads(path.read_text())
     rows, _ = tract_table(2024)
@@ -817,8 +867,11 @@ def evaluate(key, folds=5, seed=7, radius=RADIUS_MI):
     out["background_logits"] = sorted(round(model_logit(model, r["x"]), 4) for r in background)
     spatial = out["splits"]["spatial"]["auc"]
     out["validated"] = spatial is not None and spatial >= VALIDATED_AUC
+    dataset = INDUSTRIES[key].get("dataset")
+    out["source"] = DATASETS[dataset][1] if dataset else "OpenStreetMap via Overpass"
     out["caveats"] = [
-        "Facilities come from OpenStreetMap, which is incomplete and uneven by category.",
+        ("Locations come from official licensing data; unplaced addresses are left out." if dataset else
+         "Locations come from OpenStreetMap, which is incomplete and uneven by category."),
         "Measures resemblance to where facilities already are, not paid demand or profitability.",
         "Resident features only: workers, visitors and traffic (which drive restaurants and cafes) are not measured.",
         "The bootstrap interval resamples places independently and ignores spatial correlation, so it is too narrow.",
@@ -829,7 +882,7 @@ def evaluate(key, folds=5, seed=7, radius=RADIUS_MI):
 
 
 def evaluation_path(key):
-    return CACHE / f"lookalike-v2-{key}.json"
+    return CACHE / f"lookalike-v4-{key}.json"
 
 
 @lru_cache(maxsize=None)
@@ -977,9 +1030,10 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
                note=f"Renter-occupied share of occupied homes. Houston-area percentile: {pct['share_renters']}."),
         record("residents_growth_2019_to_2024", profile["growth"], "public:acs", "acs-2015-2019-vs-2020-2024",
                "2015-2019 vs 2020-2024", 0.6, acs_url, "agrees" if profile["growth"] is not None else "unknown",
-               note=(f"Population {profile['population_2019']:,.0f} -> {profile['population']:,.0f} using each "
-                     f"vintage's own tracts (2010 vs 2020 boundaries) within the same radius. Houston area overall: "
-                     f"{totals['growth']:+.1%}. Overlapping 5-year samples, so this is a trend, not a yearly rate."
+               note=(f"Population {profile['population_2019']:,.0f} -> {profile['population']:,.0f} on the same 2020 "
+                     f"tracts (2015-19 counts moved onto 2020 tracts by land-area share). Houston area overall: "
+                     f"{totals['growth']:+.1%}. Two non-overlapping 5-year periods, so this is a 5-year trend, not a yearly rate. "
+                     f"90% margin of error of the local change: ±{(profile.get('growth_moe') or 0) * 100:.1f} pts."
                      if profile["population_2019"] else "No 2015-2019 tracts in radius.")),
         record("residents_age_mix", {k[6:]: profile[k] for k in profile
                                      if k.startswith("share_age") or k == "share_under_5"},
@@ -992,9 +1046,11 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
     def one(key):
         spec = INDUSTRIES[key]
         band = spec["demand_band"]
-        local = profile["growth"] if band is None else profile.get(f"{band}_growth")
-        area = totals["growth"] if band is None else totals[f"{band}_growth"]
+        growth = "growth" if band is None else f"{band}_growth"
+        local, area, moe = profile.get(growth), totals[growth], profile.get(f"{growth}_moe")
         value = None if local is None else round(local - area, 4)
+        # Votes only beyond 2 points AND beyond the 90% margin of error of the local change.
+        clear = value is not None and moe is not None and abs(value) > moe
         out_findings = []
         if band:
             out_findings.append(record(
@@ -1014,9 +1070,11 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
                       f"aged 6+ = {rate:.1%}). Assumes this area matches the national average; local rates are "
                       "unknown. " + part["note"])))
         return {"findings": out_findings,
-                "signal": {"name": "population trend", "value": value, "stance": stance(value, plus=0.02, minus=-0.02),
-                           "reason": (f"{BAND_LABEL[band]} change since 2015-19 is "
-                                      f"{fmt_pct(value, points=True)} vs the Houston area" if value is not None
+                "signal": {"name": "population trend", "value": value,
+                           "stance": stance(value, plus=0.02, minus=-0.02) if clear else (0 if value is not None else None),
+                           "reason": (f"{BAND_LABEL[band]} change since 2015-19 is {fmt_pct(value, points=True)} vs the "
+                                      f"Houston area (margin ±{(moe or 0) * 100:.1f} pts)"
+                                      + ("" if clear else ": within the margin of error") if value is not None
                                       else "Trend unknown")},
                 "summary": f"{BAND_LABEL[band]} trend {fmt_pct(value, points=True)} vs area"}
     results = per_industry(industries, one)
@@ -1028,6 +1086,18 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
     return {"sources": sources, "findings": findings + flatten(results), "summary": summary, "confidence": 0.8,
             "profile": profile, "percentiles": pct, "per_industry": results,
             "handoff": "Profile to the lookalike agent (features); trend per industry to the coordinator."}
+
+
+def poisson_tails(observed, expected):
+    """(P[X <= observed], P[X >= observed]) for X ~ Poisson(expected)."""
+    if expected <= 0:
+        return 1.0, 1.0 if observed == 0 else 0.0
+    term, cdf = math.exp(-expected), 0.0
+    for k in range(observed + 1):
+        if k:
+            term *= expected / k
+        cdf += term
+    return min(cdf, 1.0), min(1.0, 1.0 - cdf + term)
 
 
 def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
@@ -1089,16 +1159,45 @@ def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
                                    meta["source"], f["ref"], when, 0.6, f["url"], "agrees",
                                    note="Straight-line distance, not drive time."))
         votes = spec["supply_votes"]
-        tag = "" if ratio is None else " (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""
+        if len(rows) < MIN_FACILITIES:  # a ratio against 2 locations area-wide means nothing
+            ratio = None
+        # Is the difference more than chance? Expected count at the Houston-area rate for this many residents.
+        demand_local = (profile[band] if seats else profile["population"]) if profile else 0
+        demand_area = totals[band] if seats else totals["population"]
+        expected = len(rows) * demand_local / demand_area if demand_area else 0
+        p_low, p_high = poisson_tails(len(local), expected)
+        mapping_gap = osm and not local and expected >= 5
+        if mapping_gap:
+            ratio = None
+        if ratio is None:
+            stance_value = None
+        elif not votes:
+            stance_value = 0
+        else:
+            stance_value = (1 if ratio <= 0.5 and p_low < 0.1 else -1 if ratio >= 2 and p_high < 0.1 else 0)
+        tag = ("" if ratio is None or stance_value is None else " (underserved)" if stance_value == 1
+               else " (crowded)" if stance_value == -1 else
+               " (not different from chance)" if (ratio <= 0.5 or ratio >= 2) and votes else "")
+        findings.append(record(
+            f"{key}.supply_expected_at_area_rate", round(expected, 1), "computed", "poisson", when, 0.6, None,
+            "unknown" if mapping_gap else "agrees",
+            note=(f"Found {len(local)}, expected {expected:.1f} at the Houston-area rate (Poisson: P(this few or fewer)"
+                  f" = {p_low:.2f}, P(this many or more) = {p_high:.2f}). Supply votes only when the gap is unlikely by "
+                  "chance (p < 0.1)." + (" None mapped where 5+ are expected: probably a gap in OpenStreetMap, so "
+                                         "supply stays unknown." if mapping_gap else ""))))
         what = (f"{sum(f['capacity'] or 0 for _, f in local):,} licensed seats in {len(local)} {word} within "
                 f"{radius:g} mi = {ratio:.1f}x the Houston-area {unit.replace('per', 'rate per')}" if seats and ratio is not None
                 else f"{len(local)} {word} mapped within {radius:g} mi" + (f" ({paid} indoor or paid)" if local and osm else "")
                 + (f" = {ratio:.1f}x the Houston-area rate per resident" if ratio is not None else ""))
         return {"findings": findings,
                 "signal": {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
-                           "stance": None if ratio is None else (
-                               0 if not votes else 1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
-                           "reason": ("Supply unknown" if ratio is None else what + tag
+                           "stance": stance_value,
+                           "reason": (f"Too few {word} in the source area-wide ({len(rows)}) to compare supply"
+                                      if len(rows) < MIN_FACILITIES else
+                                      f"0 {word} mapped within {radius:g} mi where {expected:.0f} would be expected: "
+                                      "probably a gap in OpenStreetMap, so supply is unknown" if mapping_gap
+                                      else "Supply unknown" if ratio is None
+                                      else what + tag
                                       + ("" if votes else "; these businesses cluster on purpose, so supply "
                                                           "does not vote"))},
                 "summary": f"{len(local)} within {radius:g} mi, {len(wider)} within 5 mi"
@@ -1325,15 +1424,21 @@ VERDICTS = {"supported": "The neighborhood supports this use", "mixed": "Mixed s
 RULES = [
     "Lookalike votes +1 at the 70th percentile or above, -1 at the 30th or below, and only if its spatial "
     f"hold-out AUC for that industry is at least {VALIDATED_AUC}.",
-    "Population trend votes +1 if growth since 2015-19 beats the Houston area by 2+ points, -1 if it trails by 2+ "
-    "(childcare uses the under-5 trend, tutoring the 5-17 trend).",
-    "Local supply votes +1 at half the Houston-area facilities per resident or less (underserved), -1 at 2x or more "
-    "(not for restaurants, fast food, cafes and bars, which cluster on purpose).",
+    "Population trend votes +1 if growth since 2015-19 beats the Houston area by 2+ points, -1 if it trails by 2+, "
+    "and only when the difference is larger than the ACS 90% margin of error (childcare uses the under-5 trend, "
+    "tutoring the 5-17 trend). 2015-19 counts are moved onto 2020 tracts with the Census relationship file.",
+    "Local supply votes +1 at half the Houston-area rate per resident or less (underserved), -1 at 2x or more "
+    "(crowded), only when the difference is unlikely by chance (Poisson p < 0.1 against the count expected at the "
+    "area rate), and not for restaurants, fast food, cafes and bars, which cluster on purpose. Zero mapped where 5+ "
+    "are expected is treated as an OpenStreetMap gap (unknown).",
     "Business arrivals vote +1 if more of this kind of business moved into nearby CoStar buildings than left over 3 "
     "years, -1 if fewer; needs 2+ moves, and falls back to the business's group (e.g. sports & fitness) when the "
     "exact business has fewer.",
-    "Supported: lookalike +1 and total +2 or more. Weak: lookalike -1, or total -2 or less. Unknown: lookalike "
-    "missing or fewer than 2 signals known. Otherwise mixed.",
+    "A verdict needs at least 2 known signals, one of them business-specific (a validated lookalike or a supply "
+    "comparison); population trend and group-level arrivals describe the area, not the business. Supported: total +2 "
+    "or more including a business-specific +1, and no -1 from the lookalike. Weak: lookalike -1, or total -2 or "
+    "less including a business-specific -1. Otherwise mixed. The lookalike is not required: for need-based services "
+    "such as childcare, locations follow population and the lookalike cannot tell areas apart, so supply decides.",
     "These cut-offs are our rules, set relative to the Houston-area distribution; they are not industry standards.",
 ]
 
@@ -1343,19 +1448,24 @@ def coordinate(key, signals):
     known = [sg for sg in signals if sg["stance"] is not None]
     look = next((sg for sg in signals if sg["name"] == "lookalike"), None)
     total = sum(sg["stance"] for sg in known)
-    if not look or look["stance"] is None or len(known) < 2:
+    supply = next((sg for sg in signals if sg["name"] == "local supply"), None)
+    # Business-specific evidence: a validated lookalike or a supply comparison. Population trend and
+    # group-level arrivals describe the area, not this business, so they cannot decide a verdict alone.
+    specific = [sg for sg in (look, supply) if sg and sg["stance"] is not None]
+    if len(known) < 2 or not specific:
         verdict = "unknown"
-    elif look["stance"] == 1 and total >= 2:
+    elif total >= 2 and any(sg["stance"] == 1 for sg in specific) and not (look and look["stance"] == -1):
         verdict = "supported"
-    elif look["stance"] == -1 or total <= -2:
+    elif (look and look["stance"] == -1) or (total <= -2 and any(sg["stance"] == -1 for sg in specific)):
         verdict = "weak"
     else:
         verdict = "mixed"
+    basis = (f"{len(known)} signals known; business-specific: "
+             + (", ".join(sg["name"] for sg in specific) or "none"))
     order = {"lookalike": 0, "local supply": 1, "population trend": 2, "business arrivals": 3}
     deciding = sorted(known, key=lambda sg: (sg["stance"] == 0, order.get(sg["name"], 9)))
     reasons = [{"signal": sg["name"], "stance": sg["stance"], "reason": sg["reason"]} for sg in deciding]
     unknown = [{"signal": sg["name"], "reason": sg["reason"]} for sg in signals if sg["stance"] is None]
-    supply = next((sg for sg in signals if sg["name"] == "local supply"), None)
     insight = None
     if look and supply and look["stance"] == 1 and supply["stance"] == 1:
         insight = "Gap: it looks like places that have this business, but has fewer of them than usual."
@@ -1366,7 +1476,7 @@ def coordinate(key, signals):
     lead = reasons[0]["reason"] if reasons and verdict != "unknown" else ""
     headline = VERDICTS[verdict] + (f": {lead[0].lower()}{lead[1:]}" if lead else "")
     return {"industry": key, "use": INDUSTRIES[key]["label"], "group": INDUSTRIES[key]["group"], "verdict": verdict,
-            "headline": headline, "score": total, "insight": insight, "reasons": reasons, "unknown": unknown,
+            "headline": headline, "score": total, "basis": basis, "insight": insight, "reasons": reasons, "unknown": unknown,
             "rules": RULES, "lookalike_percentile": look["value"] if look else None,
             "lookalike_validated": bool(look and look.get("validated"))}
 
@@ -1475,7 +1585,8 @@ def planner_step(request):
 
 SPECIALISTS = [
     ("residents", "Who lives here: ACS residents, age mix, income, tenure and trend vs the Houston area", residents_agent),
-    ("competitors", "Who already serves it: mapped facilities near the site (OpenStreetMap)", competitors_agent),
+    ("competitors", "Who already serves it: existing locations near the site (OpenStreetMap, or official licensing "
+                    "data where the registry has it)", competitors_agent),
     ("momentum", "What is moving in: CoStar kit tenant arrivals and departures by industry", momentum_agent),
     ("lookalike", "Does it look like places that already have this business? (held-out evaluated)", lookalike_agent),
 ]
@@ -1506,7 +1617,7 @@ def investigate(request, address=None, property_id=None, kit=None, explain=False
             signals = [st["per_industry"][key]["signal"] for st in steps
                        if ((st.get("per_industry") or {}).get(key) or {}).get("signal")]
             decisions.append(coordinate(key, signals))
-        decisions.sort(key=lambda d: (TIERS[d["verdict"]],
+        decisions.sort(key=lambda d: (TIERS[d["verdict"]], -d["score"],
                                       -(d["lookalike_percentile"] or 0) if d["lookalike_validated"] else 1))
         counts = {v: sum(d["verdict"] == v for d in decisions) for v in TIERS}
         trace.append({"agent": "coordinator", "role": "Combines each industry's signals into a verdict",
@@ -1569,7 +1680,7 @@ def warm(kit=None):
 def bench(property_ids=(13890701, 23296), kit=None):
     """Time requests after a restart: the first one runs with empty memory caches (disk caches present)."""
     for fn in (area_profile, facilities, lookalike_model, kit_tenancies, tract_table, tract_index, reference_profiles,
-               reference_values, acs, tracts, property_pin):
+               reference_values, acs, tracts, property_pin, old_on_new):
         fn.cache_clear()
     rows = []
     for round_ in ("first", "repeat"):

@@ -33,3 +33,5 @@
 .hood-table { width: 100%; border-collapse: collapse; font-size: 0.85em; display: block; overflow-x: auto; }
 .hood-table th, .hood-table td { text-align: left; vertical-align: top; padding: 4px 6px; border-bottom: 1px solid #e3e9e4; }
 .hood-table td:nth-child(2) { max-width: 260px; overflow-wrap: anywhere; }
+.hood .hood-actions label:has(select), .hood .hood-actions label:has(input[type="text"]) { display: grid; gap: 4px; font-weight: 600; flex: 1 1 220px; }
+.hood-rest { margin: 10px 0; }

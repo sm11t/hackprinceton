@@ -38,8 +38,12 @@
     <h2>Does the neighborhood support it?</h2>
     <p>A team of specialist agents checks who lives around the property, who already serves them, which businesses are moving into nearby CoStar buildings, and whether the area looks like places where this business already operates. Every step and source is shown.</p>
     <div class="hood-actions">
-      <button type="button" class="secondary" id="hood-check">Check the proposed use</button>
-      <button type="button" class="secondary" id="hood-suggest">Suggest uses for this area</button>
+      <label>Business<select id="hood-industry"><option value="">Same as proposed use</option></select></label>
+      <label>or describe it<input id="hood-text" type="text" maxlength="80" placeholder="e.g. bouldering gym"></label>
+    </div>
+    <div class="hood-actions">
+      <button type="button" class="secondary" id="hood-check">Check this business</button>
+      <button type="button" class="secondary" id="hood-suggest">Suggest businesses for this area</button>
       <label><input type="checkbox" id="hood-explain"> Add a plain-English summary (LLM)</label>
     </div>
     <p id="hood-status" role="status" aria-live="polite"></p>

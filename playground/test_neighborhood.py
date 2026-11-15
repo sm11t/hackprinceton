@@ -20,12 +20,15 @@ def tract(geoid, lat, lon, pop, income=60000, households=None, land=1.0, renters
            "households": hh, "income": income, "occupied": hh, "renters": renters if renters is not None else hh / 2}
     for band in n.AGE_BANDS:
         row[band] = bands.get(band, pop / len(n.AGE_BANDS))
+    for name in ("pop", *n.MOE_BANDS):
+        row[f"{name}_moe2"] = 0.0
     return row
 
 
 NEW = (tract("1", 29.80, -95.40, 4000, 100000), tract("2", 29.81, -95.40, 6000, 50000),
        tract("3", 30.30, -95.40, 5000, 40000))
-OLD = (tract("a", 29.80, -95.40, 9000), tract("b", 30.30, -95.40, 4000))
+# 2015-2019 counts already moved onto the 2020 tracts (what old_on_new returns)
+OLD = {"1": tract("1", 0, 0, 3600), "2": tract("2", 0, 0, 5400), "3": tract("3", 0, 0, 4000)}
 CACHED = [n.area_profile, n.area_totals, n.reference_profiles, n.reference_values, n.tract_index]
 
 
@@ -34,9 +37,9 @@ class FakeTables:
 
     def __enter__(self):
         self.tmp = tempfile.TemporaryDirectory()
-        tables = {2024: (NEW, ()), 2019: (OLD, ())}
         self.patches = [
-            mock.patch.object(n, "tract_table", lambda year: tables[year]),
+            mock.patch.object(n, "tract_table", lambda year=2024: (NEW, ())),
+            mock.patch.object(n, "old_on_new", lambda: (OLD, ())),
             mock.patch.object(n, "CACHE", Path(self.tmp.name)),
             mock.patch.object(n, "census_sources", lambda year: [
                 {"name": f"src{i}", "url": f"https://example.test/{year}/{i}", "retrieved_at": "t", "cached": True,
@@ -155,6 +158,31 @@ class Registry(unittest.TestCase):
 
 
 class Residents(unittest.TestCase):
+    def test_trend_inside_margin_of_error_does_not_vote(self):
+        noisy = {k: dict(v, pop_moe2=2000.0 ** 2) for k, v in OLD.items()}
+        with FakeTables(), mock.patch.object(n, "old_on_new", lambda: (noisy, ())):
+            out = n.residents_agent(29.80, -95.40, ["cafe"])
+        signal = out["per_industry"]["cafe"]["signal"]
+        self.assertEqual(signal["stance"], 0)
+        self.assertIn("within the margin of error", signal["reason"])
+
+
+    def test_old_on_new_splits_by_land_share_and_keeps_totals(self):
+        header = "|".join(f"c{i}" for i in range(16))
+        # 2010 tract A (land 100) split into 2020 tracts X (land 75) and Y (land 25)
+        lines = [header,
+                 "|".join(["o", "48201000001", "", "", "", "", "", "o", "48201000A", "", "100", "", "", "", "75", "0"]),
+                 "|".join(["o", "48201000002", "", "", "", "", "", "o", "48201000A", "", "100", "", "", "", "25", "0"])]
+        acs_row = {"B01003_001E": 1000.0, "B01003_001M": 100.0}
+        n.old_on_new.cache_clear()
+        with mock.patch.object(n, "fetch", lambda *a, **k: ("\n".join(lines), {"url": "u", "retrieved_at": "t"})), \
+                mock.patch.object(n, "acs", lambda year: ({"48201000A": acs_row}, [])):
+            out, _ = n.old_on_new()
+        n.old_on_new.cache_clear()
+        self.assertAlmostEqual(out["48201000001"]["pop"], 750)
+        self.assertAlmostEqual(out["48201000002"]["pop"], 250)
+        self.assertAlmostEqual(out["48201000001"]["pop_moe2"], (0.75 * 100) ** 2)
+
     def test_area_profile_sums_tracts_in_radius(self):
         with FakeTables():
             p = n.area_profile(29.80, -95.40, 3)
@@ -174,7 +202,7 @@ class Residents(unittest.TestCase):
             out = n.residents_agent(29.80, -95.40, ["indoor_pickleball", "childcare"])
         facts = {r["fact"]: r for r in out["findings"]}
         self.assertEqual(facts["residents_population"]["value"], 10000)
-        # Area growth +11.1% vs Houston-area (15000/13000 = +15.4%) -> trails by 4 points
+        # Area growth +11.1% vs Houston-area (15000/13000 = +15.4%) -> trails by 4 points (MOE 0 in the fixture)
         self.assertEqual(out["per_industry"]["indoor_pickleball"]["signal"]["stance"], -1)
         self.assertEqual(facts["indoor_pickleball.expected_participants_at_national_rate"]["value"],
                          round(10000 * 24_300_000 / 300_000_000))
@@ -197,6 +225,19 @@ def fake_facilities(rows, source="public:osm"):
 
 
 class Competitors(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.object(n, "MIN_FACILITIES", 1)  # synthetic fixtures have only a few locations
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_too_few_locations_area_wide_does_not_vote(self):
+        with FakeTables(), mock.patch.object(n, "MIN_FACILITIES", 30), \
+                mock.patch.object(n, "facilities", fake_facilities([facility(30.30, -95.40, "Only one")])):
+            out = n.competitors_agent(29.80, -95.40, ["climbing_gym"])
+        signal = out["per_industry"]["climbing_gym"]["signal"]
+        self.assertIsNone(signal["stance"])
+        self.assertIn("Too few", signal["reason"])
+
     def test_cluster_merges_courts_but_keeps_named_neighbours_apart(self):
         points = [facility(29.8, -95.4, None, osm="way/1"), facility(29.8005, -95.4, None, osm="way/2"),
                   facility(29.8, -95.4005, "Club A", True, True, "way/3"), facility(29.8, -95.401, "Club B", osm="n/4")]
@@ -223,15 +264,35 @@ class Competitors(unittest.TestCase):
         self.assertEqual(out["per_industry"]["indoor_pickleball"]["signal"]["stance"], 0)
         self.assertEqual(facts["indoor_pickleball.nearest_competitor"]["value"]["name"], "A")
 
-    def test_no_local_facilities_reads_underserved(self):
-        with FakeTables(), mock.patch.object(n, "facilities", fake_facilities([facility(30.30, -95.40, "C")])):
-            out = n.competitors_agent(29.80, -95.40, ["cafe", "dental"])
+    def test_supply_votes_only_when_unlikely_by_chance(self):
+        far = [facility(30.30, -95.40 + i / 1000, f"Far {i}", osm=f"n/{i}") for i in range(20)]
+        # Authoritative source: 0 nearby where 20 * 10000/15000 = 13.3 are expected -> underserved
+        with FakeTables(), mock.patch.object(n, "facilities", fake_facilities(far, "public:dataset")):
+            out = n.competitors_agent(29.80, -95.40, ["dental", "cafe"])
         self.assertEqual(out["per_industry"]["dental"]["signal"]["stance"], 1)
         self.assertIn("Underserved: Dental office", out["summary"])
         cafe = out["per_industry"]["cafe"]["signal"]
         self.assertEqual(cafe["stance"], 0)           # cafes cluster on purpose: supply does not vote
         self.assertIn("cluster on purpose", cafe["reason"])
+        # OpenStreetMap: the same zero is more likely a mapping gap -> unknown
+        with FakeTables(), mock.patch.object(n, "facilities", fake_facilities(far)):
+            out = n.competitors_agent(29.80, -95.40, ["dental"])
+        signal = out["per_industry"]["dental"]["signal"]
+        self.assertIsNone(signal["stance"])
+        self.assertIn("gap in OpenStreetMap", signal["reason"])
+        # Only 0.7 expected: zero nearby is not different from chance -> neutral
+        with FakeTables(), mock.patch.object(n, "facilities", fake_facilities(far[:1], "public:dataset")):
+            out = n.competitors_agent(29.80, -95.40, ["dental"])
+        signal = out["per_industry"]["dental"]["signal"]
+        self.assertEqual(signal["stance"], 0)
+        self.assertIn("not different from chance", signal["reason"])
 
+    def test_poisson_tails(self):
+        low, high = n.poisson_tails(0, 2.0)
+        self.assertAlmostEqual(low, math.exp(-2), places=6)
+        self.assertAlmostEqual(high, 1.0)
+        low, high = n.poisson_tails(8, 2.0)
+        self.assertLess(high, 0.01)
 
     def test_childcare_supply_is_seats_per_child_under_5(self):
         rows = [facility(29.80, -95.40, "Little Stars", True, True, "1", capacity=150),
@@ -386,10 +447,21 @@ class Coordinator(unittest.TestCase):
         self.assertEqual(d["verdict"], "weak")
         self.assertIn("Few competitors", d["insight"])
 
-    def test_unknown_without_validated_lookalike_or_enough_signals(self):
-        d = n.coordinate("cafe", [sig("lookalike", None, 80), sig("population trend", 1), sig("local supply", 1)])
-        self.assertEqual(d["verdict"], "unknown")
+    def test_lookalike_not_required_but_needs_two_signals(self):
+        d = n.coordinate("childcare", [sig("lookalike", None, 61), sig("population trend", 1), sig("local supply", 1)])
+        self.assertEqual(d["verdict"], "supported")
+        self.assertIn("business-specific: local supply", d["basis"])
         self.assertEqual(n.coordinate("cafe", [sig("lookalike", 1, 80)])["verdict"], "unknown")
+        d = n.coordinate("cafe", [sig("lookalike", -1, 10), sig("population trend", 1), sig("local supply", 1)])
+        self.assertEqual(d["verdict"], "weak")  # a validated low lookalike blocks "supported"
+
+    def test_area_signals_alone_cannot_decide(self):
+        d = n.coordinate("martial_arts", [sig("lookalike", None), sig("local supply", None),
+                                          sig("population trend", 1), sig("business arrivals", 1)])
+        self.assertEqual(d["verdict"], "unknown")
+        d = n.coordinate("car_wash", [sig("lookalike", 0, 45), sig("local supply", 0),
+                                      sig("population trend", -1), sig("business arrivals", -1)])
+        self.assertEqual(d["verdict"], "mixed")  # -2 from area signals only: not weak
 
     def test_mixed_and_gap_insight(self):
         d = n.coordinate("fitness_gym", [sig("lookalike", 1, 75), sig("local supply", 1),

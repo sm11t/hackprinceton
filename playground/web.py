@@ -414,11 +414,14 @@ def main():
                 except (OSError, RuntimeError, KeyError):
                     self.send(b'{"error":"Market ranking unavailable. Check the local kit."}', "application/json", 502)
                 return
+            if route.path == "/api/neighborhood/industries":
+                self.send(json.dumps(neighborhood.industry_catalog()).encode(), "application/json")
+                return
             if route.path == "/api/neighborhood":
                 try:
-                    use = params.get("use", ["indoor pickleball"])[0]
-                    if use != "suggest" and use not in neighborhood.USES and use not in neighborhood.NO_NEIGHBORHOOD_MODEL:
-                        raise ValueError("Choose a supported use or 'suggest'.")
+                    use = params.get("use", ["indoor pickleball"])[0].strip()
+                    if not 2 <= len(use) <= 80:
+                        raise ValueError("Describe the business in 2-80 characters, or use 'suggest'.")
                     property_id = params.get("property_id", [""])[0]
                     address = params.get("address", [""])[0].strip()
                     if not (property_id.isdigit() or 5 <= len(address) <= 200):
