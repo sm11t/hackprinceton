@@ -74,3 +74,20 @@ class MaximoTests(unittest.TestCase):
                                      "lease", {}, offline=True)
         self.assertEqual(result["eligibility"]["status"], "conditional")
         self.assertEqual(result["money"]["inputs"]["monthly_rent"], 7920)
+
+    def test_market_rent_estimates_reach_the_deal_facts(self):
+        prop = {"id": 13890701, "propertyType": 2}
+        space = {"suite": None, "listing_id": 37112018, "square_feet": 9900}
+        deal = {"suite": None, "listing_id": 37112018, "squareFeetMax": 9900, "rateHigh": 0.8, "rateBasis": 1}
+        entry = {"address": "Wynnwood", "city": "Houston", "id": "13890701"}
+        estimates = {"spaces": {}}
+        with (patch("maximo.load_property", return_value=prop),
+              patch("maximo.listed_spaces", return_value=[space]),
+              patch("maximo.load_tenancies", return_value={}),
+              patch("maximo.load_deal_data", return_value=([deal], [], [])),
+              patch("maximo.load_rent_estimates", return_value=estimates),
+              patch("maximo.deal_facts", return_value={"records": []}) as facts,
+              patch("maximo.gather", return_value=(prop, [space], None, {}, {})),
+              patch("maximo.space_fit", return_value={"records": [], "verdict": "supported"})):
+            review_property(None, entry, "indoor pickleball", "listing:37112018:9900", "lease", {}, offline=True)
+        self.assertIs(facts.call_args.kwargs["rent_estimates"], estimates)
