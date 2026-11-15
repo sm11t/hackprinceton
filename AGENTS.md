@@ -50,9 +50,9 @@ If you have no Slack access, ask your human to paste the canvas/task info into t
 
 ## Project details
 <!-- Fill in once decided -->
-- **Idea:** TBD
-- **Main track:** TBD
-- **Special tracks:** TBD
-- **Stack:** TBD
-- **Run locally:** TBD
-- **Folder layout:** TBD
+- **Idea:** MAXIMUS: budget-first venture discovery. Every listed Houston space × 26 business types through building, cash, neighborhood and permit gates, then a sourced per-pick review (see README.md)
+- **Main track:** Business & Enterprise (proposed; Jessenth confirms on Devpost)
+- **Special tracks:** CoStar, Capital One (Nessie) (proposed)
+- **Stack:** Python 3.10+ standard library server (`playground/web.py`), vanilla JS front end (`playground/static/`); Helix (`project helix/`) on its own branches
+- **Run locally:** see README.md "Run it"
+- **Folder layout:** `playground/` app + tests, `reports/` design notes and write-ups

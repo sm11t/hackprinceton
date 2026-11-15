@@ -64,5 +64,19 @@ class Jurisdiction(unittest.TestCase):
         self.assertNotIn("key", url)
 
 
+class WarmMarket(unittest.TestCase):
+    def test_resolves_every_market_building_and_tallies(self):
+        from unittest.mock import patch
+        from jurisdiction import warm_market
+        market = [{"lat": 1, "lon": 2}, {"lat": 3, "lon": 4}, {"lat": 5, "lon": 6}]
+        seen = []
+        def resolve(lat, lon):
+            seen.append((lat, lon))
+            return {"code": None if lat == 5 else "houston"}
+        with patch("opportunity.load_market", return_value=market):
+            self.assertEqual(warm_market(resolve=resolve), {"houston": 2, "none": 1})
+        self.assertEqual(seen, [(1, 2), (3, 4), (5, 6)])
+
+
 if __name__ == "__main__":
     unittest.main()

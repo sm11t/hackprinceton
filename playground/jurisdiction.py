@@ -119,9 +119,27 @@ def resolve_jurisdiction(lat, lon, fetch=fetch_census):
     return result
 
 
+def warm_market(kit=None, resolve=None):
+    """Look up (and cache) the jurisdiction of every building in the opportunity scan's market, once, online.
+
+    The scan only reads this cache (it never calls the network), so on a fresh laptop its "authority known" gate shows
+    almost nothing until this has run. Returns {code: count}."""
+    from opportunity import load_market
+    resolve = resolve or resolve_jurisdiction
+    tally = {}
+    for building in load_market(kit):
+        code = resolve(building["lat"], building["lon"]).get("code") or "none"
+        tally[code] = tally.get(code, 0) + 1
+    return tally
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--warm-market":
+        print(json.dumps(warm_market(sys.argv[2] if len(sys.argv) > 2 else None), indent=2))
+        return
     if len(sys.argv) != 3:
-        sys.exit("usage: python3 playground/jurisdiction.py LAT LON")
+        sys.exit("usage: python3 playground/jurisdiction.py LAT LON\n"
+                 "       python3 playground/jurisdiction.py --warm-market [KIT]   # once per laptop, online")
     print(json.dumps(resolve_jurisdiction(sys.argv[1], sys.argv[2]), indent=2))
 
 
