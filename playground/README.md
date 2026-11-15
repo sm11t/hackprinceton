@@ -530,3 +530,55 @@ How to read this:
 - **Our thresholds.** The cut-offs (70th/30th percentile, ±2 points, 0.5x/2x, p < 0.1, AUC 0.6) are our rules,
   not industry standards.
 - **B2B uses are not modelled.** Warehouse, flex and office demand doesn't come from nearby residents.
+
+## Ventures: "I have a budget" (`opportunity.py`, `venture_costs.py`, `venture_review.py`)
+
+This is the budget-first flow of the venture suite: the user has cash but doesn't know what to open or where.
+
+**Opportunity scan (`opportunity.py`).** It runs every active for-lease space in Houston (240 buildings, 2,370
+listed spaces) against every business in the registry (26). Three hard gates apply in order, then demand ranks
+what's left:
+
+1. **Building:** can this building and space host the business? (`neighborhood.building_fit`)
+2. **Money:** do cash to open plus the user's reserve fit the budget? (`venture_costs.cash_to_open`)
+3. **Demand:** does the neighborhood support it? (`neighborhood.investigate`, supported or mixed with a positive total)
+
+The result has three parts:
+- **A funnel:** combinations → can host → affordable → neighborhood support.
+- **Directions:** one per business, with how many places, how many supported, the cash range and why.
+- **The best business × space pairs:** one per building per business.
+
+The budget-independent work (the 26-business neighborhood check and the building gate for every listed space)
+is built once into an index. After that, a budget query is arithmetic over the index.
+
+**Cash to open (`venture_costs.py`).** Each business has a sourced opening-cost benchmark: Franchise Disclosure
+Document Item 7, or a cited industry study, with URL and quote, in `venture_cost_data.py`. The benchmark's
+lines become a ledger for the specific space:
+- **Build-out:** scales per sq ft from the benchmark's typical unit size.
+- **Equipment:** scales too where it grows with capacity.
+- **Fixed lines:** signage, inventory, opening, deposits and licenses, and early operating cash, as listed.
+- **This space's lease:** a 2-month deposit and rent during build-out.
+
+Franchise fees are left out and shown as a note. Low / base / high come from the benchmark's own range.
+- **Rent:** the listing, else the rent model's typical estimate, else unknown (and the result says so).
+- **No revenue forecast:** the output shows how many months of rent the cash left after opening covers, with zero
+  revenue.
+
+**Deep review (`venture_review.py`).** Works for any of the 26 businesses in one listed space. Agents for:
+- building and neighborhood (the demand specialists);
+- money (with a 3-month delay stress and an optional what-if delay);
+- deal (asking rent vs the rent model's range);
+- records (CoStar vs linked scans);
+- permits (the Houston change-of-use path plus business-specific licenses from official sources,
+  `venture_license_data.py`).
+
+The result is **GO / CONDITIONAL / NO-GO**, with blockers, conditions, what would flip it, and the checks to run.
+
+```bash
+python3.12 playground/with_env.py python3.12 playground/opportunity.py --build      # once (~6 s with the kit folder)
+python3.12 playground/with_env.py python3.12 playground/opportunity.py --budget 500000 --reserve 50000
+```
+
+API:
+- `GET /api/opportunities?budget=500000&reserve=50000[&lat=&lon=&radius=&exclude=bar,convenience]`
+- `GET /api/venture/review?business=childcare&property_id=23296&suite=A&budget=500000&reserve=50000[&delay=3]`
