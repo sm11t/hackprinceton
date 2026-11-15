@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Finance Lab</title>
+<style>
+:root { --bg:#f6f7f9; --panel:#fff; --ink:#15181d; --muted:#5d6672; --line:#dde1e6; --accent:#1f5fbf;
+        --good:#1d7a46; --warn:#a35d00; --bad:#b3261e; --chip:#eef1f5; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#111317; --panel:#1a1d23; --ink:#e8eaed;
+  --muted:#9aa3ae; --line:#2c313a; --accent:#7aa7ff; --good:#5cc98a; --warn:#f0b04a; --bad:#ff7a70; --chip:#242932; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+header h1 { margin:0; font-size:18px; }
+header .sub { color:var(--muted); }
+.wrap { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px 20px; }
+@media (max-width: 900px) { .wrap { grid-template-columns: 1fr; padding:12px 16px; } }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; }
+form label { display:block; font-weight:600; margin:10px 0 4px; }
+form .hint { font-weight:400; color:var(--muted); font-size:12px; }
+input, select { width:100%; padding:7px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit; }
+.row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.radio { display:flex; gap:14px; margin-top:4px; } .radio label { font-weight:400; margin:0; display:flex; gap:6px; align-items:center; }
+.radio input, .check input { width:auto; }
+.check { display:flex; gap:6px; align-items:center; margin-top:6px; font-weight:400; }
+button { font:inherit; border-radius:6px; padding:9px 12px; border:1px solid var(--line); background:var(--chip); color:var(--ink); cursor:pointer; }
+button.primary { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; width:100%; margin-top:14px; }
+button:disabled { opacity:.6; cursor:progress; }
+.actions { display:flex; gap:8px; margin-top:8px; } .actions button { flex:1; }
+main > .panel { margin-bottom:14px; }
+h2 { font-size:15px; margin:0 0 10px; }
+.cards { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:10px; }
+.card { border:1px solid var(--line); border-radius:6px; padding:10px; }
+.card .k { color:var(--muted); font-size:12px; } .card .v { font-size:18px; font-weight:650; margin-top:2px; }
+.card .s { color:var(--muted); font-size:12px; margin-top:2px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; } td.n, th.n { text-align:right; font-variant-numeric: tabular-nums; white-space:nowrap; }
+.tag { display:inline-block; font-size:11px; padding:1px 6px; border-radius:10px; background:var(--chip); color:var(--muted); white-space:nowrap; }
+.tag.listed,.tag.nessie { color:var(--good); } .tag.user { color:var(--accent); } .tag.estimate,.tag.assumption { color:var(--warn); } .tag.unknown { color:var(--bad); }
+.warn { border-left:3px solid var(--warn); padding:8px 10px; background:var(--chip); border-radius:4px; margin:6px 0; }
+.bad { color:var(--bad); } .good { color:var(--good); } .muted { color:var(--muted); }
+.notmodeled { display:flex; flex-wrap:wrap; gap:6px; } .notmodeled span { border:1px dashed var(--bad); color:var(--bad); border-radius:4px; padding:2px 8px; font-size:12px; font-weight:600; }
+.explain { color:var(--muted); font-size:12px; margin-top:6px; font-family:var(--mono); }
+svg text { fill: var(--muted); font-size:11px; }
+.legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-top:6px; }
+.legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:4px; }
+details pre { max-height:420px; overflow:auto; background:var(--bg); padding:10px; border-radius:6px; font:12px var(--mono); }
+.empty { color:var(--muted); padding:30px; text-align:center; }
+.scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Finance Lab</h1>
+  <span class="sub">Cost to open, 12-month cash and financing for any listed space and business.</span>
+</header>
+<div class="wrap">
+  <aside class="panel">
+    <form id="f" autocomplete="off">
+      <label>Market</label>
+      <select name="market"><option value="los_angeles">Los Angeles, CA</option><option value="houston">Houston, TX</option></select>
+      <label>Property <span class="hint">(type to search address or CoStar id)</span></label>
+      <input name="property_search" list="props" placeholder="Loading properties…">
+      <datalist id="props"></datalist>
+      <label>Space</label>
+      <select name="suite"></select>
+      <label>Business <span class="hint">(all 26; unsuitable ones show a warning)</span></label>
+      <select name="business"></select>
+      <div class="row">
+        <div><label>Starting cash</label><input name="budget" type="number" min="0" step="1000"></div>
+        <div><label>Reserve</label><input name="reserve" type="number" min="0" step="1000"></div>
+      </div>
+      <div class="row">
+        <div><label>Monthly rent <span class="hint">blank = listing</span></label><input name="monthly_rent" type="number" min="0" step="100"></div>
+        <div><label>Build months <span class="hint">blank = benchmark</span></label><input name="build_months" type="number" min="0" max="36" step="1"></div>
+      </div>
+      <label>Opening delay</label>
+      <select name="delay"><option value="0">None (shows a 3-month what-if)</option><option value="1">1 month</option><option value="3">3 months</option><option value="6">6 months</option></select>
+      <label>Financing</label>
+      <div class="radio"><label><input type="radio" name="financing" value="cash" checked> Cash only</label><label><input type="radio" name="financing" value="loan"> Proposed loan</label></div>
+      <div id="loanFields" hidden>
+        <label>Loan principal <span class="hint">blank = the gap</span></label><input name="loan_amount" type="number" min="0" step="1000">
+        <div class="row">
+          <div><label>APR %</label><input name="apr" type="number" min="0" max="50" step="0.25"></div>
+          <div><label>Term (months)</label><input name="term_months" type="number" min="1" max="360" step="1"></div>
+        </div>
+      </div>
+      <label>Nessie sandbox account <span class="hint">(optional; adds its bills)</span></label>
+      <input name="nessie_account" placeholder="account id">
+      <label class="check"><input type="checkbox" name="use_nessie_balance"> Use the Nessie balance as starting cash</label>
+      <button class="primary" type="submit" id="runBtn">Run Simulation</button>
+      <div class="actions"><button type="button" id="resetDemo">Reset to LA demo</button></div>
+      <p class="muted" id="status" role="status"></p>
+    </form>
+  </aside>
+  <main id="out"><div class="panel empty">Choose a property and business, then Run Simulation.</div></main>
+</div>
+<script src="/static/finance-lab.js"></script>
+</body>
+</html>
