@@ -58,6 +58,7 @@ from finance_lab import engine as finance_lab
 from stage3_engine import adapter as stage3_adapter
 import opportunity_report
 import stage4_handoff
+import final_report
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -379,6 +380,25 @@ class ChatHandler(BaseHTTPRequestHandler):
                 else: self.send_json(result)
             except ValueError as error: self.send_json({'error':str(error)},status=400)
             return
+        if route.path == "/report":
+            content=(BASE_DIR / "report.html").read_bytes()
+            self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(content)))
+            self.send_header("Cache-Control","no-store"); self.end_headers(); self.wfile.write(content); return
+        if route.path == "/api/physical-summary":
+            handoff=INVESTIGATION_HANDOFFS.get((parse_qs(route.query).get('id') or [''])[0]) or {}
+            if not handoff.get('dossier'): self.send_json({'error':'Completed investigation dossier not found.'},status=404)
+            else: self.send_json(final_report.physical_summary(handoff['dossier']))
+            return
+        if route.path == "/api/final-report":
+            try:
+                investigation_id=(parse_qs(route.query).get('id') or [''])[0]
+                opportunity_report._id(investigation_id)
+                with DISCOVERY_LOCK:
+                    handoff=json.loads(json.dumps(INVESTIGATION_HANDOFFS.get(investigation_id),ensure_ascii=False))
+                self.send_json(final_report.build(investigation_id,handoff=handoff,stage3=read_json_store(STAGE3_RESULTS_PATH).get(investigation_id),
+                    report=opportunity_report.read_report(investigation_id),selection=stage4_handoff.read(investigation_id)))
+            except ValueError as error: self.send_json({'error':str(error)},status=400)
+            return
         if route.path == "/api/stage4/handoff":
             try:
                 record=stage4_handoff.read((parse_qs(route.query).get('id') or [''])[0])
@@ -528,7 +548,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             })
             return
 
-        if self.path in ("/maximus.css", "/maximus.js", "/stage3.css"):
+        if self.path in ("/maximus.css", "/maximus.js", "/stage3.css", "/report.css", "/report.js"):
             asset = BASE_DIR / self.path.lstrip('/')
             self.send_response(200)
             self.send_header("Content-Type", "text/css; charset=utf-8" if self.path.endswith(".css") else "application/javascript; charset=utf-8")

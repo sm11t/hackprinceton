@@ -21,7 +21,7 @@
 .opp-kind.sourced_record{border-color:#277f9d;color:#92d9f0}
 .opp-kind.model_inference{border-color:#685629;color:#e9c66b}
 .opp-kind.unresolved_question{border-color:#51443f;color:#e8a59b}
-.opp-refs{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.opp-refs{display:block;margin-top:3px;font-size:11px;color:#7f8a94;cursor:help}
 .opp-refs code{font-size:10.5px;color:#858f98;background:rgba(255,255,255,.04);border-radius:4px;padding:1px 5px;cursor:help}
 .opp-meta{margin-top:14px;color:#a8adb5;font-size:13px}
 .opp-meta summary{cursor:pointer;font-weight:650;color:#dce0e4}
@@ -29,3 +29,21 @@
 .opp-choose{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08)}
 .opp-choose small{color:#a8adb5}
 @media(max-width:640px){.opp-head{flex-direction:column}.opp-choose button{width:100%}}
+/* Comparison strip, shared questions, memorandum link */
+.stage3-compare{border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:16px 20px;margin:0 0 14px;background:rgba(255,255,255,.03)}
+.stage3-compare h4{margin:0 0 10px!important}
+.cmp-row{display:grid;grid-template-columns:170px 1fr 110px;gap:12px;align-items:center;margin:9px 0}
+.cmp-name{font-weight:650;font-size:13.5px}
+.cmp-track{position:relative;height:18px;background:rgba(255,255,255,.06);border-radius:3px}
+.cmp-band{position:absolute;top:4px;height:10px;border-radius:2px;background:#4f8fb0}
+.cmp-base{position:absolute;top:0;width:3px;height:18px;background:#ecedef;border-radius:1px}
+.cmp-budget{position:absolute;top:-5px;bottom:-5px;border-left:2px dashed #e8a59b}
+.cmp-val{font-size:12.5px;text-align:right;color:#bbc1c6;font-variant-numeric:tabular-nums}
+.stage3-compare small{color:#858f98}
+.stage3-common{border:1px dashed rgba(255,255,255,.18);border-radius:12px;padding:14px 18px}
+.stage3-common:empty{display:none}
+.stage3-common h4{margin:0 0 6px!important}
+.stage3-common li{color:#bbc1c6;font-size:13px;margin:4px 0}
+.opp-memo{color:#92d9f0;font-weight:700;text-decoration:none;border:1px solid #277f9d;border-radius:8px;padding:9px 13px}
+@media(max-width:640px){.cmp-row{grid-template-columns:100px 1fr 80px}}
+.opp-lead{margin-top:16px}.opp-more{margin-top:12px}.opp-more>summary{cursor:pointer;font-weight:650;color:#92d9f0}
