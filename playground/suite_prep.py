@@ -78,7 +78,7 @@ def run(kit, offline):
     return ok, scan, reviews
 
 
-def demo_ventures(scan):
+def demo_ventures(scan, reviews):
     import ventures
     for v in ventures.all_for("demo"):
         if v["name"].startswith("Demo:"):
@@ -91,12 +91,15 @@ def demo_ventures(scan):
         if p:
             return {k: p[k] for k in ("business", "label", "group", "property_id", "suite", "suite_label", "address",
                                       "sf", "lat", "lon")} | {"building": {"reasons": p["building"]["reasons"]}}
-        from neighborhood_industries import INDUSTRIES
-        return {"business": business, "label": INDUSTRIES[business]["label"], "group": INDUSTRIES[business]["group"],
-                "property_id": pid, "suite": suite, "suite_label": label, "address": label, "building": {"reasons": []}}
+        r = reviews[(business, pid)]  # not in the scan's top pairs (e.g. over budget): take it from the review
+        sf = r["space"].get("sf")
+        return {"business": business, "label": r["label"], "group": r["group"], "property_id": pid,
+                "suite": r["suite"], "suite_label": (f"Suite {r['space']['suite']}" if r["space"].get("suite")
+                                                     else f"{sf:,.0f} sq ft space" if sf else "listed space"),
+                "address": r["address"], "sf": sf, "lat": r["lat"], "lon": r["lon"], "building": {"reasons": []}}
     short = [entry("salon_barber", 6017645, "listing:40882536:1200", ""),
              entry("physical_therapy", 239634, "625", ""),
-             entry("indoor_pickleball", 13890701, None, "6855 Wynnwood Ln, Houston, TX")]
+             entry("indoor_pickleball", 13890701, None, "")]
     base = {"budget": 500000, "reserve": 50000, "area": {"mode": "anywhere", "radius": 10}, "exclude": [],
             "directions": ["salon_barber", "physical_therapy", "cafe"]}
     stages = ["budget", "scan", "opportunities", "shortlist", "investigate", "decide"]
@@ -110,7 +113,7 @@ def demo_ventures(scan):
     v = ventures.create("demo", "budget", "Demo: $750k childcare, investigate")
     ventures.update("demo", v["id"], {"stage": "investigate", "status": "investigating",
                                       "inputs": {**base, "budget": 750000, "directions": ["childcare"], "reached": 4},
-                                      "shortlist": [entry("childcare", 23296, "A", "9700 Tanner Rd, Houston, TX")]})
+                                      "shortlist": [entry("childcare", 23296, "A", "")]})
     made.append(("investigate $750k", v["id"]))
     for stage, vid in made:
         print(f"  /suite#/v/{vid}/{stage.split()[0]}  ({stage})")
@@ -157,10 +160,10 @@ def main():
     os.environ["NEIGHBORHOOD_OFFLINE"] = "1"
     os.environ["JURISDICTION_OFFLINE"] = "1"
     importlib.invalidate_caches()
-    ok, scan, _ = run(args.kit, offline=True)
+    ok, scan, reviews = run(args.kit, offline=True)
     if args.ventures:
         print("3. Demo ventures (user 'demo')")
-        demo_ventures(scan)
+        demo_ventures(scan, reviews)
     if args.warm_server:
         print(f"4. Warming {args.warm_server}")
         ok &= warm_server(args.warm_server.rstrip("/"))

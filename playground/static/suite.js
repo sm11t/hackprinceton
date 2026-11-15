@@ -698,7 +698,7 @@
     if (!rows.length) return "";
     const counts = EFFECTS.map(([e]) => rows.filter((x) => x.effect === e).length);
     // Wider columns where there are more reasons; empty columns stay narrow but visible ("None").
-    const widths = counts.map((n) => `minmax(0, ${n ? Math.min(n, 6) / 2 + 0.5 : 0.5}fr)`).join(" ");
+    const widths = counts.map((n) => `minmax(118px, ${n ? Math.min(n, 6) / 2 + 0.5 : 0.5}fr)`).join(" ");
     const cols = EFFECTS.map(([e, name, c]) => {
       const list = rows.filter((x) => x.effect === e);
       return `<div class="why-col"><div class="why-h"><span class="dot ${c}"></span>${name}<span class="n">${list.length}</span></div>
