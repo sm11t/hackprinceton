@@ -434,6 +434,9 @@ def main():
             if route.path == "/maximo":
                 self.send((ROOT / "static/maximo.html").read_bytes(), "text/html; charset=utf-8")
                 return
+            if route.path == "/suite":
+                self.send((ROOT / "static/suite.html").read_bytes(), "text/html; charset=utf-8")
+                return
             if route.path == "/api/maximo/rank":
                 try:
                     market = params.get("market", ["Houston"])[0]
@@ -524,7 +527,9 @@ def main():
             assets = {"/static/location-demo.js": "text/javascript","/static/pilot.css": "text/css", "/static/pilot.js": "text/javascript",
                       "/static/workspace.css": "text/css", "/static/workspace.js": "text/javascript", "/static/space-fit.js": "text/javascript", "/static/maximo.js": "text/javascript",
                       "/static/maximo.css": "text/css", "/static/market-rank.js": "text/javascript",
-                      "/static/neighborhood.js": "text/javascript", "/static/neighborhood.css": "text/css"}
+                      "/static/neighborhood.js": "text/javascript", "/static/neighborhood.css": "text/css",
+                      "/static/suite.css": "text/css", "/static/suite.js": "text/javascript",
+                      "/static/suite3d.js": "text/javascript"}
             if route.path in assets:
                 self.send((ROOT / "static" / route.path.rsplit("/", 1)[1]).read_bytes(), assets[route.path])
                 return
