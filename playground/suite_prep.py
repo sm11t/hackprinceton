@@ -46,6 +46,21 @@ SITES = [("1250 S Broadway, Los Angeles (Jessenth's Stage 2 property)", 4809147,
 FUNNEL = {"combinations": 61620, "building_can_host": 13263, "affordable": 7399, "neighborhood_support": 1265}
 
 
+def warm_jurisdictions(kit):
+    """Cache the Census jurisdiction answer for every listed building (Houston and LA), so the scan's compliance gate
+    counts every survivor on a fresh laptop (Jayant's finding). Uses jurisdiction.warm_market when present."""
+    import jurisdiction
+    import opportunity
+    if hasattr(jurisdiction, "warm_market"):
+        jurisdiction.warm_market(kit)
+    started, done = time.perf_counter(), 0
+    for market in opportunity.MARKET_IDS:
+        for b in opportunity.load_market(kit, market):
+            if jurisdiction.resolve_jurisdiction(b["lat"], b["lon"]).get("code") is not None:
+                done += 1
+    print(f"  jurisdiction cached for {done} listed buildings ({time.perf_counter() - started:.1f}s)")
+
+
 def run(kit, offline):
     import neighborhood
     import opportunity
@@ -207,6 +222,7 @@ def main():
     if not args.offline_only:
         print("1. Online warm-up (caches jurisdiction lookups" + (" and official permit pages" if args.live_research
                                                                else "") + ")")
+        warm_jurisdictions(args.kit)
         if args.live_research:
             os.environ["COMPLIANCE_LIVE"] = "1"
         run(args.kit, offline=False)
