@@ -188,3 +188,17 @@ class RegistryFitTests(unittest.TestCase):
             r = check_business(self.context(), 'childcare', search)
         self.assertEqual([x['url'] for x in r['research']],
                          ['https://www.houstontx.gov/x/childcare.html', 'https://www.houstontx.gov/business/plan.html'])
+
+
+class HelixHandoffShapeTests(unittest.TestCase):
+    def test_investigate_handoff_reads_property_facts(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        resolver=Mock(return_value=dict(code='houston',verified=True,evidence_url='https://example.org/b'))
+        handoff={'handoff_id':'h','stage':2,'selected_listing':dict(property_id=23296,listing_id='L',space_id='9',stable_id='s',property_type='Flex'),
+                 'property_facts':{'property_id':23296,'latitude':29.85,'longitude':-95.53,'stories':1}}
+        with patch.dict(sys.modules, jurisdiction=SimpleNamespace(resolve_jurisdiction=resolver)):
+            result=preflight(handoff)
+        resolver.assert_called_once_with(29.85,-95.53)
+        self.assertEqual(result['scope'],'space:9')

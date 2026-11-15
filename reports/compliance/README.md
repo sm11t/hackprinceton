@@ -9,7 +9,7 @@ Files (on `feat/compliance-engine`, PR #17):
 | File | What it does |
 |---|---|
 | `playground/jurisdiction.py` | lat/lon → `houston`, `harris_unincorporated`, `los_angeles`, `la_unincorporated`, or none, from Census official boundaries |
-| `playground/compliance_engine.py` | building check (`preflight`) and business check (`check_business`), Helix handoff adapter, kit adapter, cached official-source research |
+| `playground/compliance_engine.py` | building check (`preflight`) and business check (`check_business`), Helix handoff adapter, kit adapter, cached official-source research. The business check resolves any of the 26 registry categories (`neighborhood_industries.resolve`) and runs the team's `neighborhood.building_fit` |
 | `playground/test_jurisdiction.py`, `playground/test_compliance_engine.py` | 7 + 15 tests |
 
 Needs **Python 3.10+** (the rest of `playground/` uses `X | None` types; macOS `/usr/bin/python3` is 3.9).
@@ -69,12 +69,17 @@ python3 playground/jurisdiction.py 29.8540 -95.5317
 - Search finds relevant official process pages, not rules confirmed for this parcel or suite.
 - Census boundaries update yearly and can lag annexations; confirm edge parcels with the city's GIS.
 - Only the four authorities above are modeled; other cities return "not modeled".
-- Requirements exist for three demo businesses, not all 26 categories in `neighborhood_industries.py`.
+- All 26 registry categories get the team's building-fit screen (planning ranges, not code). Legal thresholds
+  exist only for pickleball (sport guidance), Texas childcare (26 TAC 746) and the restaurant checklist.
+- Research keeps official pages that mention permitting and lists pages naming the business first; some results
+  are still general city process pages.
 - No imagery-based checks (parking, HVAC, fire equipment) yet; those stay unknown.
 - The Helix adapter follows Stage 1's `discovery.normalize_listing` fields (checked read-only against PR #18).
   Those listings carry no coordinates, so the adapter reads `latitude`/`longitude` from a nested `property` detail
   if present, else looks the pin up in the CoStar kit by `property_id` (cached in `output/compliance/pins.json`).
-  Tested with Helix-shaped records for Tanner and Cypresswood, not yet with a live Stage 1 run.
+  Helix's investigate handoff is `{selected_listing, property_facts}`; the pin comes from `property_facts`.
+  Tested on a real handoff generated with Helix's own Stage 1 code (PR #18, run read-only): Tanner → City of Houston,
+  pickleball fits, childcare "check" (outdoor play space not recorded).
 
 Official references (checked Nov 14, 2026):
 - https://www.houstontx.gov/business/plan/permits-inspections.html (City of Houston)

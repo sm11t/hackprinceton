@@ -70,7 +70,9 @@ def normalize_context(context):
                   listing_evidence=selected)
     # Helix's normalized listing (discovery.normalize_listing) carries no coordinates; its property detail
     # (costar_service) does, as latitude/longitude, possibly nested under "property".
-    detail = selected.get('property') if isinstance(selected.get('property'), dict) else (context.get('property') or {})
+    # Helix's investigate handoff is {selected_listing, property_facts} (app.py); accept older nestings too.
+    detail = next((d for d in (context.get('property_facts'), selected.get('property'), context.get('property'))
+                   if isinstance(d, dict) and d), {})
     result['facts'] = dict(context.get('facts') or {})
     result['facts'].setdefault('property_type', selected.get('property_type') or detail.get('property_type') or 'unknown')
     if detail.get('stories') is not None:
