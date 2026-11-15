@@ -6,8 +6,10 @@
   <title>Property review · Reuse</title>
   <link rel="stylesheet" href="/static/workspace.css">
   <link rel="stylesheet" href="/static/maximo.css">
+  <link rel="stylesheet" href="/static/neighborhood.css">
   <script src="/static/maximo.js" defer></script>
   <script src="/static/market-rank.js" defer></script>
+  <script src="/static/neighborhood.js" defer></script>
 </head>
 <body><main class="review-page">
   <nav class="review-nav"><a class="brand" href="/">↗ reuse</a><a href="/pilot">Tanner pilot</a></nav>
@@ -31,6 +33,21 @@
     <p id="rank-status" role="status" aria-live="polite"></p>
     <ol id="rank-results"></ol>
     <p id="rank-basis" class="small muted"></p>
+  </section>
+  <section class="hood panel" id="hood">
+    <h2>Does the neighborhood support it?</h2>
+    <p>A team of specialist agents checks who lives around the property, who already serves them, which businesses are moving into nearby CoStar buildings, and whether the area looks like places where this business already operates. Every step and source is shown.</p>
+    <div class="hood-actions">
+      <label>Business<select id="hood-industry"><option value="">Same as proposed use</option></select></label>
+      <label>or describe it<input id="hood-text" type="text" maxlength="80" placeholder="e.g. bouldering gym"></label>
+    </div>
+    <div class="hood-actions">
+      <button type="button" class="secondary" id="hood-check">Check this business</button>
+      <button type="button" class="secondary" id="hood-suggest">Suggest businesses for this area</button>
+      <label><input type="checkbox" id="hood-explain"> Add a plain-English summary (LLM)</label>
+    </div>
+    <p id="hood-status" role="status" aria-live="polite"></p>
+    <div id="hood-results"></div>
   </section>
   <p id="status" role="status" aria-live="polite">Loading properties…</p>
   <div id="report"></div>
