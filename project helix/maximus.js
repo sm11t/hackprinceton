@@ -283,6 +283,12 @@
       stage3List(card,"Verify before proceeding",candidate.verification_questions);
       const sources=[...(gate.building?.sources || []),...(gate.affordability?.sources || []),...(gate.compliance?.sources || [])];
       const seen=new Set(); stage3Sources(card,sources.filter(s=>{const k=`${s.name}|${s.url}`;if(seen.has(k))return false;seen.add(k);return true;}));
+      card.dataset.business=candidate.business;
+      text(card,"div",undefined,"opp-card-notes").hidden=true;
+      const choose=text(card,"div",undefined,"opp-choose");
+      const button=text(choose,"button",`Choose ${candidate.label} → model the money`); button.type="button"; button.disabled=true;
+      button.addEventListener("click",()=>chooseBusiness(candidate));
+      text(choose,"small","Available after you review the opportunity report.");
     }
     const gates=$("#stage3-gates"); clear(gates);
     $("#stage3-all-label").textContent=`Review all ${data.gates?.length || 0} business outcomes`;
@@ -296,7 +302,79 @@
       }
     }
     $("#stage3-json").textContent=JSON.stringify(data,null,2);
+    loadOpportunityReport();
   }
+  // Opportunity intelligence: AI report over saved Stage 1/2/3 evidence, shown before business choice.
+  let currentReport=null;
+  const KIND_LABEL={observed:"Observed",sourced_record:"Sourced record",model_inference:"AI inference",unresolved_question:"Unresolved"};
+  function resetReport(message) {
+    currentReport=null; $("#opp-body").hidden=true; clear($("#opp-body")); $("#opp-status").textContent=message || "";
+    $("#opp-generate").textContent="Generate opportunity report"; $("#opp-generate").disabled=false;
+    for (const card of $$("#stage3-candidates .stage3-card")) {
+      const notes=$(".opp-card-notes",card); if (notes) { notes.hidden=true; clear(notes); }
+      const button=$(".opp-choose button",card); if (button) button.disabled=true;
+    }
+  }
+  function claimList(parent, claims, index) {
+    const list=text(parent,"ul",undefined,"opp-claims");
+    for (const claim of claims || []) {
+      const item=text(list,"li"); text(item,"span",KIND_LABEL[claim.kind] || claim.kind,`opp-kind ${claim.kind}`); text(item,"span",` ${claim.text}`);
+      const refs=text(item,"small",undefined,"opp-refs");
+      for (const id of claim.evidence_ids || []) {
+        const ref=text(refs,"code",id); const pointers=(index?.[id]?.pointers || []).join(", ");
+        ref.title=pointers ? `Stage ${index[id].stage} source: ${pointers}` : id;
+      }
+    }
+  }
+  function renderReport(report) {
+    currentReport=report; const body=$("#opp-body"); clear(body); body.hidden=false;
+    const headings=[["executive_thesis","Opportunity thesis"],["market_listing_context","Property and market context"],["physical_intelligence","Physical intelligence"],["evidence_comparisons","Evidence comparisons"],["risks_and_unknowns","Risks and unknowns"]];
+    const grid=text(body,"div",undefined,"opp-grid");
+    for (const [key,title] of headings) { const box=text(grid,"div",undefined,"opp-section"); text(box,"h4",title); claimList(box,report.narrative?.[key],report.evidence_index); }
+    const meta=text(body,"details",undefined,"opp-meta"); text(meta,"summary","Model, coverage, limitations and archived sources");
+    const usage=report.model?.usage || {}, cov=report.context_coverage || {};
+    text(meta,"p",`${report.model?.model || "model unknown"} · ${usage.prompt_tokens ?? "?"} input / ${usage.completion_tokens ?? "?"} output tokens · ${report.model?.latency_ms ?? "?"} ms · generated ${dateLabel(report.created_at) || report.created_at}`);
+    text(meta,"p",`Context: all ${cov.stage3_gates_supplied ?? "?"} screening outcomes; ${cov.physical_observations_supplied ?? "?"} of ${cov.physical_observations_total ?? "?"} physical observations supplied to the model. The archived sources keep every observation.`);
+    stage3List(meta,"Limitations",report.limitations);
+    const links=text(meta,"p"); for (const stage of ["stage1","stage2","stage3"]) { const a=text(links,"a",`Archived ${stage.replace("stage","Stage ")} source`); a.href=report.evidence?.[stage] || "#"; a.target="_blank"; a.rel="noopener"; text(links,"span"," · "); }
+    for (const candidate of report.narrative?.candidates || []) {
+      const card=$$("#stage3-candidates .stage3-card").find(c=>c.dataset.business===candidate.business); if (!card) continue;
+      const notes=$(".opp-card-notes",card); clear(notes); notes.hidden=false;
+      text(notes,"h4","Opportunity report on this option · AI assessment, not verified"); claimList(notes,candidate.claims,report.evidence_index);
+      const button=$(".opp-choose button",card); if (button) button.disabled=false;
+      const hint=$(".opp-choose small",card); if (hint) hint.textContent="Carries this property, space, budget, reserve and Stage 3 costs into Finance Lab.";
+    }
+    $("#opp-generate").textContent="Regenerate report";
+    $("#opp-status").textContent=`Report ${report.report_id.slice(0,8)} · ${report.screening?.candidate_order?.length || 0} options assessed. Choose one below to model the money.`;
+  }
+  function reportMatchesScreening(report) {
+    return !!report && JSON.stringify(report.screening?.shortlist || [])===JSON.stringify(currentStage3Output?.shortlist || [])
+      && report.investigation_id===currentInvestigation?.handoff_id;
+  }
+  async function loadOpportunityReport() {
+    resetReport(""); const id=currentInvestigation?.handoff_id; if (!id) return;
+    if (!currentStage3Output?.shortlist?.length) { $("#opp-generate").disabled=true; $("#opp-status").textContent="No shortlisted business to assess."; return; }
+    try {
+      const report=await get(`/api/opportunity-report?id=${encodeURIComponent(id)}`);
+      if (reportMatchesScreening(report)) renderReport(report);
+      else $("#opp-status").textContent="The saved report was built from different screening results. Generate a new one before choosing.";
+    } catch { $("#opp-status").textContent="No report yet. Generating one makes a single paid GPT Sol call (about $0.11)."; }
+  }
+  async function generateReport() {
+    const id=currentInvestigation?.handoff_id; if (!id || !currentStage3Output) return;
+    resetReport("Reading the saved Stage 1, 2 and 3 evidence and writing the report… (about 30 seconds)"); $("#opp-generate").disabled=true;
+    try { renderReport(await post("/api/opportunity-report/generate",{investigation_id:id})); }
+    catch(error) { resetReport(`Could not generate the report: ${error.message}`); }
+  }
+  async function chooseBusiness(candidate) {
+    const id=currentInvestigation?.handoff_id; if (!id || !currentReport) return;
+    $("#opp-status").textContent=`Saving your choice: ${candidate.label}…`;
+    try {
+      const record=await post("/api/stage4/select",{investigation_id:id,business:candidate.business,report_id:currentReport.report_id});
+      window.location.href=`/finance-lab?handoff=${encodeURIComponent(record.investigation_id)}`;
+    } catch(error) { $("#opp-status").textContent=`Could not save your choice: ${error.message}`; }
+  }
+  $("#opp-generate").addEventListener("click",generateReport);
   async function runStage3() {
     const handoff=currentInvestigation, entry=handoff?.selected_listing || {}, intake=handoff?.intake || {};
     if (!handoff?.dossier || !handoff.handoff_id) { $("#stage3-status").textContent="Complete the investigation first."; return; }
@@ -304,7 +382,7 @@
     if (!entry.listing_id || !entry.space_id) { $("#stage3-status").textContent="The selected space cannot be verified because its listing or space ID is missing."; return; }
     const reserve=$("#stage3-reserve").value.trim();
     if (reserve!=="" && (!Number.isFinite(Number(reserve)) || Number(reserve)<0)) { $("#stage3-status").textContent="Enter a nonnegative reserve or leave it blank."; return; }
-    currentStage3Output=null; $("#stage3-run").disabled=true; $("#stage3-results").hidden=true; $("#stage3-status").textContent="Matching your exact space and evaluating all 26 business types…";
+    currentStage3Output=null; resetReport(""); $("#stage3-run").disabled=true; $("#stage3-results").hidden=true; $("#stage3-status").textContent="Matching your exact space and evaluating all 26 business types…";
     try {
       const query=new URLSearchParams({id:handoff.handoff_id,reserve});
       const result=await get(`/api/stage3/investigation?${query}`);

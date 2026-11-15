@@ -57,6 +57,7 @@ from stage2.physical_profile import build_physical_profile
 from finance_lab import engine as finance_lab
 from stage3_engine import adapter as stage3_adapter
 import opportunity_report
+import stage4_handoff
 
 # Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -68,8 +69,8 @@ if OPENROUTER_BASE_URL != "https://openrouter.ai/api/v1":
 if MODEL != OPENROUTER_MODEL:
     raise RuntimeError(f"OPENROUTER_MODEL must be {OPENROUTER_MODEL}")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-COSTAR_KIT_PATH = os.environ.get("COSTAR_KIT_PATH", "/Users/jessenth/Downloads/costar-hackathon-kit.zip")
-COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD") or "princeton-h4ck4th0n-2026"
+COSTAR_KIT_PATH = os.environ.get("COSTAR_KIT_PATH") or str(Path.home() / "Downloads" / "costar-hackathon-kit.zip")
+COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD")
 
 # Initialize CoStar service
 try:
@@ -376,6 +377,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                         if route.path.endswith('/source') else opportunity_report.read_report(investigation_id))
                 if result is None: self.send_json({'error':'Report or source not found.'},status=404)
                 else: self.send_json(result)
+            except ValueError as error: self.send_json({'error':str(error)},status=400)
+            return
+        if route.path == "/api/stage4/handoff":
+            try:
+                record=stage4_handoff.read((parse_qs(route.query).get('id') or [''])[0])
+                if record is None: self.send_json({'error':'No business has been selected for this investigation.'},status=404)
+                else: self.send_json(record)
             except ValueError as error: self.send_json({'error':str(error)},status=400)
             return
         if route.path == "/api/stage3/result":
@@ -779,14 +787,32 @@ class ChatHandler(BaseHTTPRequestHandler):
             except (ValueError,json.JSONDecodeError) as error: self.send_json({'error':str(error)},status=400)
             except (OSError,RuntimeError) as error: self.send_json({'error':str(error)},status=503)
             return
+        if self.path == '/api/stage4/select':
+            try:
+                payload=self.read_json_payload()
+                investigation_id=str(payload.get('investigation_id') or ''); report_id=str(payload.get('report_id') or '')
+                with DISCOVERY_LOCK:
+                    handoff=json.loads(json.dumps(INVESTIGATION_HANDOFFS.get(investigation_id),ensure_ascii=False))
+                report=opportunity_report.read_report(investigation_id)
+                report_stage3=opportunity_report.read_source(investigation_id,report_id,'3') if report else None
+                self.send_json(stage4_handoff.select(investigation_id,str(payload.get('business') or ''),report_id,
+                    stage1=opportunity_report.read_stage1(investigation_id),handoff=handoff,
+                    stage3=read_json_store(STAGE3_RESULTS_PATH).get(investigation_id),report=report,report_stage3=report_stage3))
+            except (ValueError,json.JSONDecodeError) as error: self.send_json({'error':str(error)},status=400)
+            except OSError as error: self.send_json({'error':str(error)},status=503)
+            return
         if self.path == "/api/finance-lab/simulate":
             try:
                 data=self.read_json_payload()
+                investigation_id=data.get('investigation_id')
+                if investigation_id: stage4_handoff.check_run(str(investigation_id),data)
                 pid=data.get('property_id')
                 if isinstance(pid,bool) or not str(pid or '').isdigit(): raise ValueError('Select a valid CoStar property.')
                 facts=finance_lab.property_facts(costar,int(pid)) if costar else None
                 if not facts: raise ValueError('Selected CoStar property was not found.')
-                self.send_json(finance_lab.simulate(data,property_data=facts))
+                result=finance_lab.simulate(data,property_data=facts)
+                if investigation_id: result=stage4_handoff.record_run(str(investigation_id),data,result)
+                self.send_json(result)
             except (ValueError, json.JSONDecodeError) as error: self.send_json({"error":str(error)},status=400)
             except (OSError,RuntimeError) as error: self.send_json({"error":f"Could not retrieve property facts ({type(error).__name__})."},status=503)
             return

@@ -66,9 +66,11 @@ def normalize_tokens(text: str):
 class CoStarService:
     def __init__(self, kit_path: str = None, password: str = None):
         if not kit_path:
-            kit_path = os.environ.get("COSTAR_KIT_PATH") or "/Users/jessenth/Downloads/costar-hackathon-kit.zip"
+            kit_path = os.environ.get("COSTAR_KIT_PATH") or str(Path.home() / "Downloads" / "costar-hackathon-kit.zip")
         if not password:
-            password = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD") or "princeton-h4ck4th0n-2026"
+            password = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD")
+        if not password:
+            raise RuntimeError("Set COSTAR_KIT_PASSWORD (or COSTAR_KIT_ZIP_PASSWORD) in .env to open the CoStar kit.")
         
         self.kit_path = Path(kit_path)
         self.password = password.encode("utf-8") if isinstance(password, str) else password
