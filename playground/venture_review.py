@@ -52,9 +52,23 @@ COMPLIANCE_FACTS = ("identity", "occupancy", "fire", "accessibility", "parking",
                     "official_process", "scan_address")
 
 
+_COMPLIANCE = {}
+
+
 def compliance(property_id, suite, key, kit=None):
     """Jayant's compliance engine (PR #17), called as is: building preflight + business check, with the official
-    research replayed from its cache (live search only when COMPLIANCE_LIVE=1). Never raises: None if unavailable."""
+    research replayed from its cache (live search only when COMPLIANCE_LIVE=1). Never raises: None if unavailable.
+    Answers with a resolved jurisdiction are kept in memory (reading the kit for the context takes seconds)."""
+    memo = (property_id, suite, key, str(kit))
+    if memo in _COMPLIANCE:
+        return _COMPLIANCE[memo]
+    report = _compliance(property_id, suite, key, kit)
+    if report and ((report.get("jurisdiction") or {}).get("verified") or (report.get("jurisdiction") or {}).get("place")):
+        _COMPLIANCE[memo] = report
+    return report
+
+
+def _compliance(property_id, suite, key, kit=None):
     import os
     try:
         import compliance_engine as ce
