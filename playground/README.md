@@ -400,6 +400,7 @@ confidence, code vs LLM, and hand-off.
 |---|---|---|
 | Planner | registry + synonyms (code) | which businesses to check; B2B catalog uses (warehouse, flex, office) are not modelled |
 | Site | CoStar pin or Census geocoder | one point; stops outside the five Houston-area counties |
+| Can the building host it? | CoStar property type and subtype, listed space sizes (or the chosen suite), ceiling | fits / fits if checks pass / can't host, per business, with capacity where a sourced per-unit area exists (pickleball courts, licensed children); runs before demand |
 | Who lives here | ACS 2020-24 vs 2015-19 tracts within 3 mi | residents, density, income (approx.), renters, age mix, growth vs the Houston area; the age band that drives demand (under-5 for childcare); SFIA participation for pickleball |
 | Who already serves it | OpenStreetMap (Overpass) | places within 3 and 5 mi (courts clustered, indoor/paid flagged), supply per 10k residents vs the Houston area |
 | What is moving in | CoStar kit tenancies + company names | arrivals and departures in kit buildings within 5 mi over 3 years; falls back to the business's group when too few |
@@ -407,8 +408,25 @@ confidence, code vs LLM, and hand-off.
 | Coordinator | the signals | supported / mixed / weak / unknown with the deciding reasons and the rules used |
 | Narrator (optional) | coordinator output only | 3-sentence summary by an LLM; rejected if it uses any number not in its input |
 
-Each specialist runs once per site and covers every business requested, so suggest mode is 7 steps whether it
-checks 1 business or 26. Numbers and verdicts are computed in code; only the optional summary is LLM-written.
+Each specialist runs once per site and covers every business requested, so suggest mode is 8 steps whether it
+checks 1 business or 26.
+
+**Hard gates first, then demand.** For a CoStar property, the building check runs before the demand
+specialists.
+- **"Suggest businesses for this area"** shows three groups:
+  - what can go in this building (or the chosen suite), best supported first;
+  - what also fits but has no net neighborhood support (collapsed);
+  - demand gaps nearby that this building can't host, labeled "useful to know, not options for this space".
+- **"Check this business"** shows the building line on the verdict card, e.g. "fits: room for up to 5 courts in
+  9,900 sq ft, by area alone".
+- **Sources for space needs.**
+  - *Sourced:* USA Pickleball's 30x60 ft playing area per court, and Texas childcare minimums (30 sq ft indoor and
+    80 sq ft outdoor per child, 26 TAC ch. 746).
+  - *Common guidance, low confidence:* pickleball's 18 ft clear height.
+  - *Planning assumptions:* all other size ranges and building types (typical small operator). They screen out
+    misfits; they do not replace a measured plan.
+- **No space listed for lease** means "availability unknown". Unknown ceilings or outdoor space mean "fits if
+  checks pass", never "fits". Numbers and verdicts are computed in code; only the optional summary is LLM-written.
 
 **Adding a business** means adding one entry to `neighborhood_industries.py`: OpenStreetMap tags, tenant-name
 rules, synonyms, and optionally the demand age band. Then run `--prepare <key>`.
@@ -435,6 +453,8 @@ python3.12 playground/with_env.py python3.12 playground/neighborhood.py --bench 
 - `neighborhood_tools.py` exposes the pipeline as plain tools with JSON schemas: `list_industries`,
   `resolve_industry`, `check_neighborhood`, `suggest_industries` and `get_evidence`. It also emits them in
   OpenAI/OpenRouter function-calling format.
+  - `suggest_industries` returns `can_go_here` and `demand_gaps_this_building_cannot_host` separately.
+  - The agent is told that a business the building can't host is not an option.
 - `neighborhood_agent.py` (`uv run`, langchain-core/langchain-openai 1.8.0) binds those tools to any
   OpenAI-compatible model. The LLM routes the question and explains the answer; the tools compute everything.
   A final answer containing a number that no tool returned is rejected.

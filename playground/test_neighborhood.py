@@ -305,6 +305,59 @@ class Competitors(unittest.TestCase):
         self.assertIn("licensed seats", signal["reason"])
 
 
+def facts(type_="2", subtype="0", gba=40000, stories=1, ceiling=21.0, listed=(), drive_in=None):
+    return {"property_id": 1, "type": type_, "subtype": subtype, "gba": gba, "stories": stories,
+            "ceiling_ft": ceiling, "ceiling_source": "propertyIndustrial", "drive_in_bays": drive_in, "docks": None,
+            "listed": [{"value": suite or f"listing:9:{sf:g}", "suite": suite, "sf": sf} for suite, sf in listed]}
+
+
+class Building(unittest.TestCase):
+    def test_pickleball_courts_by_area_and_height(self):
+        fit = n.building_fit("indoor_pickleball", facts(listed=[(None, 9900), (None, 27750)]), "listing:9:9900")
+        self.assertEqual(fit["status"], "fits")
+        self.assertIn("up to 5 courts in 9,900 sq ft", fit["capacity"])
+        low = n.building_fit("indoor_pickleball", facts(type_="7", ceiling=14.0, listed=[("A", 10000)]))
+        self.assertEqual(low["status"], "no")
+        self.assertIsNone(low["capacity"])   # no capacity claim once the space fails
+        self.assertIn("14 ft is below the 18 ft", " ".join(low["reasons"]))
+        unknown = n.building_fit("indoor_pickleball", facts(ceiling=None, listed=[("A", 10000)]))
+        self.assertEqual(unknown["status"], "check")
+
+    def test_too_small_too_big_and_type(self):
+        self.assertEqual(n.building_fit("indoor_pickleball", facts(listed=[("B", 2000)]))["status"], "no")
+        big = n.building_fit("yoga_pilates", facts(type_="6", listed=[("C", 20000)]))
+        self.assertEqual(big["status"], "check")
+        self.assertIn("only works if part of it can be leased", " ".join(big["unknowns"]))
+        self.assertEqual(n.building_fit("restaurant", facts(type_="2", listed=[("D", 3000)]))["status"], "no")
+
+    def test_childcare_needs_outdoor_space_and_subtype_match(self):
+        fit = n.building_fit("childcare", facts(type_="6", subtype="10", listed=[("1", 6000)]))
+        self.assertEqual(fit["status"], "check")
+        self.assertIn("Built as a daycare center", fit["reasons"])
+        self.assertIn("80 sq ft of fenced outdoor", " ".join(fit["unknowns"]))
+        self.assertIn("up to 200 children", fit["capacity"])
+
+    def test_residential_and_unlisted(self):
+        home = n.building_fit("cafe", facts(type_="11"))
+        self.assertEqual(home["status"], "no")
+        self.assertEqual(len(home["reasons"]), 1)
+        unlisted = n.building_fit("fitness_gym", facts(type_="7", gba=20000))
+        self.assertEqual(unlisted["status"], "check")
+        self.assertIn("No space is listed", " ".join(unlisted["unknowns"]))
+
+    def test_ground_floor_and_drive_in(self):
+        tower = n.building_fit("cafe", facts(type_="9", stories=6, listed=[("200", 1500)]))
+        self.assertIn("ground-floor", " ".join(tower["unknowns"]))
+        shop = n.building_fit("auto_repair", facts(type_="2", listed=[("E", 5000)]))
+        self.assertIn("No grade-level drive-in bays", " ".join(shop["unknowns"]))
+
+    def test_building_agent_counts(self):
+        with mock.patch.object(n, "building_facts", lambda pid, kit="": facts(type_="11")):
+            out = n.building_agent(1, ["cafe", "dental"])
+        self.assertIn("0 businesses fit, 0 need a check, 2 can't go here", out["summary"])
+        self.assertEqual(out["per_industry"]["cafe"]["findings"][0]["fact"], "cafe.building_fit")
+
+
 class Momentum(unittest.TestCase):
     def test_kit_tenancies_arrival_and_departure_rules(self):
         with tempfile.TemporaryDirectory() as kit, tempfile.TemporaryDirectory() as cache, \
@@ -568,6 +621,22 @@ class Pipeline(unittest.TestCase):
         self.assertTrue(report["evidence"])
         self.assertEqual(report["trace"][2]["inputs"]["industries"], f"{len(ind.INDUSTRIES)} industries")
 
+    def test_building_gate_runs_first_and_ranks_hostable_first(self):
+        building = lambda property_id, industries, kit=None, suite=None: {  # noqa: E731
+            "summary": "b", "findings": [],
+            "per_industry": {k: {"building": {"status": "no" if k == "cafe" else "fits", "reasons": [], "unknowns": []}}
+                             for k in industries}}
+        with mock.patch.object(n, "building_agent", building):
+            site = lambda **kw: {"point": {"lat": 29.8, "lon": -95.4, "label": "X"}, "findings": [], "summary": "X"}  # noqa: E731
+            specialists = [("lookalike", "l", fake_agent("lookalike", lambda k: 1 if k == "cafe" else 0, lambda k: 80)),
+                           ("competitors", "c", fake_agent("local supply", lambda k: 1))]
+            with mock.patch.object(n, "site_agent", site), mock.patch.object(n, "SPECIALISTS", specialists):
+                report = n.investigate("suggest", property_id=1)
+        self.assertEqual([s["agent"] for s in report["trace"]][:3], ["planner", "site", "building"])
+        self.assertEqual(report["decisions"][-1]["industry"], "cafe")  # best demand, but the building can't host it
+        self.assertEqual(report["decisions"][-1]["verdict"], "supported")
+        self.assertTrue(report["building_checked"])
+
     def test_unmatched_request_runs_no_specialists(self):
         report = self.run_patched("spaceship factory")
         self.assertEqual(report["decisions"], [])
@@ -596,11 +665,27 @@ class Tools(unittest.TestCase):
         with mock.patch.object(n, "investigate", lambda *a, **k: report):
             out = tools.check_neighborhood("cafe", property_id=1)
             self.assertEqual(out["decisions"][0]["evidence_records"], 1)
-            self.assertEqual(tools.suggest_industries(property_id=1)["ranked"][0]["top_reason"], "r")
+            self.assertEqual(tools.suggest_industries(property_id=1)["can_go_here"][0]["top_reason"], "r")
             self.assertEqual(tools.get_evidence("cafe", fact="cafe.", property_id=1)["total"], 1)
             with self.assertRaises(ValueError):
                 tools.check_neighborhood("cafe")
         tools._run.cache_clear()
+
+    def test_suggest_splits_hostable_from_demand_gaps(self):
+        def d(key, verdict, status, score=2):
+            return {"industry": key, "use": key, "verdict": verdict, "headline": "", "insight": None, "score": score,
+                    "reasons": [{"signal": "s", "stance": 1, "reason": key}], "unknown": [],
+                    "lookalike_percentile": 50, "lookalike_validated": True,
+                    "building": {"status": status, "capacity": None, "reasons": [], "unknowns": [], "verify": []}}
+        report = {"site": {"label": "X"}, "building_checked": True, "not_modelled": {}, "elapsed_ms": 1,
+                  "decisions": [d("childcare", "supported", "check"), d("cafe", "supported", "no"),
+                                d("bar", "weak", "no", -2)]}
+        tools._run.cache_clear()
+        with mock.patch.object(n, "investigate", lambda *a, **k: report):
+            out = tools.suggest_industries(property_id=1)
+        tools._run.cache_clear()
+        self.assertEqual([r["industry"] for r in out["can_go_here"]], ["childcare"])
+        self.assertEqual([r["industry"] for r in out["demand_gaps_this_building_cannot_host"]], ["cafe"])
 
 
 if __name__ == "__main__":

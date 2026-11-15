@@ -25,7 +25,7 @@
 
   const VERDICT = { supported: "Supported", mixed: "Mixed", weak: "Weak", unknown: "Unknown" };
   const AGENT = {
-    planner: "Planner", site: "Site", residents: "Who lives here", competitors: "Who already serves it",
+    planner: "Planner", site: "Site", building: "Can the building host it?", residents: "Who lives here", competitors: "Who already serves it",
     momentum: "What is moving in", lookalike: "Lookalike check", coordinator: "Coordinator", narrator: "Narrator",
   };
 
@@ -64,6 +64,7 @@
     add(head, "strong", d.use);
     add(card, "p", d.headline);
     if (d.insight) add(card, "p", d.insight, "hood-insight");
+    if (d.building) buildingLine(card, d.building);
     const list = add(card, "ul", undefined, "hood-reasons");
     for (const r of d.reasons) {
       const li = add(list, "li", undefined, r.stance > 0 ? "up" : r.stance < 0 ? "down" : "flat");
@@ -72,6 +73,20 @@
     }
     for (const r of d.unknown) add(list, "li", `? ${r.reason}`, "unknown");
     return card;
+  }
+
+  const BUILDING = { fits: "Building: fits", check: "Building: fits if checks pass", no: "Building: can't host" };
+
+  function buildingLine(parent, b) {
+    const box = add(parent, "details", undefined, `hood-building hood-building-${b.status}`);
+    const lead = b.status === "no" ? b.reasons.find((r) => /below|Not a typical|Residential|not a commercial/.test(r)) || b.reasons[0]
+      : b.status === "check" ? b.unknowns[0] : (b.capacity ? `room for ${b.capacity}` : b.reasons[b.reasons.length - 1]);
+    add(box, "summary", `${BUILDING[b.status]}${lead ? ` · ${lead}` : ""}`);
+    const ul = add(box, "ul", undefined, "small");
+    for (const r of b.reasons) add(ul, "li", r);
+    for (const r of b.unknowns) add(ul, "li", `? ${r}`, "muted");
+    if (b.verify?.length) add(ul, "li", `Verify: ${b.verify.join("; ")}`, "muted");
+    add(box, "p", b.basis, "small muted");
   }
 
   function evaluationBox(parent, ev) {
@@ -202,19 +217,38 @@
     }
     const look = report.trace.find((s) => s.agent === "lookalike")?.per_industry || {};
     if (report.mode === "suggest") {
-      const counts = {};
-      for (const d of report.decisions) counts[d.verdict] = (counts[d.verdict] || 0) + 1;
+      const status = (d) => d.building?.status;
+      const promising = (d) => d.verdict === "supported" || (d.verdict === "mixed" && d.score > 0);
       add(out, "h3", `${report.decisions.length} businesses checked around ${report.site.label}`);
-      add(out, "p", Object.entries(counts).map(([v, k]) => `${k} ${VERDICT[v].toLowerCase()}`).join(" · "), "muted");
-      const best = report.decisions.filter((d) => d.verdict === "supported" || (d.verdict === "mixed" && d.score > 0));
-      const grid = add(out, "div", undefined, "hood-grid");
-      for (const d of best) decisionCard(grid, d);
-      const rest = report.decisions.filter((d) => !best.includes(d));
-      if (rest.length) {
-        const more = add(out, "details", undefined, "hood-rest");
-        add(more, "summary", `Mixed with no net support, weak, or not enough evidence (${rest.length})`);
-        const grid2 = add(more, "div", undefined, "hood-grid");
-        for (const d of rest) decisionCard(grid2, d);
+      if (report.building_checked) {
+        const here = report.decisions.filter((d) => status(d) !== "no");
+        const best = here.filter(promising);
+        add(out, "p", `${here.length} could go in this ${report.suite ? "suite" : "building"} `
+          + `(physical checks first), ${best.length} with net neighborhood support.`, "muted");
+        add(out, "h4", "Can go here, best supported first");
+        const grid = add(out, "div", undefined, "hood-grid");
+        for (const d of best) decisionCard(grid, d);
+        if (!best.length) add(grid, "p", "No business that fits this space has net neighborhood support.", "muted");
+        const otherHere = here.filter((d) => !promising(d));
+        if (otherHere.length) {
+          const more = add(out, "details", undefined, "hood-rest");
+          add(more, "summary", `Also fits here, but no net neighborhood support (${otherHere.length})`);
+          const g = add(more, "div", undefined, "hood-grid");
+          for (const d of otherHere) decisionCard(g, d);
+        }
+        const gaps = report.decisions.filter((d) => status(d) === "no" && promising(d));
+        if (gaps.length) {
+          add(out, "h4", "Demand gaps nearby that this building can't host");
+          add(out, "p", "Useful to know, not options for this space.", "small muted");
+          const g = add(out, "div", undefined, "hood-grid");
+          for (const d of gaps) decisionCard(g, d);
+        }
+        const rest = report.decisions.filter((d) => status(d) === "no" && !promising(d));
+        if (rest.length) add(out, "p", `Can't go here and no demand case: ${rest.map((d) => d.use).join(", ")}.`, "small muted");
+      } else {
+        add(out, "p", "Building not checked (no CoStar property): ranked by neighborhood demand only.", "muted");
+        const grid = add(out, "div", undefined, "hood-grid");
+        for (const d of report.decisions.filter(promising)) decisionCard(grid, d);
       }
       const nm = Object.keys(report.not_modelled || {});
       if (nm.length) add(out, "p", `Not checked (demand isn't driven by nearby residents): ${nm.join(", ")}.`, "small muted");
@@ -236,6 +270,7 @@
     if ($("city")?.value !== "Houston") { status.textContent = "Neighborhood data covers the Houston area only."; return; }
     const use = mode === "suggest" ? "suggest" : ($("hood-text").value.trim() || picker.value || $("use").value);
     const params = new URLSearchParams({ property_id: id, use });
+    if ($("suite")?.value) params.set("suite", $("suite").value);
     if ($("hood-explain").checked) params.set("explain", "1");
     for (const b of panel.querySelectorAll("button")) b.disabled = true;
     out.replaceChildren();

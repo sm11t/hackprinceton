@@ -34,17 +34,20 @@ import neighborhood_tools as tools  # noqa: E402
 SYSTEM = (
     "You help a small-business owner decide whether a neighborhood in the Houston area supports their business. "
     "Always use the tools: resolve the business to an industry, check the site, and if asked for alternatives, "
-    "suggest industries. Never compute or estimate numbers yourself; quote only numbers that tools returned. "
+    "suggest industries. A business the building cannot host is not an option for this building, even if "
+    "demand is good; say so and name what blocks it. Never compute or estimate numbers yourself; quote only numbers that tools returned. "
     "Report unknowns as unknown. Answer in at most 5 short sentences."
 )
 
 
 def langchain_tools(site, kit=None):
     """Wrap the plain tools as LangChain StructuredTools, with the site bound so the model cannot change it."""
-    bound = {"property_id": site.get("property_id"), "address": site.get("address"), "kit": kit}
+    bound = {"property_id": site.get("property_id"), "address": site.get("address"), "kit": kit,
+             "suite": site.get("suite")}
     out = []
     for name, (fn, schema) in tools.TOOLS.items():
-        properties = {k: v for k, v in schema.get("properties", {}).items() if k not in ("property_id", "address")}
+        properties = {k: v for k, v in schema.get("properties", {}).items()
+                      if k not in ("property_id", "address", "suite")}
         args_schema = {"type": "object", "properties": properties,
                        "required": [r for r in schema.get("required", []) if r in properties]}
         takes_site = "property_id" in schema.get("properties", {})
@@ -104,9 +107,11 @@ def main():
     parser.add_argument("question")
     parser.add_argument("--property-id", type=int)
     parser.add_argument("--address")
+    parser.add_argument("--suite")
     parser.add_argument("--kit", type=Path)
     args = parser.parse_args()
-    result = ask(args.question, {"property_id": args.property_id, "address": args.address}, args.kit)
+    result = ask(args.question, {"property_id": args.property_id, "address": args.address, "suite": args.suite},
+                 args.kit)
     for step in result["trace"]:
         print(f"  [{step['agent']}] {step['ms']} ms: {step['summary']}")
     print("\n" + (result["answer"] if result["accepted"] else

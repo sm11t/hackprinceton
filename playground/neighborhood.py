@@ -6,6 +6,8 @@ runs once per site and covers every industry asked about:
 
   planner      maps the request to industries (registry + synonyms, code; an LLM can be layered on)
   site         resolves the address or CoStar property to a point
+  building     can this building (or suite) host each business? CoStar type, listed sizes and
+               ceiling vs the registry's space needs; the hard gate before demand (properties only)
   residents    "Who lives here": ACS 2020-2024 vs 2015-2019 around the site
   competitors  "Who already serves it": OpenStreetMap facilities within the radius
   momentum     "What is moving in": CoStar kit tenant arrivals / departures by industry
@@ -47,7 +49,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from neighborhood_industries import INDUSTRIES, NOT_RESIDENT_DRIVEN, industries_for_tenant, resolve
+from neighborhood_industries import (INDUSTRIES, NOT_RESIDENT_DRIVEN, RESIDENTIAL_TYPES, SPACE_SOURCES,
+                                     industries_for_tenant, resolve)
 from reconcile import record
 
 ROOT = Path(__file__).resolve().parent
@@ -1373,6 +1376,173 @@ def property_pin(property_id, kit=""):
     return address
 
 
+PROPERTY_TYPES = {"1": "hospitality", "2": "industrial", "3": "land", "5": "office", "6": "retail", "7": "flex",
+                  "8": "sports & entertainment", "9": "mixed-use", "10": "specialty", "11": "multifamily",
+                  "13": "healthcare", "15": "residential", "16": "residential"}
+SUBTYPES = {"5": "auto repair shop", "7": "bar", "8": "car wash", "9": "convenience store", "10": "daycare center",
+            "11": "drug store", "12": "fast-food restaurant", "18": "restaurant", "19": "service station",
+            "23": "supermarket", "25": "veterinarian or kennel", "30": "rehabilitation center", "47": "self storage",
+            "63": "loft or creative office", "64": "medical office", "90": "health club"}
+
+
+def space_value(space):
+    """Same key as the /maximo suite picker: the suite name, or listing:<id>:<size> for unnamed spaces."""
+    suite = str(space.get("suite") or "").strip()
+    return suite or (f"listing:{space['listing_id']}:{space['square_feet']:g}" if space.get("square_feet") else None)
+
+
+@lru_cache(maxsize=512)
+def building_facts(property_id, kit=""):
+    """What CoStar records about the building and its listed spaces, cached on disk."""
+    path = CACHE / "building-facts.json"
+    saved = json.loads(path.read_text()) if path.exists() else {}
+    if str(property_id) in saved:
+        return saved[str(property_id)]
+    from reconcile import costar_ceiling_ft
+    from space_fit import building_numbers, listed_spaces, load_property
+    kit_file = Path(kit) if kit else kit_path()
+    if not kit_file:
+        raise ValueError("CoStar kit not found; cannot check the building.")
+    password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+    prop = load_property(kit_file, property_id, password)
+    ceiling, ceiling_source = costar_ceiling_ft(prop)
+    numbers = building_numbers(prop)
+    facts = {"property_id": property_id, "type": str(prop.get("propertyType") or ""),
+             "subtype": str(prop.get("propertySubtype") or ""), "gba": prop.get("grossBuildingAreaSquareFeet"),
+             "stories": prop.get("numStoriesAboveGrade"), "ceiling_ft": ceiling, "ceiling_source": ceiling_source,
+             "drive_in_bays": numbers.get("drive_in_bays"), "docks": numbers.get("docks"),
+             "listed": [{"value": space_value(sp), "suite": sp.get("suite"), "sf": sp.get("square_feet")}
+                        for sp in listed_spaces(kit_file, property_id, password)]}
+    saved[str(property_id)] = facts
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(saved))
+    return facts
+
+
+FIT_ORDER = {"fits": 0, "check": 1, "no": 2}
+
+
+def building_fit(key, facts, suite=None):
+    """Can this building (or suite) host the business? Hard facts from CoStar against the registry's needs.
+
+    Returns status fits / check / no, the reasons, what is unknown, what to verify, and a
+    capacity where a sourced per-unit area exists (courts, children).
+    """
+    need = INDUSTRIES[key]["space"]
+    status, reasons, unknowns = "fits", [], []
+
+    def fail(reason):
+        nonlocal status
+        status = "no"
+        reasons.append(reason)
+    kind = PROPERTY_TYPES.get(facts["type"], "unknown-type")
+    article = "an" if kind[:1] in "aeiou" else "a"
+    if facts["type"] in RESIDENTIAL_TYPES:
+        return {"status": "no", "scope": "whole building", "space_sf": None, "capacity": None,
+                "reasons": [f"Residential ({kind}) building: not a commercial space"], "unknowns": [],
+                "verify": [], "sources": [], "basis": "CoStar property type."}
+    if facts["subtype"] in need["subtypes"]:
+        sub = SUBTYPES.get(facts["subtype"], "matching")
+        reasons.append(f"Built as {'an' if sub[:1] in 'aeiou' else 'a'} {sub}")
+    elif facts["type"] in need["types"]:
+        reasons.append(f"{kind.capitalize()} buildings commonly host this")
+    else:
+        fail(f"Not a typical fit for {article} {kind} building")
+    # Size: the chosen suite, else the listed spaces, else the whole building.
+    candidates = [sp for sp in facts["listed"] if suite and sp["value"] == suite]
+    scope = (f"suite {candidates[0]['suite']}" if candidates and candidates[0].get("suite")
+             else "the chosen listed space" if candidates else None)
+    if not candidates and facts["listed"]:
+        candidates, scope = facts["listed"], "listed spaces"
+    if not candidates:
+        candidates, scope = [{"sf": facts["gba"]}], "whole building"
+        unknowns.append("No space is listed for lease in CoStar: availability unknown, sizes use the whole building")
+    sizes = sorted({sp["sf"] for sp in candidates if sp.get("sf")})
+    lo, hi = need["min_sf"], need.get("max_sf")
+    space_sf = None
+    if not sizes:
+        unknowns.append("Size not recorded")
+    else:
+        good = [v for v in sizes if v >= lo and (not hi or v <= hi)]
+        big = [v for v in sizes if hi and v > hi]
+        typical = f"typical {lo:,}-{hi:,} sq ft" if hi else f"{lo:,} sq ft minimum"
+        if good:
+            space_sf = good[-1]
+            where = f"the {space_sf:,.0f} sq ft listed space" if scope == "listed spaces" else f"{space_sf:,.0f} sq ft ({scope})"
+            reasons.append(f"{where[0].upper()}{where[1:]} " + (f"is within the {typical}" if hi else f"meets the {typical}"))
+        elif big:
+            space_sf = big[0]
+            unknowns.append(f"Smallest option is {space_sf:,.0f} sq ft ({scope}), above the {typical}: only works "
+                            "if part of it can be leased")
+        else:
+            space_sf = sizes[-1]
+            fail(f"Largest option is {space_sf:,.0f} sq ft ({scope}), below the {typical}")
+    if need.get("min_clear_ft"):
+        if facts["ceiling_ft"] is None:
+            unknowns.append(f"Clear height not recorded; needs {need['min_clear_ft']} ft")
+        elif facts["ceiling_ft"] < need["min_clear_ft"]:
+            fail(f"CoStar ceiling {facts['ceiling_ft']:g} ft is below the {need['min_clear_ft']} ft needed")
+        else:
+            reasons.append(f"CoStar ceiling {facts['ceiling_ft']:g} ft meets the {need['min_clear_ft']} ft needed")
+    if need.get("ground_floor") and (facts["stories"] or 1) > 1 and scope != "whole building":
+        unknowns.append(f"Needs ground-floor space; the building has {facts['stories']} stories, confirm the floor")
+    if need.get("drive_in") and not facts["drive_in_bays"]:
+        unknowns.append("No grade-level drive-in bays recorded")
+    capacity = None
+    if need.get("per_unit_sf") and space_sf and status != "no":
+        units = int(space_sf // need["per_unit_sf"])
+        noun = need["unit"].split(" (")[0]
+        plural = {"child": "children"}.get(noun, noun + "s")
+        capacity = f"up to {units} {noun if units == 1 else plural} in {space_sf:,.0f} sq ft, by area alone"
+        reasons.append(f"Room for {capacity} ({need['per_unit_sf']:,} sq ft each"
+                       + (f"; {need['unit'].split('(')[1].rstrip(')')}" if "(" in need["unit"] else "")
+                       + "; columns and layout not checked)")
+    if need.get("outdoor_sf_per_unit"):
+        unknowns.append(f"Needs {need['outdoor_sf_per_unit']} sq ft of fenced outdoor play space per child using it "
+                        "at one time; CoStar does not record outdoor space")
+    if status == "fits" and unknowns:
+        status = "check"
+    sourced = [SPACE_SOURCES[k] for k in need.get("sources", [])]
+    return {"status": status, "scope": scope, "space_sf": space_sf, "capacity": capacity, "reasons": reasons,
+            "unknowns": unknowns, "verify": need["checks"], "sources": sourced,
+            "basis": need.get("note") or "Size range is a planning assumption (typical small operator); CoStar "
+                                         "building type, listed space sizes and ceiling height are recorded facts."}
+
+
+def building_agent(property_id, industries, kit=None, suite=None):
+    """Can this building host each business? The hard gate before demand (CoStar facts vs registry needs)."""
+    facts = building_facts(int(property_id), str(kit or ""))
+    kind = PROPERTY_TYPES.get(facts["type"], "unknown type")
+
+    def one(key):
+        fit = building_fit(key, facts, suite)
+        line = "; ".join(fit["reasons"] + fit["unknowns"])
+        return {"building": fit, "summary": f"{fit['status']}: {line}",
+                "findings": [record(f"{key}.building_fit", {"status": fit["status"], "space_sf": fit["space_sf"],
+                                                           "capacity": fit["capacity"]},
+                                    "costar", f"property-{property_id}", None, 0.7 if fit["sources"] else 0.5, None,
+                                    "unknown" if fit["status"] == "check" else "agrees",
+                                    note=f"{line}. {fit['basis']}")]}
+    results = per_industry(industries, one)
+    counts = {k: sum(1 for v in results.values() if (v.get("building") or {}).get("status") == k) for k in FIT_ORDER}
+    shared = record("building_facts", {k: facts[k] for k in ("type", "subtype", "gba", "stories", "ceiling_ft")}
+                    | {"listed_spaces": len(facts["listed"])}, "costar", f"property-{property_id}", None, 0.8, None,
+                    "agrees", note=f"CoStar: {kind} building, {facts['gba'] or 0:,.0f} sq ft, "
+                                   f"{facts['stories'] or '?'} stories, ceiling "
+                                   f"{facts['ceiling_ft'] or 'not recorded'} ft, {len(facts['listed'])} listed spaces.")
+    if len(industries) == 1:
+        summary = results[industries[0]].get("summary", "")
+    else:
+        summary = (f"{kind.capitalize()} building: {counts['fits']} businesses fit, {counts['check']} need a check, "
+                   f"{counts['no']} can't go here.")
+    return {"sources": [{"name": "CoStar hackathon kit: property and listed spaces", "url": None, "retrieved_at": None,
+                         "cached": True, "note": f"Property {property_id}"}],
+            "findings": [shared] + flatten(results), "per_industry": results, "confidence": 0.6,
+            "facts": facts, "summary": summary,
+            "handoff": "Hard gate: the coordinator ranks businesses the building can host first; the rest are "
+                       "shown as demand gaps this building cannot serve."}
+
+
 def site_agent(address=None, property_id=None, kit=None):
     """Resolve the request to one point: a CoStar property pin, or a Census-geocoded address."""
     if property_id:
@@ -1580,7 +1750,8 @@ def planner_step(request):
         summary = f"'{request}': {p['how']}" + (f" ({next(iter(p['not_modelled'].values()))})"
                                                if p["not_modelled"] else "")
     return {"summary": summary, "plan": p, "findings": [],
-            "handoff": "Site first; then each specialist covers every planned industry."}
+            "handoff": "Site first, then the building gate (for a CoStar property), then each demand "
+                       "specialist covers every planned business."}
 
 
 SPECIALISTS = [
@@ -1593,8 +1764,13 @@ SPECIALISTS = [
 TIERS = {"supported": 0, "mixed": 1, "weak": 2, "unknown": 3}
 
 
-def investigate(request, address=None, property_id=None, kit=None, explain=False):
-    """Run the pipeline for a request: an industry key/label/free text, a catalog use, or 'suggest'."""
+def investigate(request, address=None, property_id=None, kit=None, explain=False, suite=None):
+    """Run the pipeline for a request: an industry key/label/free text, a catalog use, or 'suggest'.
+
+    Order: planner -> site -> building (hard gate, CoStar properties only) -> demand specialists
+    -> coordinator. Demand is computed for every business so the ones this building cannot host
+    can still be shown as demand gaps nearby.
+    """
     started = time.perf_counter()
     trace = []
     planned = run_agent(trace, "planner", "Maps the request to industries (registry + synonyms, code)",
@@ -1604,6 +1780,12 @@ def investigate(request, address=None, property_id=None, kit=None, explain=False
     site = run_agent(trace, "site", "Resolves the address or CoStar property to one point",
                      site_agent, {"address": address, "property_id": property_id, "kit": kit})
     decisions = []
+    building = None
+    if site["status"] == "ok" and industries and property_id:
+        building = run_agent(trace, "building", "Can this building host it? CoStar type, listed space sizes and "
+                                                "ceiling vs each business's needs (hard gate before demand)",
+                             building_agent, {"property_id": property_id, "industries": industries, "kit": kit,
+                                              "suite": suite})
     if site["status"] == "ok" and industries:
         lat, lon = site["point"]["lat"], site["point"]["lon"]
         steps = []
@@ -1616,8 +1798,12 @@ def investigate(request, address=None, property_id=None, kit=None, explain=False
         for key in industries:
             signals = [st["per_industry"][key]["signal"] for st in steps
                        if ((st.get("per_industry") or {}).get(key) or {}).get("signal")]
-            decisions.append(coordinate(key, signals))
-        decisions.sort(key=lambda d: (TIERS[d["verdict"]], -d["score"],
+            decision = coordinate(key, signals)
+            decision["building"] = ((building or {}).get("per_industry") or {}).get(key, {}).get("building")
+            decisions.append(decision)
+        # The building only separates "can host" from "can't host"; among those it can host, demand decides.
+        decisions.sort(key=lambda d: ((d["building"] or {}).get("status") == "no", TIERS[d["verdict"]], -d["score"],
+                                      FIT_ORDER.get((d["building"] or {}).get("status"), 1),
                                       -(d["lookalike_percentile"] or 0) if d["lookalike_validated"] else 1))
         counts = {v: sum(d["verdict"] == v for d in decisions) for v in TIERS}
         trace.append({"agent": "coordinator", "role": "Combines each industry's signals into a verdict",
@@ -1638,7 +1824,7 @@ def investigate(request, address=None, property_id=None, kit=None, explain=False
                           for k, v in step["inputs"].items() if k != "kit"}
     return {
         "mode": "suggest" if request == "suggest" else "validate", "request": request,
-        "site": site.get("point"), "area": AREA_NAME, "radius_mi": RADIUS_MI,
+        "site": site.get("point"), "suite": suite, "building_checked": building is not None, "area": AREA_NAME, "radius_mi": RADIUS_MI,
         "decisions": decisions, "not_modelled": p.get("not_modelled", {}),
         "unmatched": p.get("unmatched"), "candidates": p.get("candidates", []),
         "narration": narration,
@@ -1680,7 +1866,7 @@ def warm(kit=None):
 def bench(property_ids=(13890701, 23296), kit=None):
     """Time requests after a restart: the first one runs with empty memory caches (disk caches present)."""
     for fn in (area_profile, facilities, lookalike_model, kit_tenancies, tract_table, tract_index, reference_profiles,
-               reference_values, acs, tracts, property_pin, old_on_new):
+               reference_values, acs, tracts, property_pin, old_on_new, building_facts):
         fn.cache_clear()
     rows = []
     for round_ in ("first", "repeat"):
@@ -1717,6 +1903,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--address")
     parser.add_argument("--property-id", type=int)
+    parser.add_argument("--suite", help="suite value from the /maximo picker (e.g. A, or listing:<id>:<sf>)")
     parser.add_argument("--use", default="indoor pickleball",
                         help="an industry key, label or description (e.g. 'bouldering gym'), or 'suggest'")
     parser.add_argument("--kit", type=Path)
@@ -1739,7 +1926,7 @@ def main():
         for row in bench(kit=args.kit):
             print(json.dumps(row))
         return
-    report = investigate(args.use, args.address, args.property_id, args.kit, args.explain)
+    report = investigate(args.use, args.address, args.property_id, args.kit, args.explain, args.suite)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
         return
@@ -1752,6 +1939,9 @@ def main():
               + ", ".join(spec["label"] for spec in INDUSTRIES.values()))
     for d in report["decisions"]:
         print(f"\n{d['use']}: {d['verdict'].upper()} - {d['headline']}")
+        if d.get("building"):
+            b = d["building"]
+            print(f"  building: {b['status'].upper()} - " + "; ".join(b["reasons"] + b["unknowns"]))
         if d["insight"]:
             print(f"  {d['insight']}")
         for r in d["reasons"]:

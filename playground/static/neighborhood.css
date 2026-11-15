@@ -35,3 +35,9 @@
 .hood-table td:nth-child(2) { max-width: 260px; overflow-wrap: anywhere; }
 .hood .hood-actions label:has(select), .hood .hood-actions label:has(input[type="text"]) { display: grid; gap: 4px; font-weight: 600; flex: 1 1 220px; }
 .hood-rest { margin: 10px 0; }
+.hood-building { margin: 6px 0; padding: 4px 8px; border-radius: 6px; background: #f3f5f2; }
+.hood-building summary { color: inherit; font-weight: 600; }
+.hood-building-fits { border-left: 3px solid #6c986b; }
+.hood-building-check { border-left: 3px solid #c99a3a; }
+.hood-building-no { border-left: 3px solid #b0461c; }
+.hood h4 { margin: 14px 0 6px; }

@@ -427,8 +427,10 @@ def main():
                     address = params.get("address", [""])[0].strip()
                     if not (property_id.isdigit() or 5 <= len(address) <= 200):
                         raise ValueError("Give a CoStar property_id or a street address.")
+                    suite = params.get("suite", [""])[0].strip()[:80] or None
                     body = neighborhood.investigate(use, address or None, int(property_id) if property_id else None,
-                                                    kit=args.kit, explain=params.get("explain", ["0"])[0] == "1")
+                                                    kit=args.kit, explain=params.get("explain", ["0"])[0] == "1",
+                                                    suite=suite)
                     self.send(json.dumps(body, default=str).encode(), "application/json")
                 except ValueError as error:
                     self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)

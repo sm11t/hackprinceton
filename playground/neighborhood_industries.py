@@ -331,3 +331,90 @@ def resolve(text):
     if not ranked:
         return None, "no synonym matched", []
     return ranked[0], f"synonym match ({scores[ranked[0]]:.2f})", ranked[:3]
+
+
+# --- What a building must offer ---------------------------------------------------------
+# CoStar propertyType codes (kit schemas/enums.json): 1 Hospitality, 2 Industrial, 3 Land,
+# 5 Office, 6 GeneralRetail, 7 Flex, 8 SportsAndEntertainment, 9 MixedUse, 10 Specialty,
+# 11 Multifamily, 13 Healthcare, 15 Residential, 16 Homes. Subtypes name a building built for
+# one business (10 DayCareCenter, 18 Restaurant, 90 HealthClub, ...).
+#
+# Sizes are planning assumptions (typical small-operator ranges) unless `sources` says
+# otherwise; they screen out obvious misfits, they do not replace a measured plan.
+SPACE_SOURCES = {
+    "usa-pickleball-rule-3a3": "https://www.mypickleballconnect.com/guides/pickleball-court-dimensions/",
+    "pickleball-ceiling-guidance": "https://millersports.com/pickleball-court-size/",
+    "tx-746-indoor": "https://regulations.justia.com/states/texas/title-26/part-1/chapter-746/subchapter-t/division-1",
+    "tx-746-4301-outdoor": "https://regulations.justia.com/states/texas/title-26/part-1/chapter-746/subchapter-t/"
+                           "division-2/section-746-4301",
+}
+RESIDENTIAL_TYPES = {"11", "15", "16"}
+STOREFRONT = {"6", "9"}  # general retail and mixed use
+
+SPACE = {
+    "indoor_pickleball": {"types": {"2", "7", "8", "6", "9"}, "subtypes": set(),
+                          "min_sf": 5400, "per_unit_sf": 1800, "unit": "court", "min_clear_ft": 18,
+                          "sources": ["usa-pickleball-rule-3a3", "pickleball-ceiling-guidance"],
+                          "note": "1,800 sq ft playing area per court (USA Pickleball 30x60 ft minimum); 3 courts "
+                                  "minimum is our business assumption; 18 ft clear is common guidance, not an official rule.",
+                          "checks": ["Columns inside the courts and run-off", "Floor flatness and surface"]},
+    "fitness_gym": {"types": {"2", "7", "6", "5", "9", "8"}, "subtypes": {"90"}, "min_sf": 2500, "max_sf": 40000,
+                    "checks": ["Floor load for weights", "HVAC, showers and peak parking"]},
+    "yoga_pilates": {"types": {"6", "9", "5", "7"}, "subtypes": {"90"}, "min_sf": 1000, "max_sf": 4000,
+                     "checks": ["Quiet, column-free studio room", "Showers or changing rooms"]},
+    "martial_arts": {"types": {"6", "9", "7", "5", "2"}, "subtypes": {"90"}, "min_sf": 1200, "max_sf": 6000,
+                     "checks": ["Mat area free of columns", "Changing rooms"]},
+    "dance_studio": {"types": {"6", "9", "7", "5"}, "subtypes": set(), "min_sf": 1200, "max_sf": 5000,
+                     "checks": ["Sprung floor and mirrors", "Sound isolation from neighbours"]},
+    "climbing_gym": {"types": {"2", "7", "8"}, "subtypes": set(), "min_sf": 8000, "min_clear_ft": 15,
+                     "checks": ["Wall anchoring into the structure", "Fall-zone flooring"]},
+    "childcare": {"types": {"6", "9", "5", "13", "7"}, "subtypes": {"10"}, "min_sf": 2500, "max_sf": 15000,
+                  "per_unit_sf": 30, "unit": "child (indoor minimum, before deducting halls, restrooms, offices)",
+                  "outdoor_sf_per_unit": 80,
+                  "ground_floor": True, "sources": ["tx-746-indoor", "tx-746-4301-outdoor"],
+                  "note": "Texas requires 30 sq ft of indoor activity space per child and 80 sq ft of outdoor "
+                          "activity space per child using it at one time (26 TAC ch. 746). Center size range is "
+                          "our assumption.",
+                  "checks": ["Fenced outdoor play area on or next to the site", "Licensing inspection and landlord consent"]},
+    "tutoring": {"types": {"5", "6", "9"}, "subtypes": set(), "min_sf": 800, "max_sf": 3500,
+                 "checks": ["Classrooms with daylight", "After-school pickup parking"]},
+    "restaurant": {"types": STOREFRONT, "subtypes": {"18"}, "min_sf": 1500, "max_sf": 8000, "ground_floor": True,
+                   "checks": ["Kitchen hood and exhaust route", "Grease interceptor, gas and 3-phase power"]},
+    "fast_food": {"types": STOREFRONT, "subtypes": {"12", "18"}, "min_sf": 1000, "max_sf": 4500, "ground_floor": True,
+                  "checks": ["Drive-through lane if needed", "Hood, grease interceptor"]},
+    "cafe": {"types": STOREFRONT | {"5"}, "subtypes": {"18"}, "min_sf": 600, "max_sf": 3000, "ground_floor": True,
+             "checks": ["Water and drain for espresso and dish", "Street visibility"]},
+    "bar": {"types": STOREFRONT | {"8"}, "subtypes": {"7", "18"}, "min_sf": 1500, "max_sf": 6000, "ground_floor": True,
+            "checks": ["TABC licensing and distance rules", "Occupant load, restrooms, sound"]},
+    "medical_clinic": {"types": {"13", "5", "6", "9"}, "subtypes": {"64"}, "min_sf": 1500, "max_sf": 12000,
+                       "checks": ["Exam-room plumbing", "Accessible entry and parking"]},
+    "dental": {"types": {"13", "5", "6", "9"}, "subtypes": {"64"}, "min_sf": 1200, "max_sf": 4500,
+               "checks": ["Plumbing, compressed air and vacuum to each chair", "X-ray shielding"]},
+    "pharmacy": {"types": {"6", "13", "9"}, "subtypes": {"11"}, "min_sf": 1000, "max_sf": 15000, "ground_floor": True,
+                 "checks": ["Texas State Board of Pharmacy licensing", "Drive-through window if needed"]},
+    "physical_therapy": {"types": {"13", "5", "6", "9", "7"}, "subtypes": {"64", "30"}, "min_sf": 1500, "max_sf": 6000,
+                         "checks": ["Open gym area plus treatment rooms", "Accessible entry"]},
+    "veterinary": {"types": {"6", "7", "13", "9"}, "subtypes": {"25"}, "min_sf": 2000, "max_sf": 8000,
+                   "checks": ["Kennel ventilation and noise", "X-ray shielding"]},
+    "salon_barber": {"types": STOREFRONT | {"5"}, "subtypes": set(), "min_sf": 500, "max_sf": 3000,
+                     "checks": ["Shampoo-bowl plumbing", "Ventilation for chemicals"]},
+    "laundromat": {"types": STOREFRONT, "subtypes": set(), "min_sf": 1500, "max_sf": 5000, "ground_floor": True,
+                   "checks": ["Water supply, large drains and gas or 3-phase power for dryers", "Venting"]},
+    "pet_services": {"types": {"6", "9", "7", "2"}, "subtypes": {"25"}, "min_sf": 1500, "max_sf": 10000,
+                     "checks": ["Wash-station drainage", "Noise and outdoor relief area"]},
+    "coworking": {"types": {"5", "9", "7"}, "subtypes": {"63"}, "min_sf": 3000, "max_sf": 30000,
+                  "checks": ["Daylight, meeting rooms and restrooms", "Network and after-hours access"]},
+    "grocery": {"types": STOREFRONT, "subtypes": {"23"}, "min_sf": 5000, "max_sf": 60000, "ground_floor": True,
+                "checks": ["Loading for deliveries", "Refrigeration power"]},
+    "convenience": {"types": STOREFRONT, "subtypes": {"9", "19"}, "min_sf": 1500, "max_sf": 5000, "ground_floor": True,
+                    "checks": ["Corner or high-traffic frontage", "Alcohol/tobacco permits"]},
+    "auto_repair": {"types": {"2", "7", "6"}, "subtypes": {"5"}, "min_sf": 2000, "max_sf": 15000, "ground_floor": True,
+                    "drive_in": True, "checks": ["Grade-level bays and lifts", "Oil separator and hazardous-waste storage"]},
+    "car_wash": {"types": {"6", "10", "3"}, "subtypes": {"8"}, "min_sf": 2000, "ground_floor": True,
+                 "checks": ["Drive-through lot and queue length", "Water reclaim and drainage"]},
+    "self_storage": {"types": {"2", "7", "10"}, "subtypes": {"47"}, "min_sf": 20000,
+                     "checks": ["Floor load for mezzanine units", "Drive-up access and security"]},
+}
+
+for key, spec in INDUSTRIES.items():
+    spec["space"] = SPACE[key]
