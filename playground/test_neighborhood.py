@@ -183,6 +183,68 @@ class Competitors(unittest.TestCase):
         self.assertIn("underserved", out["signal"]["reason"])
 
 
+class Momentum(unittest.TestCase):
+    def test_categorize(self):
+        self.assertEqual(n.categorize("JETSET Modern Pilates"), "fitness_recreation")
+        self.assertEqual(n.categorize("Happy Kids Preschool"), "childcare")
+        self.assertEqual(n.categorize("Golf Services Group"), "other")       # services firm, not a venue
+        self.assertEqual(n.categorize("Pinnacle - Primrose at Heritage Park Apartments"), "other")
+        self.assertEqual(n.categorize("The Lincoln Law Firm"), "other")
+        self.assertEqual(n.categorize("Taqueria Arandas"), "food")
+
+    def test_kit_tenancies_arrival_and_departure_rules(self):
+        with tempfile.TemporaryDirectory() as kit, tempfile.TemporaryDirectory() as cache, \
+                mock.patch.object(n, "CACHE", Path(cache)):
+            data = Path(kit) / "data"
+            data.mkdir()
+            (data / "commercial-property.jsonl").write_text(json.dumps(
+                {"id": 1, "primaryAddress": {"state": "TX", "latitude": 29.8, "longitude": -95.4}}) + "\n")
+            (data / "company-detail.jsonl").write_text(
+                json.dumps({"id": 10, "name": "True North Yoga", "profile": {"industryType": 21}}) + "\n")
+            rows = [  # first lease, then a renewal: one arrival, and the renewal is not a departure
+                {"id": 100, "propertyId": 1, "tenantLocationId": 10, "moveInDate": "2020-01-01",
+                 "toDate": "2024-12-31", "expirationReason": 7},
+                {"id": 101, "propertyId": 1, "tenantLocationId": 10, "fromDate": "2025-01-01",
+                 "toDate": "2026-03-01", "expirationReason": 4},
+            ]
+            (data / "location-occupancy.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            n.kit_tenancies.cache_clear()
+            out = {r["id"]: r for r in n.kit_tenancies(kit)}
+            n.kit_tenancies.cache_clear()
+        self.assertEqual(out[100]["arrival"], "2020-01-01")
+        self.assertIsNone(out[100]["departure"])        # renewal
+        self.assertIsNone(out[101]["arrival"])          # same tenant, same building
+        self.assertEqual(out[101]["departure"], "2026-03-01")
+        self.assertEqual(out[100]["category"], "fitness_recreation")
+
+    def tenancy(self, name, arrival=None, departure=None, lat=29.8, category=None):
+        return {"id": name, "property_id": 1, "lat": lat, "lon": -95.4, "name": name,
+                "costar_industry": None, "category": category or n.categorize(name),
+                "arrival": arrival, "departure": departure, "sqft": 2000}
+
+    def test_momentum_counts_recent_moves_and_names_arrivals(self):
+        rows = (self.tenancy("Club Pilates", "2025-02-01"), self.tenancy("Yoga One", "2026-04-01"),
+                self.tenancy("Old Gym", None, "2024-05-01"), self.tenancy("Ancient Gym", "2015-01-01"),
+                self.tenancy("Far Gym", "2025-01-01", lat=31.0), self.tenancy("Law Office", "2025-03-01"))
+        with mock.patch.object(n, "kit_tenancies", lambda kit=None: rows):
+            out = n.momentum_agent(29.8, -95.4, "fitness studio", today="2026-11-14")
+        facts = {r["fact"]: r for r in out["findings"]}
+        self.assertEqual(facts["kit_fitness_recreation_net_last_3_years"]["value"], 1)  # 2 in, 1 out
+        self.assertEqual(out["signal"]["stance"], 1)
+        self.assertEqual([e["name"] for e in out["examples"]], ["Yoga One", "Club Pilates"])
+        by_year = facts["kit_fitness_recreation_arrivals_by_year"]["value"]
+        self.assertNotIn(2015, by_year)                 # the table covers the last 8 years
+        self.assertEqual(by_year[2025] + by_year[2026], 2)
+
+    def test_momentum_too_few_moves_is_unknown(self):
+        rows = (self.tenancy("Club Pilates", "2025-02-01"),)
+        with mock.patch.object(n, "kit_tenancies", lambda kit=None: rows):
+            out = n.momentum_agent(29.8, -95.4, "indoor pickleball", today="2026-11-14")
+        self.assertIsNone(out["signal"]["stance"])
+        facts = {r["fact"]: r for r in out["findings"]}
+        self.assertEqual(facts["kit_fitness_recreation_net_last_3_years"]["status"], "unknown")
+
+
 class Planner(unittest.TestCase):
     def test_plan_for_modeled_and_unmodeled_uses(self):
         steps, _ = n.plan("indoor pickleball")

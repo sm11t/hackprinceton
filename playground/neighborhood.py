@@ -579,6 +579,184 @@ def competitors_agent(lat, lon, use, radius=RADIUS_MI):
                         "lat": f["lat"], "lon": f["lon"], "url": osm_link(f["osm_ids"][0])} for d, f in local[:15]]}
 
 
+# --- CoStar kit tenancies --------------------------------------------------------
+
+# Business category from the tenant's company name. CoStar's own industry code is too
+# coarse here (gyms sit under Education, Personal Services or Arts & Recreation), so
+# names decide, and the CoStar code is kept next to each tenant for audit.
+CATEGORIES = {
+    "fitness_recreation": re.compile(
+        r"\b(gym|gyms|fitness|crossfit|yoga|pilates|barre|martial arts?|karate|taekwondo|tae kwon do|jiu[- ]?jitsu|"
+        r"boxing|kickboxing|gymnastics?|cheer|dance (studio|academy|center)|pickleball|tennis|golf|climbing|"
+        r"swim(ming)? (school|club|academy)|athletic club|sports (club|academy|center|complex)|orangetheory|"
+        r"curves|f45|cyclebar|soulcycle|bootcamp|personal training|health club|rec(reation)? center)\b", re.I),
+    "childcare": re.compile(
+        r"\b(day ?care|child ?care|childcare|preschool|pre-school|montessori|kindercare|kiddie academy|"
+        r"primrose school|goddard school|la petite|tutor time|learning (center|academy|tree)|early (learning|childhood)|"
+        r"children'?s (center|academy|learning)|kids'? (academy|club|zone|world)|nursery school)\b", re.I),
+    "food": re.compile(
+        r"\b(restaurant|cafe|café|coffee|pizza|taco|tacos|taqueria|burger|grill|kitchen|bakery|bbq|bar-b-q|sushi|"
+        r"donut|doughnut|deli|bistro|cantina|eatery|starbucks|subway|chick-fil-a|mcdonald'?s|wingstop|smoothie|"
+        r"tea house|boba|ice cream|yogurt)\b", re.I),
+    "medical": re.compile(
+        r"\b(md|m\.d\.|dds|dmd|clinic|dental|dentist|medical|physician|physicians|pediatric|urgent care|"
+        r"orthodont|chiropract|physical therapy|dermatology|cardiology|imaging|hospice|health ?care|surgery|"
+        r"surgical|optometr|eye (care|associates)|pharmacy|counseling|therapy)\b", re.I),
+}
+CATEGORY_LABEL = {"fitness_recreation": "fitness & recreation", "childcare": "childcare", "food": "food & drink",
+                  "medical": "medical", "other": "other businesses"}
+# Suppliers and consultants to an industry are not the industry ("Golf Design", "Fitness Wholesalers").
+NOT_A_VENUE = re.compile(r"\b(design|contractors?|wholesal\w*|consult\w*|equipment|suppl(y|ies)|network|"
+                         r"services group|tour|council|apartments)\b", re.I)
+NOT_A_DEPARTURE = {7: "Renewal", 12: "MovingIntoSameBuilding", 14: "OccupancySplit"}
+
+
+def categorize(name):
+    if name and NOT_A_VENUE.search(name):
+        return "other"
+    for category, pattern in CATEGORIES.items():
+        if name and pattern.search(name):
+            return category
+    return "other"
+
+
+def kit_path():
+    for candidate in (os.environ.get("COSTAR_KIT"), os.environ.get("COSTAR_KIT_DIR"),
+                      ROOT.parent / "costar-hackathon-kit", Path.home() / "Downloads" / "costar-hackathon-kit.zip"):
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+    return None
+
+
+def day(value):
+    return (value or "")[:10] or None
+
+
+@lru_cache(maxsize=4)
+def kit_tenancies(kit=None):
+    """Houston tenancies with location, category, arrival and departure dates.
+
+    An arrival is the first occupancy of a tenant in a property (renewals and
+    expansions are not new arrivals). A departure is an ended occupancy whose
+    reason is not a renewal, a move within the building or a split.
+    """
+    from space_fit import kit_lines  # local import: the kit is optional for the rest of the pipeline
+    kit = Path(kit) if kit else kit_path()
+    if not kit:
+        raise ValueError("CoStar kit not found. Set COSTAR_KIT to the unzipped kit folder or the zip.")
+    password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+    derived = CACHE / f"kit-tenancies-{hashlib.sha1(str(kit.resolve()).encode()).hexdigest()[:8]}.json"
+    if derived.exists():
+        return tuple(json.loads(derived.read_text()))
+    places = {}
+    for line in kit_lines(kit, "data/commercial-property.jsonl", password):
+        prop = json.loads(line)
+        a = prop.get("primaryAddress") or {}
+        if a.get("state") == "TX" and a.get("latitude"):
+            places[prop["id"]] = (a["latitude"], a["longitude"])
+    companies = {}
+    for line in kit_lines(kit, "data/company-detail.jsonl", password):
+        c = json.loads(line)
+        companies[c["id"]] = (c.get("name"), (c.get("profile") or {}).get("industryType"))
+    rows = []
+    for line in kit_lines(kit, "data/location-occupancy.jsonl", password):
+        r = json.loads(line)
+        if r.get("propertyId") in places:
+            rows.append(r)
+    first = {}
+    for r in rows:
+        k = (r.get("tenantLocationId"), r["propertyId"])
+        start = day(r.get("moveInDate") or r.get("fromDate"))
+        if r.get("tenantLocationId") and start and (k not in first or start < first[k]):
+            first[k] = start
+    out = []
+    for r in rows:
+        tenant = r.get("tenantLocationId")
+        name, industry = companies.get(tenant, (None, None))
+        start = day(r.get("moveInDate") or r.get("fromDate"))
+        end = day(r.get("toDate"))
+        reason = r.get("expirationReason")
+        lat, lon = places[r["propertyId"]]
+        out.append({
+            "id": r["id"], "property_id": r["propertyId"], "lat": lat, "lon": lon, "name": name,
+            "costar_industry": industry, "category": categorize(name) if name else "unknown",
+            "arrival": start if tenant and first.get((tenant, r["propertyId"])) == start else None,
+            "departure": end if end and reason not in NOT_A_DEPARTURE else None,
+            "sqft": sum((sp.get("squareFeetOccupied") or 0) for sp in r.get("spaces") or []) or None,
+        })
+    derived.parent.mkdir(parents=True, exist_ok=True)
+    derived.write_text(json.dumps(out))
+    return tuple(out)
+
+
+MOMENTUM_RADIUS_MI = 5.0  # wider than the residents radius: the kit is a sample of buildings
+
+
+def momentum_agent(lat, lon, use, radius=MOMENTUM_RADIUS_MI, kit=None, today=None):
+    """What is moving in: arrivals and departures of this kind of business near the site (CoStar kit)."""
+    rows = kit_tenancies(kit)
+    category = USES[use]["kit_category"]
+    label = CATEGORY_LABEL[category]
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    since = f"{int(today[:4]) - 3}{today[4:]}"
+    local = [r for _, r in near(rows, lat, lon, radius)]
+    buildings = len({r["property_id"] for r in local})
+    years = list(range(int(today[:4]) - 7, int(today[:4]) + 1))
+
+    def by_year(items, field):
+        return {y: sum(1 for r in items if r[field] and r[field][:4] == str(y) and r[field] <= today) for y in years}
+
+    mine = [r for r in local if r["category"] == category]
+    arrivals = by_year(mine, "arrival")
+    departures = by_year(mine, "departure")
+    recent_in = [r for r in mine if r["arrival"] and since < r["arrival"] <= today]
+    recent_out = [r for r in mine if r["departure"] and since < r["departure"] <= today]
+    all_in = sum(1 for r in local if r["arrival"] and since < r["arrival"] <= today)
+    all_out = sum(1 for r in local if r["departure"] and since < r["departure"] <= today)
+    houston_in = [r for r in rows if r["arrival"] and since < r["arrival"] <= today]
+    houston_share = sum(r["category"] == category for r in houston_in) / len(houston_in) if houston_in else None
+    local_share = len(recent_in) / all_in if all_in else None
+    net = len(recent_in) - len(recent_out)
+    enough = len(recent_in) + len(recent_out) >= 2
+    source_id = "costar-kit:location-occupancy+company-detail+commercial-property"
+    caveat = ("The kit covers only CoStar's Matterport-scanned properties (about 1,758 in Houston), so this is a "
+              "sample of buildings, not every business. Categories come from tenant names (keyword rules).")
+    findings = [
+        record(f"kit_{category}_arrivals_by_year", arrivals, "costar", source_id, today, 0.5, None, "agrees",
+               note=f"{label.capitalize()} tenants arriving in {buildings} kit buildings within {radius:g} mi. "
+                    "First occupancy of a tenant in a building; renewals excluded. " + caveat),
+        record(f"kit_{category}_departures_by_year", departures, "costar", source_id, today, 0.5, None, "agrees",
+               note="Ended occupancies, excluding renewals, moves within the building and splits."),
+        record(f"kit_{category}_net_last_3_years", net if enough else None, "costar", source_id, today, 0.4, None,
+               "agrees" if enough else "unknown",
+               note=(f"{len(recent_in)} arrived, {len(recent_out)} left since {since}." if enough else
+                     f"Only {len(recent_in) + len(recent_out)} {label} moves since {since} in the sample: too few "
+                     "to call a trend.")),
+        record("kit_all_business_net_last_3_years", all_in - all_out, "costar", source_id, today, 0.5, None, "agrees",
+               note=f"All tenants within {radius:g} mi: {all_in} arrived, {all_out} left since {since}."),
+        record(f"kit_{category}_share_of_arrivals", None if local_share is None else round(local_share, 3), "costar",
+               source_id, today, 0.4, None, "agrees" if local_share is not None else "unknown",
+               note=f"Share of arrivals here that are {label}, vs {fmt_pct(houston_share)} across all Houston kit "
+                    "buildings in the same period."),
+    ]
+    signal = {"name": "business arrivals", "value": net if enough else None,
+              "stance": None if not enough else (1 if net > 0 else -1 if net < 0 else 0),
+              "reason": (f"{len(recent_in)} {label} businesses moved into nearby CoStar buildings since {since[:4]}, "
+                         f"{len(recent_out)} left" if enough else
+                         f"Too few {label} moves in the CoStar sample nearby to call a trend")}
+    examples = sorted(recent_in, key=lambda r: r["arrival"], reverse=True)[:6]
+    return {"sources": [{"name": "CoStar hackathon kit: tenancies, companies, properties", "url": None,
+                         "retrieved_at": None, "cached": True, "note": caveat}],
+            "findings": findings, "signal": signal, "confidence": 0.4,
+            "summary": (f"{len(local)} tenancies in {buildings} kit buildings within {radius:g} mi. {label.capitalize()}: "
+                        f"{len(recent_in)} arrived, {len(recent_out)} left since {since[:4]}; all businesses: "
+                        f"{all_in} arrived, {all_out} left."),
+            "handoff": "Category momentum to the coordinator (counts only with 2+ moves). All-business moves are "
+                       "context, not a vote: they are not specific to this use.",
+            "examples": [{"name": r["name"], "arrived": r["arrival"], "sqft": r["sqft"],
+                          "costar_property_id": r["property_id"]} for r in examples]}
+
+
 @lru_cache(maxsize=None)
 def us_population_6_plus_record():
     """US residents aged 6+ from the ACS 2020-2024 national table (SFIA surveys ages 6+)."""
