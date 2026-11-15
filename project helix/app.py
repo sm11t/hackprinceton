@@ -4,7 +4,7 @@
 Provides natural-language access to:
 - CoStar commercial properties, listings, advertised suites, asking rents, tenancies, and sale comps
 - Tavily live web search
-- Upstage Solar Mini 4 LLM tool orchestration
+- NVIDIA Nemotron 3 Ultra 550B (via OpenRouter free route) LLM tool orchestration
 """
 
 import argparse
@@ -43,9 +43,15 @@ def load_env():
 
 load_env()
 
-UPSTAGE_API_KEY = os.environ.get("UPSTAGE_API_KEY", "")
-UPSTAGE_BASE_URL = os.environ.get("UPSTAGE_BASE_URL", "https://api.upstage.ai/v1").rstrip("/")
-MODEL = os.environ.get("UPSTAGE_MODEL", "solar-mini4")
+# Strictly enforced OpenRouter + NVIDIA Nemotron 3 Ultra (:free route only, zero paid fallback)
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+MODEL = os.environ.get("OPENROUTER_MODEL", OPENROUTER_MODEL).strip()
+if OPENROUTER_BASE_URL != "https://openrouter.ai/api/v1":
+    raise RuntimeError("OPENROUTER_BASE_URL must be https://openrouter.ai/api/v1")
+if MODEL != OPENROUTER_MODEL:
+    raise RuntimeError(f"OPENROUTER_MODEL must be {OPENROUTER_MODEL}")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 COSTAR_KIT_PATH = os.environ.get("COSTAR_KIT_PATH", "/Users/jessenth/Downloads/costar-hackathon-kit.zip")
 COSTAR_PASSWORD = os.environ.get("COSTAR_KIT_ZIP_PASSWORD") or os.environ.get("COSTAR_KIT_PASSWORD") or "princeton-h4ck4th0n-2026"
@@ -310,7 +316,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         if self.path == "/api/config":
             self.send_json({
                 "model": MODEL,
-                "has_upstage": bool(UPSTAGE_API_KEY),
+                "has_openrouter": bool(OPENROUTER_API_KEY),
                 "has_tavily": bool(TAVILY_API_KEY),
                 "has_costar": has_costar
             })
@@ -383,11 +389,11 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "No messages provided"}, status=400)
                 return
 
-            if not UPSTAGE_API_KEY:
-                self.send_json({"error": "UPSTAGE_API_KEY is missing from environment."}, status=500)
+            if not OPENROUTER_API_KEY:
+                self.send_json({"error": "OPENROUTER_API_KEY is missing from environment."}, status=500)
                 return
 
-            # Format messages for Solar API
+            # Format messages for OpenRouter / Nemotron
             messages = []
             for m in raw_messages:
                 role = m.get("role")
@@ -451,19 +457,32 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "stream": False,
                     }
 
-                    url = f"{UPSTAGE_BASE_URL}/chat/completions"
+                    url = f"{OPENROUTER_BASE_URL}/chat/completions"
                     req = urllib.request.Request(
                         url,
                         headers={
-                            "Authorization": f"Bearer {UPSTAGE_API_KEY}",
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                             "Content-Type": "application/json",
+                            "HTTP-Referer": "https://hackprinceton.com",
+                            "X-Title": "Project Helix"
                         },
                         data=json.dumps(req_data).encode("utf-8"),
                         method="POST"
                     )
 
-                    with urllib.request.urlopen(req, timeout=35) as resp:
-                        resp_json = json.loads(resp.read().decode("utf-8"))
+                    # Bounded retry with exponential backoff on 429 rate limit or capacity (Free model route only)
+                    resp_json = None
+                    max_retries = 2
+                    for attempt in range(max_retries + 1):
+                        try:
+                            with urllib.request.urlopen(req, timeout=45) as resp:
+                                resp_json = json.loads(resp.read().decode("utf-8"))
+                            break
+                        except urllib.error.HTTPError as http_err:
+                            if http_err.code in (429, 503) and attempt < max_retries:
+                                time.sleep(1.5 * (attempt + 1))
+                                continue
+                            raise
 
                     choice = resp_json.get("choices", [{}])[0]
                     message = choice.get("message", {})
@@ -515,7 +534,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     err_msg = err_json.get("error", {}).get("message", err_text)
                 except Exception:
                     err_msg = err_text
-                self.send_json({"error": f"Upstage API error ({e.code}): {err_msg}"}, status=502)
+                self.send_json({"error": f"OpenRouter API error ({e.code}): {err_msg}"}, status=502)
             except Exception as e:
                 self.send_json({"error": f"Server error: {str(e)}"}, status=500)
             return

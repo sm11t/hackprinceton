@@ -80,10 +80,10 @@
       border-radius: 999px;
     }
 
-    .badge-solar {
-      background: #ecfdf5;
-      color: #065f46;
-      border: 1px solid #a7f3d0;
+    .badge-model {
+      background: #f0fdf4;
+      color: #166534;
+      border: 1px solid #bbf7d0;
     }
 
     .badge-costar {
@@ -586,9 +586,9 @@
     <div class="header-left">
       <h1>Project Helix</h1>
       <div class="badges">
-        <span class="badge badge-solar">
+        <span class="badge badge-model">
           <span class="status-dot"></span>
-          <span id="model-name">solar-mini4</span>
+          <span id="model-name">nvidia/nemotron-3-ultra-550b-a55b:free</span>
         </span>
         <span class="badge badge-costar" id="costar-badge">
           <span>🏢 CoStar CRE Kit</span>
@@ -604,7 +604,7 @@
   <div id="chat-container">
     <div class="empty-state" id="empty-state">
       <div class="empty-icon">🏢</div>
-      <h2>CoStar + Solar Mini + Tavily</h2>
+      <h2>Nemotron 3 Ultra + CoStar + Tavily</h2>
       <p>Ask in natural language to search Houston properties, check available suites, verified asking rents, lease bases, building sizes, tenants, or sales comps.</p>
       
       <div class="sample-prompts">
@@ -792,7 +792,7 @@
 
       const meta = document.createElement('div');
       meta.className = 'meta-label';
-      meta.textContent = role === 'user' ? 'You' : (modelNameEl.textContent || 'Solar Mini');
+      meta.textContent = role === 'user' ? 'You' : (modelNameEl.textContent || 'Nemotron 3 Ultra');
       row.appendChild(meta);
 
       // Render executed tools if any
@@ -884,7 +884,7 @@
 
       const meta = document.createElement('div');
       meta.className = 'meta-label';
-      meta.textContent = modelNameEl.textContent || 'Solar Mini';
+      meta.textContent = modelNameEl.textContent || 'Nemotron 3 Ultra';
 
       const ind = document.createElement('div');
       ind.className = 'typing-indicator';
