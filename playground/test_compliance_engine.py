@@ -84,6 +84,34 @@ class HandoffTests(unittest.TestCase):
         self.assertIn('jurisdiction_unverified',result['gates'])
         self.assertNotIn('private',str(result))
 
+    def test_helix_listing_pin_from_property_detail(self):
+        # discovery.normalize_listing has no coordinates; costar_service's property detail has latitude/longitude.
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        resolver=Mock(return_value=dict(code='houston',verified=True,evidence_url='https://example.org/b'))
+        selected=dict(property_id=23296,listing_id='L',space_id='A',stable_id='s',property_type='Flex',
+                      property={'latitude':29.85,'longitude':-95.53,'stories':1})
+        with patch.dict(sys.modules, jurisdiction=SimpleNamespace(resolve_jurisdiction=resolver)):
+            result=preflight({'selected_listing':selected})
+        resolver.assert_called_once_with(29.85,-95.53)
+        self.assertNotIn('jurisdiction_unverified',result['gates'])
+        self.assertEqual(next(r for r in result['records'] if r['fact']=='floors')['value'],1)
+
+    def test_helix_listing_without_pin_uses_kit_pin_not_postal_city(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch, Mock
+        resolver=Mock(return_value=dict(code='harris_unincorporated',verified=True,evidence_url='https://example.org/b'))
+        selected=dict(property_id=966604,listing_id='L',stable_id='s',city='Houston',property_type='Multifamily')
+        with patch.dict(sys.modules, jurisdiction=SimpleNamespace(resolve_jurisdiction=resolver)), \
+             patch('compliance_engine.kit_pin', return_value=(30.0,-95.6)) as pin:
+            result=preflight({'selected_listing':selected})
+        pin.assert_called_once()
+        resolver.assert_called_once_with(30.0,-95.6)
+        self.assertEqual(result['jurisdiction']['code'],'harris_unincorporated')
+        self.assertIn('commercial_conversion_unestablished',result['gates'])
+
     def test_public_cache_offline(self):
         import tempfile
         from compliance_engine import cached_search

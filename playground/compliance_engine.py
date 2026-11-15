@@ -67,13 +67,43 @@ def normalize_context(context):
                   space_id=selected.get('space_id'), address=selected.get('address'),
                   scope=('space:' + str(selected['space_id'])) if selected.get('space_id') else 'building',
                   listing_evidence=selected)
+    # Helix's normalized listing (discovery.normalize_listing) carries no coordinates; its property detail
+    # (costar_service) does, as latitude/longitude, possibly nested under "property".
+    detail = selected.get('property') if isinstance(selected.get('property'), dict) else (context.get('property') or {})
     result['facts'] = dict(context.get('facts') or {})
-    result['facts'].setdefault('property_type', selected.get('property_type') or 'unknown')
-    for key in ('lat', 'lon', 'jurisdiction'):
-        if key not in result and key in selected:
-            result[key] = selected[key]
+    result['facts'].setdefault('property_type', selected.get('property_type') or detail.get('property_type') or 'unknown')
+    if detail.get('stories') is not None:
+        result['facts'].setdefault('floors', detail.get('stories'))
+    for key, names in (('lat', ('lat', 'latitude')), ('lon', ('lon', 'longitude'))):
+        if result.get(key) is None:
+            result[key] = next((src[n] for src in (selected, detail) for n in names if src.get(n) is not None), None)
+    if 'jurisdiction' not in result and 'jurisdiction' in selected:
+        result['jurisdiction'] = selected['jurisdiction']
     result['listed_area_range_sqft'] = [selected.get('area_min_sqft'), selected.get('area_max_sqft')]
     return result
+
+
+PIN_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', 'compliance', 'pins.json')
+
+
+def kit_pin(property_id, kit=None):
+    """(lat, lon) for a CoStar property id from the kit, cached on disk (the encrypted zip read is slow)."""
+    pins = {}
+    if os.path.exists(PIN_CACHE):
+        with open(PIN_CACHE) as stream:
+            pins = json.load(stream)
+    if str(property_id) in pins:
+        return tuple(pins[str(property_id)])
+    from reconcile import kit_password, load_property
+    kit = kit or os.environ.get('COSTAR_KIT') or os.path.expanduser('~/Downloads/costar-hackathon-kit.zip')
+    a = load_property(kit, int(property_id), kit_password()).get('primaryAddress') or {}
+    pin = (a.get('latitude'), a.get('longitude'))
+    if None not in pin:
+        pins[str(property_id)] = pin
+        os.makedirs(os.path.dirname(PIN_CACHE), exist_ok=True)
+        with open(PIN_CACHE, 'w') as stream:
+            json.dump(pins, stream)
+    return pin
 
 
 def resolve_context_jurisdiction(context):
@@ -81,6 +111,11 @@ def resolve_context_jurisdiction(context):
     jurisdiction = context.get('jurisdiction') or {}
     if jurisdiction.get('verified') is True and jurisdiction.get('evidence_url') and jurisdiction.get('code') in AUTHORITIES:
         return context
+    if (context.get('lat') is None or context.get('lon') is None) and context.get('property_id') is not None:
+        try:  # Helix listings have a CoStar id but no pin: take the pin from the kit, never from the postal city
+            context['lat'], context['lon'] = kit_pin(context['property_id'], context.get('kit'))
+        except Exception:
+            pass
     if context.get('lat') is not None and context.get('lon') is not None:
         try:
             from jurisdiction import resolve_jurisdiction

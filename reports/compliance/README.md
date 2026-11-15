@@ -71,7 +71,10 @@ python3 playground/jurisdiction.py 29.8540 -95.5317
 - Only the four authorities above are modeled; other cities return "not modeled".
 - Requirements exist for three demo businesses, not all 26 categories in `neighborhood_industries.py`.
 - No imagery-based checks (parking, HVAC, fire equipment) yet; those stay unknown.
-- The Helix adapter follows Stage 1's `discovery.py` fields; it has not been run on a real Stage 1 handoff yet.
+- The Helix adapter follows Stage 1's `discovery.normalize_listing` fields (checked read-only against PR #18).
+  Those listings carry no coordinates, so the adapter reads `latitude`/`longitude` from a nested `property` detail
+  if present, else looks the pin up in the CoStar kit by `property_id` (cached in `output/compliance/pins.json`).
+  Tested with Helix-shaped records for Tanner and Cypresswood, not yet with a live Stage 1 run.
 
 Official references (checked Nov 14, 2026):
 - https://www.houstontx.gov/business/plan/permits-inspections.html (City of Houston)
