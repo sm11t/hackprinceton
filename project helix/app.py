@@ -13,6 +13,9 @@ import os
 from pathlib import Path
 import sys
 import time
+import threading
+import uuid
+from datetime import datetime, timezone
 import urllib.request
 import urllib.error
 import webbrowser
@@ -23,6 +26,11 @@ sys.path.insert(0, str(BASE_DIR))
 
 from costar_service import CoStarService
 from intake import build_intake
+from discovery import (
+    CITY_CODES, apply_allocation_and_horizon, attach_explanations,
+    confidence_assessment, make_discovery_response, nemotron_explanations,
+    policy_for_intake, reconcile_verification,
+)
 
 def load_env():
     """Load env vars from project helix/.env or root .env without overwriting existing."""
@@ -66,6 +74,29 @@ except Exception as e:
     has_costar = False
     sys.stderr.write(f"[CoStar Init Warning] {e}\n")
 
+DISCOVERY_SESSIONS = {}
+DISCOVERY_LOCK = threading.Lock()
+VERIFY_CACHE_PATH = BASE_DIR / ".verification-cache.json"
+INVESTIGATION_PATH = BASE_DIR / ".stage2-handoffs.json"
+
+
+def read_json_store(path):
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_json_store(path, data):
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    temp.replace(path)
+
+
+VERIFY_CACHE = read_json_store(VERIFY_CACHE_PATH)
+INVESTIGATION_HANDOFFS = read_json_store(INVESTIGATION_PATH)
+
 
 def tavily_search(query: str, max_results: int = 5):
     """Perform a live web search using Tavily API."""
@@ -95,7 +126,8 @@ def tavily_search(query: str, max_results: int = 5):
                 results.append({
                     "title": item.get("title", ""),
                     "url": item.get("url", ""),
-                    "snippet": item.get("content", "")[:300]
+                    "snippet": item.get("content", "")[:500],
+                    "source_date": item.get("published_date"),
                 })
             return {"query": query, "results": results}
     except Exception as e:
@@ -323,7 +355,180 @@ class ChatHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if self.path in ("/maximus.css", "/maximus.js"):
+            asset = BASE_DIR / ("maximus.css" if self.path.endswith(".css") else "maximus.js")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/css; charset=utf-8" if self.path.endswith(".css") else "application/javascript; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(asset.read_bytes())
+            return
+
         self.send_error(404, "Not Found")
+
+    def read_json_payload(self, limit=8192):
+        content_len = int(self.headers.get("Content-Length", 0))
+        if not 0 < content_len <= limit:
+            raise ValueError("Invalid request size.")
+        return json.loads(self.rfile.read(content_len).decode("utf-8"))
+
+    def get_discovery_session(self, payload):
+        discovery_id = str(payload.get("discovery_id", ""))
+        with DISCOVERY_LOCK:
+            return discovery_id, DISCOVERY_SESSIONS.get(discovery_id)
+
+    def add_cached_verification(self, response, intake):
+        for record in response.get("results", []):
+            verification = VERIFY_CACHE.get(record["stable_id"])
+            if verification:
+                record["verification"] = verification
+                record["confidence"] = confidence_assessment(record, intake, verification)
+        return response
+
+    def run_discovery(self, payload):
+        if not costar:
+            self.send_json({"error": "CoStar listing data is unavailable. Your intake is unchanged."}, status=503)
+            return
+        try:
+            intake = build_intake(payload.get("intake", payload))
+            policy = policy_for_intake(intake)
+            city_name, state = CITY_CODES[intake["city"]]
+            # One bounded city-inventory read. The deterministic budget gate is applied
+            # before the CoStar method receives its transaction types.
+            inventory = costar.discover_active_listings(city_name, policy["transaction_types"], limit=1000)
+            raw_records = inventory["listings"]
+            response = make_discovery_response(intake, raw_records)
+            explanation_candidates = [r for r in response["results"]
+                                      if r["budget_classification"] != "over_budget"][:24]
+            explanations, model_trace = nemotron_explanations(
+                explanation_candidates, intake, OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL)
+            attach_explanations(response, explanations, model_trace)
+            discovery_id = uuid.uuid4().hex
+            response["discovery_id"] = discovery_id
+            response["intake_summary"] = {
+                "city": intake["city"], "total_budget_usd": intake["total_budget_usd"],
+                "financing": intake["financing"], "business_preferences": intake["business_preferences"],
+                "open_to_ideas": intake["open_to_ideas"],
+            }
+            response["trace"].update({
+                "costar_functions": ["CoStarService.discover_active_listings"],
+                "sale_search_calls": 1 if "sale" in policy["transaction_types"] else 0,
+                "lease_search_calls": 1,
+                "sale_records_seen": inventory["sale_listing_records_seen"],
+                "transaction_types_searched": inventory["transaction_types_searched"],
+                "inventory_truncated": inventory["truncated"],
+                "inventory_records_discovered": inventory.get("records_discovered", len(raw_records)),
+                "records_scanned": inventory.get("records_scanned"),
+                "skipped_malformed_records": inventory.get("skipped_malformed_records", 0),
+                "tavily_calls": 0,
+            })
+            with DISCOVERY_LOCK:
+                if len(DISCOVERY_SESSIONS) >= 20:
+                    DISCOVERY_SESSIONS.pop(next(iter(DISCOVERY_SESSIONS)))
+                DISCOVERY_SESSIONS[discovery_id] = {
+                    "intake": intake, "raw_records": raw_records,
+                    "model_explanations": explanations, "response": response,
+                }
+            self.send_json(response)
+        except (ValueError, KeyError, TypeError, OSError, RuntimeError) as exc:
+            self.send_json({"error": f"CoStar discovery could not complete: {exc}"}, status=502)
+
+    def reclassify_discovery(self, payload):
+        discovery_id, session = self.get_discovery_session(payload)
+        if not session:
+            self.send_json({"error": "Discovery session expired. Run Find Properties again."}, status=404)
+            return
+        try:
+            percent = payload.get("acquisition_allocation_percent", 100)
+            horizon = payload.get("lease_horizon_years")
+            horizon = int(horizon) if horizon not in (None, "", 0, "0") else None
+            response = make_discovery_response(
+                session["intake"], session["raw_records"], session["model_explanations"],
+                acquisition_percent=percent, preferred_horizon=horizon)
+            response["discovery_id"] = discovery_id
+            response["intake_summary"] = session["response"]["intake_summary"]
+            response["trace"] = {**session["response"]["trace"], "reclassified_without_provider_calls": True}
+            self.add_cached_verification(response, session["intake"])
+            session["response"] = response
+            self.send_json(response)
+        except (ValueError, TypeError, KeyError) as exc:
+            self.send_json({"error": str(exc)}, status=400)
+
+    def verify_listing(self, payload):
+        discovery_id, session = self.get_discovery_session(payload)
+        if not session:
+            self.send_json({"error": "Discovery session expired. Run Find Properties again."}, status=404)
+            return
+        stable_id = str(payload.get("stable_id", ""))
+        record = next((r for r in session["response"]["results"] if r.get("stable_id") == stable_id), None)
+        if not record:
+            self.send_json({"error": "Listing is not part of this discovery."}, status=404)
+            return
+        refresh = payload.get("refresh") is True
+        if not refresh and stable_id in VERIFY_CACHE:
+            record["verification"] = VERIFY_CACHE[stable_id]
+            record["confidence"] = confidence_assessment(record, session["intake"], record["verification"])
+            self.send_json({"verification": record["verification"], "record": record, "cached": True,
+                            "discovery_id": discovery_id, "stable_id": stable_id})
+            return
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        if not TAVILY_API_KEY:
+            verification = reconcile_verification(record, [], retrieved_at)
+            verification["error"] = "TAVILY_API_KEY is not configured; CoStar discovery record is preserved."
+        else:
+            query = f'"{record.get("address", "")}" CoStar listing {record.get("listing_id", "")}'
+            if record.get("space_id"):
+                query += f' suite {record.get("suite") or ""}'
+            external = tavily_search(query, max_results=5)
+            if external.get("error"):
+                verification = reconcile_verification(record, [], retrieved_at)
+                verification["error"] = external["error"]
+            else:
+                verification = reconcile_verification(record, external.get("results", []), retrieved_at)
+                verification["query"] = query
+                verification["tavily_call_count"] = 1
+        VERIFY_CACHE[stable_id] = verification
+        try:
+            write_json_store(VERIFY_CACHE_PATH, VERIFY_CACHE)
+        except OSError:
+            verification["persistence_status"] = "cache could not be written; current result remains available"
+        record["verification"] = verification
+        record["confidence"] = confidence_assessment(record, session["intake"], verification)
+        self.send_json({"verification": verification, "record": record, "cached": False,
+                        "discovery_id": discovery_id, "stable_id": stable_id})
+
+    def investigate_listing(self, payload):
+        discovery_id, session = self.get_discovery_session(payload)
+        if not session:
+            self.send_json({"error": "Discovery session expired. Run Find Properties again."}, status=404)
+            return
+        stable_id = str(payload.get("stable_id", ""))
+        record = next((r for r in session["response"]["results"] if r.get("stable_id") == stable_id), None)
+        if not record:
+            self.send_json({"error": "Listing is not part of this discovery."}, status=404)
+            return
+        handoff_id = uuid.uuid4().hex
+        try:
+            property_facts = costar.get_property(record["property_id"]) if costar else {}
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            property_facts = {}
+        property_facts_available = isinstance(property_facts, dict) and "error" not in property_facts
+        handoff = {
+            "handoff_id": handoff_id, "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "stage2_placeholder", "stage": 2,
+            "intake": session["intake"], "selected_listing": record,
+            "property_facts": property_facts if property_facts_available else {},
+            "property_facts_status": "available" if property_facts_available else "unavailable",
+            "message": "Selection saved for a future investigation stage. Stage 2 was not run.",
+        }
+        INVESTIGATION_HANDOFFS[handoff_id] = handoff
+        try:
+            write_json_store(INVESTIGATION_PATH, INVESTIGATION_HANDOFFS)
+        except OSError as exc:
+            INVESTIGATION_HANDOFFS.pop(handoff_id, None)
+            self.send_json({"error": f"Selection was not persisted: {type(exc).__name__}."}, status=500)
+            return
+        self.send_json({"handoff": handoff})
 
     def execute_tool(self, name: str, args: dict):
         """Dispatch tool calls to CoStar or Tavily."""
@@ -372,6 +577,34 @@ class ChatHandler(BaseHTTPRequestHandler):
         return {"error": f"Unknown tool: {name}"}
 
     def do_POST(self):
+        if self.path == "/api/discovery":
+            try:
+                self.run_discovery(self.read_json_payload())
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_json({"error": str(exc) or "Invalid discovery request."}, status=400)
+            return
+
+        if self.path == "/api/reclassify":
+            try:
+                self.reclassify_discovery(self.read_json_payload())
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_json({"error": str(exc) or "Invalid reclassification request."}, status=400)
+            return
+
+        if self.path == "/api/verify":
+            try:
+                self.verify_listing(self.read_json_payload())
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_json({"error": str(exc) or "Invalid verification request."}, status=400)
+            return
+
+        if self.path == "/api/investigate":
+            try:
+                self.investigate_listing(self.read_json_payload())
+            except (ValueError, json.JSONDecodeError) as exc:
+                self.send_json({"error": str(exc) or "Invalid selection request."}, status=400)
+            return
+
         if self.path == "/api/intake":
             content_len = int(self.headers.get("Content-Length", 0))
             if not 0 < content_len <= 8192:

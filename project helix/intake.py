@@ -25,15 +25,13 @@ def build_intake(payload):
         raise ValueError("Business preferences must be text.")
     preferences = preferences.strip()
     open_to_ideas = payload.get("open_to_ideas") is True
-    if not preferences and not open_to_ideas:
-        raise ValueError("Describe your preferences or choose “I’m open to ideas.”")
     return {
         "city": city,
         "total_budget_usd": float(budget),
         "financing": financing,
         "business_preferences": preferences,
         "open_to_ideas": open_to_ideas,
-        "transaction_types": ["lease"] if budget < LEASE_THRESHOLD_USD else ["sale", "lease"],
+        "transaction_types": ["lease"] if city == "Los Angeles, CA" and budget < LEASE_THRESHOLD_USD else ["sale", "lease"],
         "acquisition_allocation": None,
         "lease_horizon_years": None,
     }
