@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+.verification-cache.json
+.stage2-handoffs.json
+*.json.tmp
 __pycache__/
 playground/output/
 .DS_Store

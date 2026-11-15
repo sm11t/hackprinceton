@@ -240,6 +240,148 @@ class CoStarService:
             "sale_offers": sale_offers
         }
 
+    def discover_active_listings(self, city: str, transaction_types: list[str], limit: int = 1000):
+        """Read the actual active commercial listing feed once for bounded city discovery.
+
+        `transaction_types` is supplied by the deterministic policy engine. Sale records
+        are never traversed for lease-only requests.
+        """
+        if city not in ("Houston", "Los Angeles"):
+            raise ValueError("Unsupported CoStar market")
+        if not set(transaction_types).issubset({"sale", "lease"}):
+            raise ValueError("Unsupported transaction type")
+        if not 1 <= int(limit) <= 2000:
+            raise ValueError("Discovery limit must be between 1 and 2000")
+        self._ensure_csv_loaded()
+        properties = {pid: row for pid, row in self._property_index.items()
+                      if row.get("city", "").casefold() == city.casefold()}
+        candidates = {"sale": [], "lease": []}
+        scan_truncated = False
+        scanned_lines = 0
+        sale_records_scanned = 0
+        skipped_malformed = 0
+        with ZipFile(self.kit_path) as z:
+            with z.open("data/commercial-listing-summary.jsonl", pwd=self.password) as stream:
+                for line in stream:
+                    scanned_lines += 1
+                    if scanned_lines > 100_000:
+                        scan_truncated = True
+                        break
+                    try:
+                        listing = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        skipped_malformed += 1
+                        continue
+                    if listing.get("listingStatus") != 1:
+                        continue
+                    pid = listing.get("propertyId")
+                    prop = properties.get(pid)
+                    if not prop:
+                        continue
+                    # The selected feed is commercial, but exclude explicitly
+                    # residential/Homes property-type rows if they are present.
+                    if listing.get("propertyType") in (15, 16):
+                        continue
+                    if "sale" in transaction_types:
+                        sale = listing.get("forSaleSummary")
+                        if sale:
+                            sale_records_scanned += 1
+                            candidates["sale"].append({
+                                "transaction_type": "sale", "property_id": pid,
+                                "listing_id": listing.get("id"), "space_id": None,
+                                "stable_id": f"sale:{listing.get('id')}", "property": prop,
+                                "address": listing.get("address"), "city": prop.get("city"), "state": prop.get("state"),
+                                "property_type_code": listing.get("propertyType"),
+                                "listing_status": listing.get("listingStatus"),
+                                "availability_status": sale.get("saleStatus"),
+                                "area_min_sqft": sale.get("totalAvailableSquareFeet") or listing.get("buildingSizeSquareFeet"),
+                                "area_max_sqft": sale.get("totalAvailableSquareFeet") or listing.get("buildingSizeSquareFeet"),
+                                "asking_price_low": sale.get("askingPriceLow"),
+                                "asking_price_high": sale.get("askingPriceHigh"),
+                                "asking_price_raw": {"low": sale.get("askingPriceLow"), "high": sale.get("askingPriceHigh")},
+                                "monetary_unit": listing.get("monetaryUnit"), "rate_low": None, "rate_high": None,
+                                "rate_basis_code": None, "asking_rate_has_value": None,
+                                "date_on_market": sale.get("minDateOnMarket"), "available_at": None,
+                                "certified_fresh_date": listing.get("certifiedFreshDate"),
+                                "created_date": listing.get("createdDate"),
+                                "listing_status_updated_at": listing.get("listingStatusUpdatedDate"),
+                                "source_reference": f"data/commercial-listing-summary.jsonl#{listing.get('id')}",
+                                "original_evidence": {"listing_id": listing.get("id"), "sale_summary": sale,
+                                                      "property_type_code": listing.get("propertyType"),
+                                                      "listing_status": listing.get("listingStatus")},
+                            })
+                    if "lease" in transaction_types:
+                        lease = listing.get("forLeaseSummary") or {}
+                        for space in lease.get("spaces") or []:
+                            space_pid = space.get("propertyId") or pid
+                            space_prop = properties.get(space_pid)
+                            if not space_prop:
+                                continue
+                            sid = space.get("id")
+                            candidates["lease"].append({
+                                "transaction_type": "lease", "property_id": space_pid,
+                                "listing_id": listing.get("id"), "space_id": sid,
+                                "stable_id": f"lease:{listing.get('id')}:{sid if sid is not None else space.get('suite', 'unknown')}",
+                                "property": space_prop, "address": listing.get("address"),
+                                "city": space_prop.get("city"), "state": space_prop.get("state"),
+                                "property_type_code": listing.get("propertyType"),
+                                "listing_status": listing.get("listingStatus"),
+                                "availability_status": space.get("availabilityType"),
+                                "area_min_sqft": space.get("squareFeetMin"),
+                                "area_max_sqft": space.get("squareFeetMax"),
+                                "asking_price_low": None, "asking_price_high": None,
+                                "asking_price_raw": None,
+                                "monetary_unit": space.get("monetaryUnit", lease.get("monetaryUnit", listing.get("monetaryUnit"))),
+                                "rate_low": space.get("rateLow") if space.get("rateLow") is not None else lease.get("askingRateLow"),
+                                "rate_high": space.get("rateHigh") if space.get("rateHigh") is not None else lease.get("askingRateHigh"),
+                                "rate_basis_code": space.get("rateBasis") if space.get("rateBasis") is not None else lease.get("askingRateBasis"),
+                                "asking_rate_has_value": space.get("askingRateHasValue"),
+                                "date_on_market": space.get("dateOnMarket") or lease.get("minDateOnMarket"),
+                                "available_at": space.get("availableOnDate"),
+                                "certified_fresh_date": listing.get("certifiedFreshDate"),
+                                "created_date": listing.get("createdDate"),
+                                "listing_status_updated_at": listing.get("listingStatusUpdatedDate"),
+                                "known_additional_charges_raw": {k: space.get(k) for k in (
+                                    "commonAreaMaintenanceState", "propertyTaxState", "leaseTermType", "serviceType")},
+                                "service_type": space.get("serviceType", lease.get("serviceType")),
+                                "suite": space.get("suite"),
+                                "source_reference": f"data/commercial-listing-summary.jsonl#{listing.get('id')}:{sid}",
+                                "original_evidence": {"listing_id": listing.get("id"), "space": space,
+                                                      "lease_summary": {k: lease.get(k) for k in (
+                                                          "askingRateBasis", "askingRateLow", "askingRateHigh", "serviceType")},
+                                                      "listing_status": listing.get("listingStatus")},
+                            })
+        requested = [kind for kind in ("sale", "lease") if kind in transaction_types]
+        if requested == ["sale", "lease"]:
+            sale_cap, lease_cap = int(limit) // 2, int(limit) - int(limit) // 2
+            if len(candidates["sale"]) < sale_cap:
+                lease_cap += sale_cap - len(candidates["sale"])
+            if len(candidates["lease"]) < lease_cap:
+                sale_cap += lease_cap - len(candidates["lease"])
+        else:
+            sale_cap = int(limit) if requested == ["sale"] else 0
+            lease_cap = int(limit) if requested == ["lease"] else 0
+
+        def diverse_take(rows, cap):
+            groups = {}
+            for row in rows:
+                groups.setdefault(row.get("property_type_code", 0), []).append(row)
+            chosen = []
+            while len(chosen) < cap and any(groups.values()):
+                for code in sorted(groups):
+                    if groups[code] and len(chosen) < cap:
+                        chosen.append(groups[code].pop(0))
+            return chosen
+
+        results = diverse_take(candidates["sale"], sale_cap) + diverse_take(candidates["lease"], lease_cap)
+        all_requested = sum(len(candidates[kind]) for kind in requested)
+        truncated = scan_truncated or len(results) < all_requested
+        return {"listings": results[:limit], "truncated": truncated, "records_discovered": all_requested,
+                "records_scanned": scanned_lines, "scan_truncated": scan_truncated,
+                "skipped_malformed_records": skipped_malformed,
+                "sale_listing_records_seen": sale_records_scanned if "sale" in transaction_types else 0,
+                "transaction_types_searched": list(transaction_types), "city": city}
+
     def _ensure_active_spaces_loaded(self):
         """Index all active commercial spaces across Houston in memory for fast screening."""
         if self._active_spaces_cache is not None:
