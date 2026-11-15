@@ -484,6 +484,10 @@ def main():
                     self.send(b'{"error":"Opportunity data unavailable. Run opportunity.py --build once."}',
                               "application/json", 502)
                 return
+            if route.path == "/api/signal-guide":
+                import signal_guide
+                self.send(json.dumps(signal_guide.guide(), default=str).encode(), "application/json")
+                return
             if route.path == "/api/neighborhood/industries":
                 self.send(json.dumps(neighborhood.industry_catalog()).encode(), "application/json")
                 return

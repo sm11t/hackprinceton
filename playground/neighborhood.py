@@ -66,6 +66,12 @@ RADIUS_MI = 3.0
 MOMENTUM_RADIUS_MI = 5.0  # wider than the residents radius: the kit is a sample of buildings
 MIN_FACILITIES = 30       # fewer mapped facilities than this: no lookalike model for the industry
 VALIDATED_AUC = 0.6       # below this on the spatial hold-out, the lookalike is shown but does not vote
+# Vote thresholds (signal_guide.py serves these to the UI legend, so the legend cannot drift from the code).
+TREND_POINTS = 0.02       # population trend votes beyond +/-2 points vs the Houston area (and beyond the ACS MOE)
+LOOKALIKE_PLUS, LOOKALIKE_MINUS = 70, 30  # percentile cut-offs for a validated lookalike
+SUPPLY_UNDER, SUPPLY_OVER = 0.5, 2.0      # local supply rate vs the Houston-area rate: underserved / crowded
+SUPPLY_P = 0.1            # supply votes only when the gap is unlikely by chance (Poisson tail p below this)
+VERDICT_TOTAL = 2         # coordinator: supported at total >= +2, weak at total <= -2 (with business-specific evidence)
 MAX_TRAINING_POSITIVES = 600  # subsample big industries (restaurants): same signal, bounded training time
 
 ACS = "https://api.census.gov/data/{year}/acs/acs5"
@@ -1074,7 +1080,7 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
                       "unknown. " + part["note"])))
         return {"findings": out_findings,
                 "signal": {"name": "population trend", "value": value,
-                           "stance": stance(value, plus=0.02, minus=-0.02) if clear else (0 if value is not None else None),
+                           "stance": stance(value, plus=TREND_POINTS, minus=-TREND_POINTS) if clear else (0 if value is not None else None),
                            "reason": (f"{BAND_LABEL[band]} change since 2015-19 is {fmt_pct(value, points=True)} vs the "
                                       f"Houston area (margin ±{(moe or 0) * 100:.1f} pts)"
                                       + ("" if clear else ": within the margin of error") if value is not None
@@ -1177,10 +1183,11 @@ def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
         elif not votes:
             stance_value = 0
         else:
-            stance_value = (1 if ratio <= 0.5 and p_low < 0.1 else -1 if ratio >= 2 and p_high < 0.1 else 0)
+            stance_value = (1 if ratio <= SUPPLY_UNDER and p_low < SUPPLY_P else -1 if ratio >= SUPPLY_OVER and p_high < SUPPLY_P
+                           else 0)
         tag = ("" if ratio is None or stance_value is None else " (underserved)" if stance_value == 1
                else " (crowded)" if stance_value == -1 else
-               " (not different from chance)" if (ratio <= 0.5 or ratio >= 2) and votes else "")
+               " (not different from chance)" if (ratio <= SUPPLY_UNDER or ratio >= SUPPLY_OVER) and votes else "")
         findings.append(record(
             f"{key}.supply_expected_at_area_rate", round(expected, 1), "computed", "poisson", when, 0.6, None,
             "unknown" if mapping_gap else "agrees",
@@ -1342,7 +1349,7 @@ def lookalike_agent(lat, lon, industries, radius=RADIUS_MI):
         ]
         return {"findings": findings,
                 "signal": {"name": "lookalike", "value": pct, "validated": validated,
-                           "stance": stance(pct, plus=70, minus=30) if validated else None,
+                           "stance": stance(pct, plus=LOOKALIKE_PLUS, minus=LOOKALIKE_MINUS) if validated else None,
                            "reason": (f"Looks more like places that already have {label} than {pct}% of "
                                       "Houston-area neighborhoods" +
                                       ("" if validated else f" (model AUC {spatial['auc']} < {VALIDATED_AUC}: "
@@ -1657,9 +1664,9 @@ def coordinate(key, signals):
     specific = [sg for sg in (look, supply) if sg and sg["stance"] is not None]
     if len(known) < 2 or not specific:
         verdict = "unknown"
-    elif total >= 2 and any(sg["stance"] == 1 for sg in specific) and not (look and look["stance"] == -1):
+    elif total >= VERDICT_TOTAL and any(sg["stance"] == 1 for sg in specific) and not (look and look["stance"] == -1):
         verdict = "supported"
-    elif (look and look["stance"] == -1) or (total <= -2 and any(sg["stance"] == -1 for sg in specific)):
+    elif (look and look["stance"] == -1) or (total <= -VERDICT_TOTAL and any(sg["stance"] == -1 for sg in specific)):
         verdict = "weak"
     else:
         verdict = "mixed"
