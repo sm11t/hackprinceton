@@ -42,7 +42,7 @@
   const EFFECT = { blocks: ["red", "Blocks"], check: ["amber", "Needs a check"], supports: ["green", "Supports"], unknown: ["grey", "Unknown"] };
   const VLABEL = { GO: "Go", CONDITIONAL: "Conditional", "NO-GO": "No-go" };
   const GROUPS = [
-    { id: "g-building", stage: "Helix stage 2 · Building preflight", title: "Is the building what it claims?", lede: "Where it is, what CoStar says it is, and whether the scans agree.", agents: ["planner", "site", "building", "records"] },
+    { id: "g-building", stage: "Helix stage 2 · Building preflight", title: "Is the building what it claims?", lede: "Where it is, what CoStar says it is, and whether the scans agree.", agents: ["planner", "site", "building", "records", "scans"] },
     { id: "g-hood", stage: "Helix stage 3 · Business options", title: "Does the neighborhood want it?", lede: "Four independent signals, each with a stated rule, then a coordinator that combines them.", agents: ["residents", "competitors", "momentum", "lookalike", "coordinator"] },
     { id: "g-legal", stage: "Helix stage 3 · Use-specific compliance", title: "Can it legally open here?", lede: "Who permits this pin, what this business needs, and what a person must still confirm. Nothing here is an approval.", agents: ["permits"] },
     { id: "g-money", stage: "Helix stage 4 · Feasibility", title: "What does it cost, and is the rent fair?", lede: "Sourced opening costs scaled to this space, the asking rent against signed deals, and a 3-month delay.", agents: ["money", "deal"] },
@@ -53,6 +53,7 @@
     momentum: "Are businesses like it moving in or out?", lookalike: "Does it look like places that already have it?",
     coordinator: "What do the four signals add up to?", money: "What does it cost to open here?", deal: "Is the asking rent fair?",
     records: "Do CoStar and the scans agree?", permits: "Who permits it, and what must be approved?",
+    scans: "What do the Matterport and Vexcel scans show about the space?",
   };
 
   // ---------- load ----------

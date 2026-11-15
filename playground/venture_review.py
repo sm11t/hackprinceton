@@ -138,7 +138,7 @@ def signal_rule(name):
 
 
 def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, signals, deal_step, records_step, permits_step,
-            blockers, conditions, verdict):
+            blockers, conditions, verdict, scans_step=None):
     """Every reason behind the verdict as rows {text, effect, decides, agent, signal{name, value, rule}, refs}.
 
     effect: blocks | check | supports | unknown. `decides` marks the rows the verdict rule actually used (every
@@ -261,6 +261,16 @@ def because_rows(*, key, budget, reserve, fit, cost, stress, rent, decision, sig
             + unknown_records[0]["note"][:140], "unconfirmed records", str(len(unknown_records)),
             "each fact confirmed by a second record", [("records", unknown_records[0]["fact"])])
 
+    for r in (scans_step or {}).get("findings", []):  # Helix Stage 2 physical profile
+        if str(r["source"]).startswith("ai:"):
+            add("check" if "effect=check" in r["note"] else "unknown", "scans", "AI-flagged, not verified: " + str(r["value"]),
+                "AI assessment", r["note"].split(".")[0], "informs only; a person must verify", [("scans", r["fact"], r["value"])])
+        elif r["status"] == "conflict":
+            add("check", "scans", "Scans and CoStar disagree: " + r["note"].split("] ", 1)[-1], r["fact"].replace("scan.", ""),
+                str(r["value"]), "scan observation agrees with CoStar", [("scans", r["fact"], r["value"])], decides=True)
+        elif r["status"] == "agrees":
+            add("supports", "scans", "Scans confirm CoStar: " + r["note"].split("] ", 1)[-1], r["fact"].replace("scan.", ""),
+                str(r["value"]), "scan observation agrees with CoStar", [("scans", r["fact"], r["value"])])
     where = (permits_step or {}).get("jurisdiction") or {}
     j_rule = "permits follow the official boundary (Census), not the postal city"
     j_refs = [("permits", "jurisdiction")]
@@ -596,6 +606,35 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
                 "handoff": "Conflicts become conditions on the verdict."}
     records_step = step(trace, "records", "Do CoStar's record and the linked scans agree?", records)
 
+    scans_step = None
+    try:
+        import vision_assess
+        profile = vision_assess.load_profile(property_id)
+    except (ImportError, OSError, ValueError):
+        profile = None
+    if profile:  # Helix Stage 2 physical profile (Matterport + Vexcel): deterministic checks, then the bounded AI layer
+        def scans():
+            facts = dict(building["facts"])
+            recs = vision_assess.deterministic(profile, facts)
+            ai, meta = vision_assess.ai_assess(profile, key)
+            for r in recs:
+                if r["status"] == "conflict":
+                    conditions.append("Scans and CoStar disagree: " + r["note"].split("] ", 1)[-1][:150])
+            agree = sum(r["status"] == "agrees" for r in recs)
+            return {"findings": recs + ai, "confidence": 0.5, "ai": meta,
+                    "inputs": {"profile": profile.get("source") or "Helix Stage 2",
+                               "observations": len(profile.get("observations", []))},
+                    "sources": [{"name": f"{profile.get('source') or 'Helix Stage 2'} physical profile",
+                                 "url": None, "retrieved_at": profile.get("generated_at"), "cached": True,
+                                 "note": "Matterport + Vexcel observations"}],
+                    "summary": (f"{len(recs)} observation(s) from the scans: {agree} agree with CoStar, "
+                                f"{sum(r['status'] == 'conflict' for r in recs)} conflict"
+                                + (f"; {len(ai)} AI-flagged constraint(s), not verified" if ai else "")
+                                + (f" ({meta['error']})" if meta.get("error") else "")),
+                    "handoff": "Scan vs CoStar conflicts become conditions. AI findings are for a person to verify; "
+                               "they never decide the verdict."}
+        scans_step = step(trace, "scans", "What do the Matterport and Vexcel scans show about the space?", scans)
+
     compliance_holder = {}
 
     def permits():
@@ -734,7 +773,7 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
     neighborhood_steps = [s for s in hood["trace"] if s["agent"] in ("residents", "competitors", "momentum", "lookalike",
                                                                      "coordinator", "narrator")]
     order = ["planner", "site", "building", "residents", "competitors", "momentum", "lookalike", "coordinator",
-             "money", "deal", "records", "permits", "narrator", "verdict"]
+             "money", "deal", "records", "scans", "permits", "narrator", "verdict"]
     trace = sorted(trace + neighborhood_steps, key=lambda s: order.index(s["agent"]) if s["agent"] in order else 99)
     checks = list(dict.fromkeys(fit.get("unknowns", []) + fit.get("verify", []) + conditions))
     for s in trace:  # lift this business's signal onto its neighborhood step, for the readable agent run
@@ -744,7 +783,8 @@ def review(business, property_id, suite=None, budget=None, reserve=0.0, kit=None
     signals = {s["signal"]["name"]: s["signal"] for s in trace if s.get("signal")}
     because = because_rows(key=key, budget=budget, reserve=reserve, fit=fit, cost=cost, stress=money_holder.get("stress"),
                       rent=rent, decision=decision, signals=signals, deal_step=deal_step, records_step=records_step,
-                      permits_step=permits_step, blockers=blockers, conditions=conditions, verdict=verdict)
+                      permits_step=permits_step, blockers=blockers, conditions=conditions, verdict=verdict,
+                      scans_step=scans_step)
     evidence, owner = [], []
     for s in trace:
         for r in s.get("findings", []):

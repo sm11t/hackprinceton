@@ -1,4 +1,6 @@
 """Tests for the budget-first venture pieces: cash to open, the opportunity scan and the deep review."""
+import json
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -412,3 +414,61 @@ class OutsideHouston(unittest.TestCase):
         self.assertFalse(any("Room for" in r for r in d["building"]["reasons"]))
         self.assertFalse(any("outdoor play" in u for u in d["building"]["unknowns"]))
         self.assertEqual([s["agent"] for s in out["trace"]], ["planner", "site", "building", "coordinator"])
+
+
+class VisionAssess(unittest.TestCase):
+    """Bounded AI layer: deterministic scan checks first; AI output is cited, cached, capped and never decides."""
+    def setUp(self):
+        import tempfile
+        import vision_assess as va
+        self.va = va
+        self.tmp = Path(tempfile.mkdtemp())
+        self.p1 = mock.patch.object(va, "PROFILES", self.tmp / "profiles")
+        self.p2 = mock.patch.object(va, "CACHE", self.tmp / "ai")
+        self.p1.start(); self.p2.start()
+        (self.tmp / "profiles").mkdir()
+        self.profile = {"property_id": 1, "source": "Helix Stage 2 (test fixture)", "observations": [
+            {"id": "o1", "fact": "clear_height_ft", "value": 9, "unit": "ft", "source": "matterport", "confidence": 0.6},
+            {"id": "o2", "fact": "floors", "value": 1, "source": "vexcel", "confidence": 0.7},
+            {"id": "o3", "fact": "entrances", "value": 1, "source": "vexcel", "confidence": 0.5}]}
+        (self.tmp / "profiles" / "1.json").write_text(json.dumps(self.profile))
+
+    def tearDown(self):
+        self.p1.stop(); self.p2.stop()
+
+    def test_deterministic_compares_with_costar(self):
+        recs = self.va.deterministic(self.va.load_profile(1), {"ceiling_ft": 18, "stories": 1})
+        by = {r["fact"]: r["status"] for r in recs}
+        self.assertEqual(by, {"scan.clear_height_ft": "conflict", "scan.floors": "agrees", "scan.entrances": "unknown"})
+
+    def test_ai_is_off_by_default_cited_cached_and_never_verified(self):
+        prof = self.va.load_profile(1)
+        with mock.patch.dict(os.environ, {"AI_ASSESS": ""}):
+            recs, meta = self.va.ai_assess(prof, "fitness_gym", chat=lambda *a, **k: self.fail("must not call"))
+        self.assertEqual(recs, [])
+        reply = json.dumps({"constraints": [
+            {"text": "9 ft ceiling may limit equipment", "effect": "check", "cites": ["o1"], "uncertainty": "medium"},
+            {"text": "made-up claim", "effect": "check", "cites": ["o9"]},
+            {"text": "tries to approve", "effect": "supports", "cites": ["o1"]}]})
+        calls = []
+        with mock.patch.dict(os.environ, {"AI_ASSESS": "1"}):
+            recs, meta = self.va.ai_assess(prof, "fitness_gym", chat=lambda *a, **k: calls.append(1) or reply)
+            again, _ = self.va.ai_assess(prof, "fitness_gym", chat=lambda *a, **k: calls.append(1) or reply)
+        self.assertEqual(len(calls), 1)                      # cached: one call, ever
+        self.assertEqual(len(recs), 1)                       # uncited and out-of-contract output dropped
+        self.assertEqual(recs[0]["status"], "unknown")
+        self.assertTrue(recs[0]["needs_human"])
+        self.assertIn("not verified", recs[0]["note"])
+        self.assertEqual(len(again), 1)
+
+    def test_review_uses_profile_conflicts_but_ai_never_decides(self):
+        cached = [self.va.record("ai.fitness_gym.constraint", "Low ceiling", "ai:test", "o1", None, 0.3, None,
+                                 "unknown", needs_human=True, note="AI assessment, not verified. effect=check")]
+        real = self.va.deterministic
+        with mock.patch.object(self.va, "ai_assess", lambda *a, **k: (cached, {"ran": True})), \
+                mock.patch.object(self.va, "deterministic", lambda prof, facts: real(prof, {**facts, "ceiling_ft": 18})):
+            out = Verdict.run_review(self)
+        rows = [r for r in out["because"] if r["agent"] == "scans"]
+        self.assertTrue(any(r["text"].startswith("AI-flagged") and not r["decides"] for r in rows))
+        self.assertTrue(any("disagree" in c for c in out["conditions"]))   # deterministic scan conflict decides
+        self.assertTrue(all(not r["decides"] for r in rows if r["text"].startswith("AI-flagged")))
