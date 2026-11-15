@@ -185,13 +185,14 @@ class Residents(unittest.TestCase):
                                       "evidence_url", "status", "needs_human", "note"})
 
 
-def facility(lat, lon, name=None, indoor=False, commercial=False, osm="node/1"):
+def facility(lat, lon, name=None, indoor=False, commercial=False, osm="node/1", capacity=None):
     return {"lat": lat, "lon": lon, "name": name, "indoor": indoor, "commercial": commercial,
-            "osm_ids": [osm], "features": 1, "osm_id": osm}
+            "osm_ids": [osm], "features": 1, "osm_id": osm, "ref": osm, "url": n.osm_link(osm), "capacity": capacity}
 
 
-def fake_facilities(rows):
-    meta = {"url": "https://overpass.test", "retrieved_at": "2026-11-14T00:00:00", "cached": True}
+def fake_facilities(rows, source="public:osm"):
+    meta = {"url": "https://overpass.test", "retrieved_at": "2026-11-14T00:00:00", "cached": True,
+            "source": source, "source_name": "test source", "geocoded": len(rows), "listed": len(rows)}
     return lambda key: (rows, meta, n.GridIndex(rows))
 
 
@@ -218,7 +219,7 @@ class Competitors(unittest.TestCase):
         facts = {r["fact"]: r for r in out["findings"]}
         self.assertEqual(facts["indoor_pickleball.competitors_within_radius"]["value"], 2)
         # Local: 2 per 10,000 residents; area: 3 per 15,000 = 2 per 10k -> ratio 1.0, neutral
-        self.assertEqual(facts["indoor_pickleball.supply_per_10k_residents"]["value"], 2.0)
+        self.assertEqual(facts["indoor_pickleball.supply_rate"]["value"], 2.0)
         self.assertEqual(out["per_industry"]["indoor_pickleball"]["signal"]["stance"], 0)
         self.assertEqual(facts["indoor_pickleball.nearest_competitor"]["value"]["name"], "A")
 
@@ -230,6 +231,17 @@ class Competitors(unittest.TestCase):
         cafe = out["per_industry"]["cafe"]["signal"]
         self.assertEqual(cafe["stance"], 0)           # cafes cluster on purpose: supply does not vote
         self.assertIn("cluster on purpose", cafe["reason"])
+
+
+    def test_childcare_supply_is_seats_per_child_under_5(self):
+        rows = [facility(29.80, -95.40, "Little Stars", True, True, "1", capacity=150),
+                facility(30.30, -95.40, "Far Away", True, True, "2", capacity=150)]
+        with FakeTables(), mock.patch.object(n, "facilities", fake_facilities(rows, "public:tx_hhsc_childcare")):
+            out = n.competitors_agent(29.80, -95.40, ["childcare"])
+        # Local: 150 seats / (10000/7 under-5) ; area: 300 seats / (15000/7) -> ratio 1.07
+        signal = out["per_industry"]["childcare"]["signal"]
+        self.assertAlmostEqual(signal["value"], round((150 / (10000 / 7)) / (300 / (15000 / 7)), 2))
+        self.assertIn("licensed seats", signal["reason"])
 
 
 class Momentum(unittest.TestCase):

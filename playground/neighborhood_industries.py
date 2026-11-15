@@ -17,6 +17,8 @@ Fields:
   participation  optional sourced national participation figure
   places       what the mapped facilities are, for sentences ("pickleball courts or clubs, indoor or
                outdoor"); defaults to the lowercased label
+  dataset      optional authoritative source used instead of OpenStreetMap for the locations
+               (e.g. Texas licensed childcare centers, with licensed capacity)
   supply_votes False for businesses that cluster on purpose (restaurants, bars, cafes): many
                nearby is not a negative on its own, so local supply is shown but does not vote
 """
@@ -81,6 +83,8 @@ INDUSTRIES = {
     "childcare": {
         "label": "Childcare / daycare", "group": "Children & education",
         "osm": ['nwr["amenity"~"^(childcare|kindergarten)$"]'],
+        "dataset": "tx_hhsc_childcare",
+        "places": "licensed childcare centers",
         "names": r"day ?care|child ?care|childcare|preschool|pre-school|montessori|kindercare|kiddie academy|"
                  r"primrose school|goddard school|la petite|tutor time|early (learning|childhood)|nursery school|"
                  r"children'?s (center|academy|learning)|child development",

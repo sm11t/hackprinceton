@@ -135,6 +135,9 @@ def fetch(url, params=None, form=None, kind="json", timeout=180):
             if error.code not in (429, 502, 503, 504):
                 raise last from None
         except (URLError, TimeoutError) as error:
+            if "CERTIFICATE_VERIFY_FAILED" in str(getattr(error, "reason", error)):
+                raw = curl(full, body, timeout)  # Python's CA bundle lacks this chain; curl uses the system store
+                break
             last = RuntimeError(f"Could not reach {url}: {getattr(error, 'reason', error)}")
         time.sleep(5 * (attempt + 1))
     else:
@@ -144,6 +147,18 @@ def fetch(url, params=None, form=None, kind="json", timeout=180):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"url": shown, "retrieved_at": retrieved, "payload": payload}))
     return payload, {"url": shown, "retrieved_at": retrieved, "cached": False}
+
+
+def curl(url, body=None, timeout=180):
+    """Fetch with the system curl (still verifies TLS, against the OS trust store)."""
+    import subprocess
+    command = ["curl", "-sS", "--fail", "-m", str(timeout), "-A", USER_AGENT, url]
+    if body is not None:
+        command[1:1] = ["--data-binary", "@-"]
+    result = subprocess.run(command, input=body, capture_output=True, timeout=timeout + 5)
+    if result.returncode:
+        raise RuntimeError(f"Could not reach {url.split('?')[0]}: {result.stderr.decode(errors='replace')[:200]}")
+    return result.stdout.decode("utf-8", "replace")
 
 
 def source(name, meta, note=""):
@@ -423,25 +438,103 @@ def cluster(points, radius_mi):
     return facilities_out
 
 
+TX_CHILDCARE = "https://data.texas.gov/resource/bc5r-88dy.json"
+TX_CHILDCARE_PAGE = "https://data.texas.gov/dataset/HHSC-CCL-Daycare-and-Residential-Operations-Data/bc5r-88dy"
+BATCH_GEOCODER = "https://geocoding.geo.census.gov/geocoder/locations/addressbatch"
+COUNTY_NAMES = {"201": "HARRIS", "157": "FORT BEND", "339": "MONTGOMERY", "039": "BRAZORIA", "167": "GALVESTON"}
+
+
+def batch_geocode(rows):
+    """Census batch geocoder (one POST, up to 10,000 addresses). rows: [(id, street, city, zip)] -> {id: (lat, lon)}."""
+    csv_text = "".join(f'{i},"{street.replace(chr(34), "")}","{city}",TX,{zip_}\n' for i, street, city, zip_ in rows)
+    digest = hashlib.sha1(csv_text.encode()).hexdigest()[:20]
+    path = CACHE / "http" / f"geocode-batch-{digest}.json"
+    if path.exists():
+        saved = json.loads(path.read_text())
+        return {k: tuple(v) for k, v in saved["payload"].items()}, {"url": BATCH_GEOCODER,
+                                                                     "retrieved_at": saved["retrieved_at"],
+                                                                     "cached": True}
+    if offline():
+        raise Offline("Offline mode and no cached batch geocode")
+    boundary = "----neighborhood" + digest
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"benchmark\"\r\n\r\nPublic_AR_Current\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"addressFile\"; filename=\"a.csv\"\r\n"
+            f"Content-Type: text/csv\r\n\r\n{csv_text}\r\n--{boundary}--\r\n").encode()
+    request = Request(BATCH_GEOCODER, data=body, headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}", "User-Agent": USER_AGENT})
+    with urlopen(request, timeout=600) as response:
+        text = response.read().decode("utf-8", "replace")
+    import csv
+    import io
+    out = {}
+    for cells in csv.reader(io.StringIO(text)):
+        if len(cells) >= 6 and cells[2] == "Match" and "," in cells[5]:
+            lon, lat = (float(v) for v in cells[5].split(","))
+            out[cells[0]] = (lat, lon)
+    retrieved = now_iso()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"url": BATCH_GEOCODER, "retrieved_at": retrieved, "payload": out}))
+    return out, {"url": BATCH_GEOCODER, "retrieved_at": retrieved, "cached": False}
+
+
+def tx_childcare_centers():
+    """Texas HHSC licensed childcare centers (active) in the Houston-area counties, geocoded by the Census."""
+    counties = ",".join(f"'{c}'" for c in COUNTY_NAMES.values())
+    params = {"$select": "operation_id,operation_name,address_line,city,zipcode,total_capacity,licensed_to_serve_ages",
+              "$where": f"county in({counties}) AND operation_type='Licensed Center' AND operation_status='Y'",
+              "$limit": "10000"}
+    records, meta = fetch(TX_CHILDCARE, params)
+    wanted = [(r["operation_id"], r.get("address_line") or "", r.get("city") or "", (r.get("zipcode") or "")[:5])
+              for r in records if r.get("address_line")]
+    points, geo_meta = batch_geocode(wanted)
+    rows = []
+    for r in records:
+        point = points.get(r["operation_id"])
+        if not point:
+            continue
+        rows.append({"lat": point[0], "lon": point[1], "name": (r.get("operation_name") or "").strip() or None,
+                     "indoor": True, "commercial": True, "features": 1,
+                     "capacity": int(float(r["total_capacity"])) if r.get("total_capacity") else None,
+                     "ref": r["operation_id"], "url": f"{TX_CHILDCARE}?operation_id={r['operation_id']}"})
+    meta = {**meta, "url": TX_CHILDCARE_PAGE, "geocoded": len(rows), "listed": len(records),
+            "geocoder": geo_meta["url"]}
+    return rows, meta
+
+
+DATASETS = {"tx_hhsc_childcare": (tx_childcare_centers, "Texas HHSC Child Care Licensing (active licensed centers), "
+                                                        "geocoded by the Census batch geocoder")}
+
+
 @lru_cache(maxsize=None)
 def facilities(key):
-    """All facilities for an industry across the Houston area. Returns (rows, meta, GridIndex)."""
+    """All locations for an industry across the Houston area. Returns (rows, meta, GridIndex).
+
+    Uses the industry's authoritative dataset when it has one, otherwise OpenStreetMap.
+    """
     spec = INDUSTRIES[key]
-    query = overpass_query(spec["osm"])
-    payload, meta = fetch(OVERPASS, form={"data": query})
-    points = []
-    for e in payload.get("elements", []):
-        lat, lon = element_point(e)
-        if lat is None:
-            continue
-        tags = e.get("tags") or {}
-        points.append({"lat": lat, "lon": lon, "name": tags.get("name"), "osm_id": f"{e['type']}/{e['id']}",
-                       "indoor": is_indoor(tags), "commercial": is_commercial(tags)})
-    rows = cluster(points, spec["cluster_mi"])
-    # Keep facilities inside the Houston area: within 2 miles of a Houston-area tract point.
+    if spec.get("dataset"):
+        loader, name = DATASETS[spec["dataset"]]
+        rows, meta = loader()
+        meta = {**meta, "source_name": name, "source": f"public:{spec['dataset']}"}
+    else:
+        query = overpass_query(spec["osm"])
+        payload, meta = fetch(OVERPASS, form={"data": query})
+        points = []
+        for e in payload.get("elements", []):
+            lat, lon = element_point(e)
+            if lat is None:
+                continue
+            tags = e.get("tags") or {}
+            points.append({"lat": lat, "lon": lon, "name": tags.get("name"), "osm_id": f"{e['type']}/{e['id']}",
+                           "indoor": is_indoor(tags), "commercial": is_commercial(tags)})
+        rows = cluster(points, spec["cluster_mi"])
+        for f in rows:
+            f["ref"], f["url"], f["capacity"] = f["osm_ids"][0], osm_link(f["osm_ids"][0]), None
+        meta = {**meta, "url": OVERPASS + "?data=" + query, "source_name": "OpenStreetMap via Overpass",
+                "source": "public:osm"}
+    # Keep locations inside the Houston area: within 2 miles of a Houston-area tract point.
     tract_idx = tract_index(2024)
     rows = [f for f in rows if tract_idx.near(f["lat"], f["lon"], 2.0)]
-    meta = {**meta, "url": OVERPASS + "?data=" + query}
     return rows, meta, GridIndex(rows)
 
 
@@ -938,60 +1031,80 @@ def residents_agent(lat, lon, industries, radius=RADIUS_MI):
 
 
 def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
-    """Who already serves it: facilities near the site and supply per 10k residents vs the Houston area."""
+    """Who already serves it: locations near the site and supply per resident vs the Houston area.
+
+    When the source has capacity (licensed childcare seats) and the industry has a demand
+    age band, supply is seats per resident of that band (seats per child under 5).
+    """
     profile = area_profile(round(lat, 5), round(lon, 5), radius)
     totals = area_totals()
     sources = []
 
     def one(key):
         rows, meta, index = facilities(key)
-        word = INDUSTRIES[key]["places"]
-        sources.append(source(f"OpenStreetMap via Overpass ({word})", meta,
-                              "Volunteer-mapped; absence on the map is not proof of absence."))
+        spec = INDUSTRIES[key]
+        word = spec["places"]
+        osm = meta["source"] == "public:osm"
+        note = ("Volunteer-mapped; absence on the map is not proof of absence." if osm else
+                f"{meta.get('geocoded')} of {meta.get('listed')} listed locations placed by the Census geocoder.")
+        sources.append(source(f"{meta['source_name']} ({word})", meta, note))
         local = sorted(index.near(lat, lon, radius), key=lambda x: x[0])
         wider = index.near(lat, lon, 5.0)
-        area_rate = len(rows) / totals["population"] * 10_000
-        local_rate = len(local) / profile["population"] * 10_000 if profile and profile["population"] else None
+        band = spec["demand_band"]
+        seats = band and rows and all(f.get("capacity") is not None for f in rows[:50])
+        if seats:  # capacity per resident of the demand band (e.g. licensed seats per child under 5)
+            unit = f"licensed seats per {BAND_LABEL[band].lower()} child"
+            local_supply = sum(f["capacity"] or 0 for _, f in local)
+            local_demand = profile[band] if profile else None
+            area_supply, area_demand = sum(f["capacity"] or 0 for f in rows), totals[band]
+            local_rate = local_supply / local_demand if local_demand else None
+            area_rate = area_supply / area_demand
+            shown = lambda v: f"{v:.2f}"  # noqa: E731
+        else:
+            unit = "per 10k residents"
+            local_rate = len(local) / profile["population"] * 10_000 if profile and profile["population"] else None
+            area_rate = len(rows) / totals["population"] * 10_000
+            shown = lambda v: f"{v:.2f}"  # noqa: E731
         ratio = local_rate / area_rate if local_rate is not None and area_rate else None
         nearest = min(index.near(lat, lon, 25.0), key=lambda x: x[0], default=None)
         when = (meta.get("retrieved_at") or "")[:10]
         paid = sum(f["indoor"] or f["commercial"] for _, f in local)
         findings = [
-            record(f"{key}.competitors_within_radius", len(local), "public:osm", f"overpass-{key}", when, 0.6,
-                   meta["url"], "agrees",
-                   note=f"Mapped {word} within {radius:g} miles ({paid} indoor or paid). Features in one place "
-                        "count as one facility. OpenStreetMap is incomplete."),
-            record(f"{key}.competitors_within_5mi", len(wider), "public:osm", f"overpass-{key}", when, 0.6,
-                   meta["url"], "agrees", note="Same count at 5 miles."),
-            record(f"{key}.supply_per_10k_residents", None if local_rate is None else round(local_rate, 2),
-                   "computed", "osm-count / acs-population", when, 0.5, meta["url"],
+            record(f"{key}.competitors_within_radius", len(local), meta["source"], f"{spec.get('dataset') or 'overpass'}-{key}",
+                   when, 0.6 if osm else 0.85, meta["url"], "agrees",
+                   note=f"{word.capitalize()} within {radius:g} miles" + (f" ({paid} indoor or paid). Features in one "
+                        "place count as one location. OpenStreetMap is incomplete." if osm else
+                        f"; {sum(f['capacity'] or 0 for _, f in local):,} licensed seats.")),
+            record(f"{key}.competitors_within_5mi", len(wider), meta["source"], f"{spec.get('dataset') or 'overpass'}-{key}",
+                   when, 0.6 if osm else 0.85, meta["url"], "agrees", note="Same count at 5 miles."),
+            record(f"{key}.supply_rate", None if local_rate is None else round(local_rate, 3), "computed",
+                   f"{'capacity' if seats else 'count'} / acs-population", when, 0.5 if osm else 0.75, meta["url"],
                    "agrees" if local_rate is not None else "unknown",
-                   note=f"Houston area: {area_rate:.2f} per 10k ({len(rows)} facilities / "
-                        f"{totals['population']:,.0f} residents). Ratio here vs area: "
-                        f"{'unknown' if ratio is None else f'{ratio:.2f}x'}."),
+                   note=f"Supply here, {unit}. Houston area: {shown(area_rate)} ({len(rows):,} locations). Ratio here "
+                        f"vs area: {'unknown' if ratio is None else f'{ratio:.2f}x'}."),
         ]
         if nearest:
             d, f = nearest
-            findings.append(record(f"{key}.nearest_competitor", {"name": f["name"] or "(unnamed on the map)",
-                                                                 "miles": round(d, 2)},
-                                   "public:osm", f["osm_ids"][0], when, 0.6, osm_link(f["osm_ids"][0]), "agrees",
+            findings.append(record(f"{key}.nearest_competitor", {"name": f["name"] or "(unnamed)", "miles": round(d, 2)},
+                                   meta["source"], f["ref"], when, 0.6, f["url"], "agrees",
                                    note="Straight-line distance, not drive time."))
-        votes = INDUSTRIES[key]["supply_votes"]
+        votes = spec["supply_votes"]
         tag = "" if ratio is None else " (underserved)" if ratio <= 0.5 else " (crowded)" if ratio >= 2 else ""
+        what = (f"{sum(f['capacity'] or 0 for _, f in local):,} licensed seats in {len(local)} {word} within "
+                f"{radius:g} mi = {ratio:.1f}x the Houston-area {unit.replace('per', 'rate per')}" if seats and ratio is not None
+                else f"{len(local)} {word} mapped within {radius:g} mi" + (f" ({paid} indoor or paid)" if local and osm else "")
+                + (f" = {ratio:.1f}x the Houston-area rate per resident" if ratio is not None else ""))
         return {"findings": findings,
                 "signal": {"name": "local supply", "value": None if ratio is None else round(ratio, 2),
                            "stance": None if ratio is None else (
                                0 if not votes else 1 if ratio <= 0.5 else -1 if ratio >= 2 else 0),
-                           "reason": ("Supply unknown" if ratio is None else
-                                      f"{len(local)} {word} mapped within {radius:g} mi"
-                                      + (f" ({paid} indoor or paid)" if local else "")
-                                      + f" = {ratio:.1f}x the Houston-area rate per resident{tag}"
+                           "reason": ("Supply unknown" if ratio is None else what + tag
                                       + ("" if votes else "; these businesses cluster on purpose, so supply "
                                                           "does not vote"))},
                 "summary": f"{len(local)} within {radius:g} mi, {len(wider)} within 5 mi"
                            + (f"; nearest {nearest[1]['name'] or 'unnamed'} at {nearest[0]:.1f} mi" if nearest else ""),
-                "nearby": [{"name": f["name"], "miles": round(d, 2), "indoor": f["indoor"],
-                            "commercial": f["commercial"], "url": osm_link(f["osm_ids"][0])} for d, f in local[:10]]}
+                "nearby": [{"name": f["name"], "miles": round(d, 2), "indoor": f["indoor"], "capacity": f.get("capacity"),
+                            "commercial": f["commercial"], "url": f["url"]} for d, f in local[:10]]}
     results = per_industry(industries, one)
     known = [k for k, v in results.items() if v.get("signal")]
     crowded = [INDUSTRIES[k]["label"] for k in known if results[k]["signal"]["stance"] == -1]
@@ -1000,7 +1113,7 @@ def competitors_agent(lat, lon, industries, radius=RADIUS_MI):
             "summary": one_or_many(industries, results,
                                    f"Checked {len(known)}/{len(industries)} industries. Underserved: "
                                    f"{', '.join(under) or 'none'}. Crowded: {', '.join(crowded) or 'none'}."),
-            "handoff": "Supply ratio per industry to the coordinator; facility locations train the lookalike agent."}
+            "handoff": "Supply ratio per industry to the coordinator; locations train the lookalike agent."}
 
 
 def momentum_agent(lat, lon, industries, radius=MOMENTUM_RADIUS_MI, kit=None, today=None):
@@ -1020,8 +1133,13 @@ def momentum_agent(lat, lon, industries, radius=MOMENTUM_RADIUS_MI, kit=None, to
     def by_year(items, field):
         return {y: sum(1 for r in items if r[field] and r[field][:4] == str(y) and r[field] <= today) for y in years}
 
+    buckets = {}  # industry -> local tenancies, built once (most tenants match no industry)
+    for r in local:
+        for k in r["industries"]:
+            buckets.setdefault(k, []).append(r)
+
     def moves(keys):
-        mine = [r for r in local if any(k in r["industries"] for k in keys)]
+        mine = list({r["id"]: r for k in keys for r in buckets.get(k, ())}.values())
         recent_in = [r for r in mine if r["arrival"] and since < r["arrival"] <= today]
         recent_out = [r for r in mine if r["departure"] and since < r["departure"] <= today]
         return mine, recent_in, recent_out
