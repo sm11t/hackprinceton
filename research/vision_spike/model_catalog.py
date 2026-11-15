@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 OUT = Path(__file__).resolve().parent / "output"
 OUT.mkdir(parents=True, exist_ok=True)
 URL = "https://openrouter.ai/api/v1/models"
-NEEDLES = ("deepseek/deepseek-v4.1-flash", "qwen/qwen3.8-flash")
+NEEDLES = ("deepseek/deepseek-v4.1-flash", "qwen/qwen3.8-flash", "perceptron/perceptron-mk1")
 
 
 def main():
