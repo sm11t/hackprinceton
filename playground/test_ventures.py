@@ -472,3 +472,49 @@ class VisionAssess(unittest.TestCase):
         self.assertTrue(any(r["text"].startswith("AI-flagged") and not r["decides"] for r in rows))
         self.assertTrue(any("disagree" in c for c in out["conditions"]))   # deterministic scan conflict decides
         self.assertTrue(all(not r["decides"] for r in rows if r["text"].startswith("AI-flagged")))
+
+
+class Stage3(unittest.TestCase):
+    """Stage 3 handover: all 26 gate outcomes, conditional top 3, unavailable stays unavailable."""
+    def run_stage3(self, reserve=None):
+        import compliance_engine as ce
+        import opportunity
+        import stage3
+        b = {"property_id": 9, "address": "1 Test Ave, Los Angeles, CA", "lat": 34.0, "lon": -118.2, "market": "los_angeles",
+             "facts": {"type": "2", "subtype": "", "gba": 7205, "stories": 1, "ceiling_ft": 14, "listed": []},
+             "spaces": [{"value": "L1", "suite": None, "sf": 7205, "monthly_rent": 10000, "lease_basis": "NNN"}],
+             "tours": 0, "evidence_flags": []}
+        ok = {"status": "fits", "scope": "", "space_sf": 7205, "capacity": None, "reasons": ["ok"], "unknowns": [],
+              "verify": ["check floor"], "sources": [], "basis": "b"}
+        no = dict(ok, status="no", reasons=["Not a typical fit"])
+        fits = {"fitness_gym", "auto_repair", "martial_arts"}
+        hood = lambda key, bld, suite: {"decisions": [{"building": ok if key in fits else no}]}  # noqa: E731
+        where = {"code": "los_angeles", "verified": True, "place": "Los Angeles city", "county": "Los Angeles County",
+                 "evidence_url": "https://geocoding.test", "retrieved_at": "2026-11-15T00:00:00+00:00", "note": "n"}
+        with mock.patch.object(opportunity, "find_building", lambda pid, kit=None: (b, "los_angeles")), \
+                mock.patch.object(vr, "outside_houston", hood), \
+                mock.patch.object(ce, "context_from_kit", lambda *a, **k: {"facts": {}, "property_id": 9}), \
+                mock.patch.object(ce, "preflight", lambda c: {"jurisdiction": where, "gates": [], "status": "needs_verification"}), \
+                mock.patch.object(ce, "check_business", lambda c, k, s=None: {"status": "needs_verification", "gates": [], "research": []}), \
+                mock.patch.object(vr, "property_record", lambda pid, kit="": {"id": 9, "attachments": []}), \
+                mock.patch.object(vc, "costs", lambda: FAKE), mock.patch.object(opportunity, "kit_file", lambda kit=None: Path("kit.zip")):
+            return stage3.run(9, 900000, reserve, save=False)
+
+    def test_reserve_unavailable_is_never_substituted(self):
+        out = self.run_stage3()
+        self.assertEqual(out["inputs"]["reserve"], "unavailable")
+        self.assertEqual(len(out["gates"]), len(nb.INDUSTRIES))
+        gym = next(g for g in out["gates"] if g["business"] == "fitness_gym")
+        self.assertTrue(gym["affordability"]["status"].endswith("if_reserve_at_most"))
+        self.assertTrue(any(m["question"].startswith("What reserve") for m in out["missing_evidence"]))
+        self.assertTrue(all(g["neighborhood"]["status"] == "unavailable" for g in out["gates"]))
+        self.assertEqual(out["shortlist"][0]["stage4_inputs"]["reserve"], "unavailable")
+
+    def test_shortlist_is_conditional_ranked_and_explained(self):
+        out = self.run_stage3(reserve=50000)
+        self.assertLessEqual(len(out["shortlist"]), 3)
+        self.assertTrue(all(c["gates"]["compliance"]["status"] == "pass_needs_verification" for c in out["shortlist"]))
+        self.assertEqual(len(out["tie_breaks"]), max(0, out["summary"]["pass_all_hard_gates"] - 1))
+        self.assertIn("Not a legal approval", out["method"]["nature"])
+        for m in out["missing_evidence"]:
+            self.assertTrue(m["question"] and m["needed_source"] and m["jurisdiction"] and m["status"])

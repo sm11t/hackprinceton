@@ -524,6 +524,27 @@ def main():
                 out.sort(key=lambda r: -r["listed_spaces"])
                 self.send(json.dumps({"query": q, "places": out[:12], "matches": len(rows)}).encode(), "application/json")
                 return
+            if route.path == "/api/stage3":
+                try:
+                    import stage3
+                    property_id = params.get("property_id", [""])[0]
+                    budget = params.get("budget", [""])[0]
+                    reserve = params.get("reserve", [""])[0]
+                    if not property_id.isdigit() or not budget.replace(".", "", 1).isdigit():
+                        raise ValueError("Give a CoStar property_id and a budget (reserve is optional).")
+                    if reserve and not reserve.replace(".", "", 1).isdigit():
+                        raise ValueError("reserve must be a number, or leave it out (unavailable).")
+                    body = stage3.run(int(property_id), float(budget), float(reserve) if reserve else None,
+                                      params.get("suite", [""])[0] or None, args.kit)
+                    if params.get("format", [""])[0] == "md":
+                        self.send(stage3.summary_md(body).encode(), "text/markdown; charset=utf-8")
+                    else:
+                        self.send(json.dumps(body, default=str).encode(), "application/json")
+                except ValueError as error:
+                    self.send(json.dumps({"error": str(error)}).encode(), "application/json", 400)
+                except (OSError, RuntimeError, KeyError):
+                    self.send(b'{"error":"Stage 3 unavailable. Check the kit and caches."}', "application/json", 502)
+                return
             if route.path == "/api/nessie/account":
                 try:
                     import suite_nessie
