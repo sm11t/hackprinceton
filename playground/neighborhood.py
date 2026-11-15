@@ -1008,16 +1008,29 @@ def lookalike_agent(lat, lon, use, radius=RADIUS_MI):
 
 # --- Site, coordinator, narrator ----------------------------------------------------
 
+@lru_cache(maxsize=512)
+def property_pin(property_id, kit=""):
+    """CoStar primaryAddress for a property, cached on disk (reading the encrypted zip is slow)."""
+    path = CACHE / "property-pins.json"
+    pins = json.loads(path.read_text()) if path.exists() else {}
+    if str(property_id) in pins:
+        return pins[str(property_id)]
+    from space_fit import load_property
+    kit_file = Path(kit) if kit else kit_path()
+    if not kit_file:
+        raise ValueError("CoStar kit not found; cannot look up the property id.")
+    password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
+    address = load_property(kit_file, property_id, password).get("primaryAddress") or {}
+    pins[str(property_id)] = address
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pins))
+    return address
+
+
 def site_agent(address=None, property_id=None, kit=None):
     """Resolve the request to one point: a CoStar property pin, or a Census-geocoded address."""
     if property_id:
-        from space_fit import load_property
-        kit = Path(kit) if kit else kit_path()
-        if not kit:
-            raise ValueError("CoStar kit not found; cannot look up the property id.")
-        password = os.environ.get("COSTAR_KIT_PASSWORD", "").encode() or None
-        prop = load_property(kit, int(property_id), password)
-        a = prop.get("primaryAddress") or {}
+        a = property_pin(int(property_id), str(kit or ""))
         if a.get("latitude") is None:
             raise ValueError("The CoStar record has no map pin.")
         street = " ".join(str(a.get(k) or "") for k in ("streetNumber", "streetDirection", "streetName", "streetType"))
@@ -1230,6 +1243,16 @@ def investigate(use, address=None, property_id=None, kit=None, explain=False):
         "offline": offline(), "elapsed_ms": round(1000 * (time.perf_counter() - started)),
         "computed_by": "All numbers and verdicts are computed in code. Only the optional summary is LLM-written.",
     }
+
+
+def warm(kit=None):
+    """Load the kit tenancies and cached tables in the background so the first request is quick."""
+    try:
+        kit_tenancies(kit)
+        for use in USES:
+            lookalike_model(use)
+    except (Offline, RuntimeError, OSError, ValueError, KeyError):
+        pass  # the request path reports what is missing
 
 
 def main():
