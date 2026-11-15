@@ -2,7 +2,7 @@
 import unittest
 
 from maximo import space_option
-from market_rank import rank_market, space_value
+from market_rank import build_allowance, rank_market, space_value
 
 
 def prop(pid, kind=2, ceiling=24.0, captions=(), number="100", street="Main"):
@@ -20,8 +20,9 @@ def prop(pid, kind=2, ceiling=24.0, captions=(), number="100", street="Main"):
 
 
 def space(sf, suite="A", rate=12.0, listing=1):
+    raw = {"rateHigh": rate, "rateBasis": 2, "squareFeetMax": sf, "serviceType": 13} if rate else {"squareFeetMax": sf}
     return {"listing_id": listing, "suite": suite, "square_feet": sf, "available_on": None, "on_market": None,
-            "raw": {"rateHigh": rate, "rateBasis": 2, "squareFeetMax": sf, "serviceType": 13}}
+            "raw": raw}
 
 
 def ids(result):
@@ -69,6 +70,22 @@ class MarketRanking(unittest.TestCase):
     def test_suite_value_matches_the_review_page_picker(self):
         for s in (space(9900, suite=None, listing=7), space(5000, suite=" 350 ")):
             self.assertEqual(space_value(s), space_option(s)["value"])
+
+    def test_no_listed_rent_means_budget_unknown_and_ranks_below_known(self):
+        result = self.rank((prop(1), [space(8000, rate=None)]), (prop(2), [space(8000, rate=20.0)]))
+        self.assertEqual(ids(result), [2, 1])
+        unknown = result["results"][1]
+        self.assertIsNone(unknown["within_budget"])
+        self.assertIn("budget fit unknown", unknown["why"])
+        self.assertEqual(result["budget_unknown"], 1)
+
+    def test_build_out_scales_with_size(self):
+        self.assertEqual(build_allowance("indoor pickleball", 10000), 200000)
+        self.assertEqual(build_allowance("indoor pickleball", 48600), 972000)
+        self.assertEqual(build_allowance("warehouse / storage", 10000), 25000)
+        result = self.rank((prop(1), [space(48600, rate=3.0)]), (prop(2), [space(6000, rate=12.0)]))
+        self.assertEqual(ids(result), [2, 1])  # the huge cheap-per-sq-ft space no longer wins on a lump sum
+        self.assertFalse(result["results"][1]["within_budget"])
 
     def test_unknown_use_rejected(self):
         with self.assertRaises(ValueError):

@@ -225,14 +225,17 @@ Rules: property type must suit the use, residential properties and dwelling tour
 `space_fit` on CoStar facts must not rule it out, and the space must meet a minimum size
 (pickleball: 3 courts = 5,400 sq ft, matching the cash scenario's 3-court revenue; fitness
 1,500 sq ft; others 1,000 sq ft; override with `--min-sf`). Ranked by fit verdict, then
-within budget, then no evidence flag (tour for another address, CoStar size math, asking rent
-under $3/sq ft/yr), then a listed rent, then lowest planning cash to open. One space per
+budget (within, then unknown because no asking rent is listed, then over), then no evidence
+flag (tour for another address, CoStar size math, asking rent under $3/sq ft/yr), then lowest
+planning cash to open. The review's build-out allowance ($200k, sized for the pilot's 10,000
+sq ft) is scaled per sq ft ($20/sq ft; warehouse $2.50), and each result link passes it to the
+review as `fitout` so both show the same cash. One space per
 building, no numeric score. Limits: no per-building aerial/scan data, so most non-pickleball
 uses are "investigate"; cash uses the same unverified allowances as the review; lease only.
 
 Houston, pickleball, $500k: 2,431 spaces in 240 buildings → 37 pass, top 5 = 15603 W Hardy
-Rd #350, 5829 W Sam Houston Pky #1009, 6855 Wynnwood Ln (9,900 sq ft), 1923 Kolfahl St,
-5025 Jensen Dr.
+Rd #350, 5829 W Sam Houston Pky #1009, 6855 Wynnwood Ln (9,900 sq ft, ~$331k to open), 1923
+Kolfahl St, 1800 Sherwood Forest St D1 (flagged).
 
 ## Physical fit (`space_fit.py`, `exterior.py`, `interior.py`)
 

@@ -19,7 +19,7 @@
   function reviewLink(row, data) {
     const params = new URLSearchParams({
       property: String(row.property_id), suite: row.suite, use: data.use, ownership: "lease",
-      capital: String(data.capital), reserve: String(data.reserve), run: "1",
+      capital: String(data.capital), reserve: String(data.reserve), fitout: String(row.build_cost), run: "1",
     });
     return `/maximo?${params}`;
   }
@@ -43,7 +43,8 @@
       const fit = data.by_verdict;
       status.textContent = `${data.spaces_screened.toLocaleString()} listed spaces in ${data.buildings_screened} buildings screened. `
         + `${data.buildings_passing} buildings pass (${fit.supported} supported by the data, ${fit.investigate} to investigate); `
-        + `${data.within_budget} within ${money.format(data.capital)}.`;
+        + `${data.within_budget} within ${money.format(data.capital)}`
+        + (data.budget_unknown ? `, ${data.budget_unknown} with no listed rent.` : ".");
       if (!data.results.length) status.textContent += " No space passed this screen.";
       for (const row of data.results) {
         const item = add(list, "li");
