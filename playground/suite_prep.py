@@ -164,7 +164,7 @@ def demo_ventures(scan, reviews):
                                       "shortlist": [entry("childcare", 23296, "A", "")]})
     made.append(("investigate $750k", v["id"]))
     for stage, vid in made:
-        print(f"  /suite#/v/{vid}/{stage.split()[0]}  ({stage})")
+        print(f"  /suite#/v/{vid}/{stage.split()[0]}  ({stage})   story: /flow?v={vid}")
 
 
 def warm_server(base):

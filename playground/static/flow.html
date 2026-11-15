@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Venture Suite · Flow</title>
+  <meta name="description" content="One budget, every Houston lease, 13 agents: the whole reasoning, with every source, before the verdict.">
+  <link rel="icon" href="data:,">
+  <script>
+    (function () {
+      var root = document.documentElement;
+      root.classList.add('js');
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) root.classList.add('static');
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/flow.css">
+</head>
+<body>
+  <a class="skip" href="#ch-verdict">Skip to the verdict</a>
+
+  <header class="nav glass" id="nav">
+    <a class="nav-home" href="/suite" title="Open the workspace view">Venture Suite</a>
+    <span class="nav-path" id="navPath">I have a budget</span>
+    <a class="nav-link" href="#ch-verdict" id="navSkip">Skip to verdict</a>
+    <button class="nav-link" type="button" data-legend>How to read the signals</button>
+  </header>
+
+  <nav class="rail" id="rail" aria-label="Stages"><ol id="railList"></ol><span class="rail-track" aria-hidden="true"><i id="railFill"></i></span></nav>
+
+  <main id="flow" aria-live="off">
+    <section class="hero" id="ch-hero">
+      <div class="fields" aria-hidden="true"><i class="f1"></i><i class="f2"></i><i class="f3"></i></div>
+      <div class="hero-inner">
+        <p class="eyebrow">Venture Suite · Houston</p>
+        <h1 class="display">One budget.<br>Every lease in Houston.</h1>
+        <p class="lede">Thirteen agents check every listed space against 26 kinds of business. You see each finding, the signal it gives and where it came from, before the verdict.</p>
+        <div class="hero-meta" id="heroMeta"><span class="spinner"></span> Reading your bank account and the market…</div>
+        <div class="scroll-hint" aria-hidden="true"><span>Scroll</span><i></i></div>
+      </div>
+    </section>
+    <div id="chapters"></div>
+  </main>
+
+  <dialog class="legend" id="legend"></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+
+  <script src="/static/vendor/gsap.min.js"></script>
+  <script src="/static/vendor/ScrollTrigger.min.js"></script>
+  <script src="/static/vendor/lenis.min.js"></script>
+  <script src="/static/vendor/three.min.js"></script>
+  <script src="/static/suite3d.js"></script>
+  <script src="/static/flow.js"></script>
+</body>
+</html>
