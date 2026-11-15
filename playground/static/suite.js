@@ -609,7 +609,7 @@
         <ul>${(r.blockers || []).map((b) => `<li style="color:#F3B4B0">${esc(tidy(b))}</li>`).join("")}${(r.blockers || []).length ? "" : (r.reasons || []).slice(0, 3).map((x) => `<li>${esc(tidy(x))}</li>`).join("")}</ul>
         ${flips.length ? `<div class="flip"><b>What would flip it:</b> ${flips.map(esc).join(" · ")}</div>` : r.verdict === "GO" ? `<div class="flip"><b>What would flip it:</b> nothing flagged. The checks below still need answers before you sign.</div>` : ""}
         <div class="actions" style="margin-top:12px"><span class="muted small">${esc(r.computed_by)}</span>
-          <button class="link-btn" data-explain="1">AI summary</button></div>
+          <button class="link-btn" data-explain="1">✦ Explain the neighborhood in plain English</button></div>
         <div class="narr"></div>
       </div></div>`;
   }
@@ -706,7 +706,16 @@
       box.querySelector('details[data-p="space"]').addEventListener("toggle", function onT(ev) {
         if (!ev.target.open || space.dataset.drawn) return;
         space.dataset.drawn = 1;
-        if (has3d()) { try { const c = window.Suite3D.space(space, { sf: +space.dataset.sf, ceiling_ft: +space.dataset.ceiling || null, business: r.business, label: r.label }); if (c) state.ctrls.push(c); } catch { /* 2D text stays */ } }
+        if (has3d()) {
+          try {
+            const c = window.Suite3D.space(space, { sf: +space.dataset.sf, ceiling_ft: +space.dataset.ceiling || null, business: r.business, label: r.label });
+            if (c) {
+              state.ctrls.push(c);
+              // The drawing assumes a floor shape; say so, since area-only capacity (above) can differ.
+              if (c.info && c.info.assumed) space.querySelector(".cap").textContent = `Drawn to scale. ${c.info.assumed}`;
+            }
+          } catch { /* 2D text stays */ }
+        }
       });
       box.querySelector("[data-explain]").onclick = async (ev) => {
         const b = ev.currentTarget, out = box.querySelector(".narr"); b.disabled = true;
