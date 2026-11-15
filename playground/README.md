@@ -381,67 +381,123 @@ $9.38–$18.87.
 
 ## Neighborhood demand (`neighborhood.py`)
 
-For a CoStar property or a street address and a use, a team of specialist agents says whether the
-neighborhood supports that business, or (with `use=suggest`) ranks the uses. Every step goes into a trace
-(inputs, sources with retrieval dates, evidence records, confidence, code vs LLM, hand-off) that `/maximo`
-shows under "Does the neighborhood support it?".
+For a CoStar property or a street address and a business (any of 26 types, or a description such as
+"bouldering gym"), a team of specialist agents says whether the neighborhood supports it. With `use=suggest`
+it ranks every business type for the site. Each step goes into a trace that `/maximo` shows under "Does the
+neighborhood support it?". The trace covers inputs, sources with retrieval dates, evidence records,
+confidence, code vs LLM, and hand-off.
 
 | Agent | Data | Output |
 |---|---|---|
-| Planner | rule table | which specialists apply to the use (uses with business-to-business demand stay unknown) |
+| Planner | registry + synonyms (code) | which businesses to check; B2B catalog uses (warehouse, flex, office) are not modelled |
 | Site | CoStar pin or Census geocoder | one point; stops outside the five Houston-area counties |
-| Who lives here | ACS 2020-24 vs 2015-19 tracts within 3 mi | residents, density, income (approx.), age mix, growth vs the Houston area; SFIA participation for pickleball |
-| Who already serves it | OpenStreetMap (Overpass) | facilities within 3 and 5 mi (courts clustered, indoor/paid flagged), supply per 10k residents vs the Houston area |
-| What is moving in | CoStar kit tenancies + company names | arrivals and departures of this kind of business in kit buildings within 5 mi over 3 years |
-| Lookalike check | the above, trained on real facilities | how much the area resembles places that already have the business, with a measured accuracy |
-| Coordinator | the signals | supported / mixed / weak / unknown with the deciding reasons and the rules it used |
-| Narrator (optional) | coordinator output only | 3-sentence summary by Solar Mini; rejected if it uses any number not in its input |
+| Who lives here | ACS 2020-24 vs 2015-19 tracts within 3 mi | residents, density, income (approx.), renters, age mix, growth vs the Houston area; the age band that drives demand (under-5 for childcare); SFIA participation for pickleball |
+| Who already serves it | OpenStreetMap (Overpass) | places within 3 and 5 mi (courts clustered, indoor/paid flagged), supply per 10k residents vs the Houston area |
+| What is moving in | CoStar kit tenancies + company names | arrivals and departures in kit buildings within 5 mi over 3 years; falls back to the business's group when too few |
+| Lookalike check | the above, trained per business on real locations | how much the area resembles places that already have the business, with measured accuracy |
+| Coordinator | the signals | supported / mixed / weak / unknown with the deciding reasons and the rules used |
+| Narrator (optional) | coordinator output only | 3-sentence summary by an LLM; rejected if it uses any number not in its input |
 
-Numbers and verdicts are computed in code. Only the optional summary is LLM-written, and the UI labels it.
+Each specialist runs once per site and covers every business requested, so suggest mode is 7 steps whether it
+checks 1 business or 26. Numbers and verdicts are computed in code; only the optional summary is LLM-written.
+
+**Adding a business** means adding one entry to `neighborhood_industries.py`: OpenStreetMap tags, tenant-name
+rules, synonyms, and optionally the demand age band. Then run `--prepare <key>`.
 
 ```bash
-# from the repo root; keys come from the gitignored .env (CENSUS_API_KEY, optional UPSTAGE_API_KEY)
-python3.12 playground/with_env.py python3.12 playground/neighborhood.py --property-id 13890701 --use "indoor pickleball"
+# from the repo root; keys come from the gitignored .env (CENSUS_API_KEY; optional UPSTAGE_API_KEY or LLM_API_KEY)
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --prepare all     # once per laptop, ~15 min (Overpass)
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --report           # accuracy table
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --property-id 13890701 --use "bouldering gym"
 python3.12 playground/with_env.py python3.12 playground/neighborhood.py --address "9700 Tanner Rd, Houston, TX 77041" --use suggest --explain
-python3.12 playground/with_env.py python3.12 playground/neighborhood.py --evaluate "indoor pickleball"   # re-run the held-out test
+python3.12 playground/with_env.py python3.12 playground/neighborhood.py --bench            # timings
 ```
 
-- API: `GET /api/neighborhood?property_id=13890701&use=indoor%20pickleball` (or `address=`, `use=suggest`, `explain=1`).
-- Demo links: `/maximo?property=13890701&use=indoor%20pickleball&hood=check` and `&hood=suggest`.
-- The kit is read from `--kit` (web), `COSTAR_KIT`, `./costar-hackathon-kit` or `~/Downloads/costar-hackathon-kit.zip`.
-- **Offline:** every Census, Overpass and LLM response is cached under `playground/output/neighborhood/`
-  (gitignored). Run each demo building once online, then `--offline` (CLI or `web.py`) or
-  `NEIGHBORHOOD_OFFLINE=1` uses only the cache. Anything not cached comes back as unknown, not guessed.
+- API: `GET /api/neighborhood?property_id=13890701&use=indoor%20pickleball` (or `address=`, `use=suggest`,
+  `use=<description>`, `explain=1`); `GET /api/neighborhood/industries` lists businesses with their accuracy.
+- Demo links: `/maximo?property=13890701&use=indoor%20pickleball&hood=check`, `&hood=suggest`, or
+  `&hood=check&business=bouldering%20gym`.
+- **Offline:** every Census, Overpass and LLM response, the reference profiles, kit tenancies and the evaluated
+  models are cached under `playground/output/neighborhood/` (gitignored). After `--prepare`, `--offline` (CLI or
+  `web.py`) or `NEIGHBORHOOD_OFFLINE=1` uses only the cache. Anything not cached comes back as unknown.
 
-### How accurate is the lookalike check?
+### LLMs: LangChain and OpenRouter
 
-Logistic model on 7 resident features (density, income, four age shares, growth) within 3 miles, fixed before
-testing. Positives are real facilities mapped in OpenStreetMap; the background is every Houston-area Census
-tract point (about one per 4,500 residents, so roughly a random residential address). 5-fold hold-out, split
-by ~13-mile grid cells so a held-out facility's neighbours are not in training:
+- `neighborhood_tools.py` exposes the pipeline as plain tools with JSON schemas: `list_industries`,
+  `resolve_industry`, `check_neighborhood`, `suggest_industries` and `get_evidence`. It also emits them in
+  OpenAI/OpenRouter function-calling format.
+- `neighborhood_agent.py` (`uv run`, langchain-core/langchain-openai 1.8.0) binds those tools to any
+  OpenAI-compatible model. The LLM routes the question and explains the answer; the tools compute everything.
+  A final answer containing a number that no tool returned is rejected.
+- Both the agent and the narrator read the team contract `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`.
+  Switching to OpenRouter is `LLM_BASE_URL=https://openrouter.ai/api/v1`, `LLM_MODEL=<model>` and
+  `LLM_API_KEY=<key>`. Until that key exists it falls back to Upstage Solar Mini (`UPSTAGE_API_KEY`).
 
-| Use | Facilities | AUC (90% interval) | Hidden facilities in top 30% (chance: 30%) | Income alone | Density alone |
-|---|---|---|---|---|---|
-| Indoor pickleball | 100 | 0.642 (0.598-0.683) | 44% | 0.661 | 0.432 |
-| Fitness studio | 369 | 0.682 (0.660-0.708) | 56% | 0.680 | 0.499 |
-| Childcare | 167 | 0.632 (0.596-0.665) | 45% | 0.585 | 0.406 |
+```bash
+python3.12 playground/with_env.py uv run playground/neighborhood_agent.py --property-id 13890701 \
+    "I want to open a bouldering gym. Does this area work, and what else would?"
+```
 
-Read honestly: better than chance, but modest. For pickleball and fitness the score is mostly an income
-signal (income alone does as well), while for childcare the age mix adds real information. The
-18 indoor or paid pickleball facilities score a bit higher (AUC 0.689). The interval resamples places
-independently and ignores spatial correlation, so it is too narrow. The score only votes in the verdict when
-the spatial AUC is at least 0.6.
+### How accurate is it? (measured, `--report`)
+
+**Lookalike check.** One logistic model per business, on 8 resident features within 3 miles: density,
+income, renters, four age shares, and growth. The features were fixed before testing.
+- **Positives:** real locations (OpenStreetMap, or Texas HHSC for childcare), up to 600 per business.
+- **Background:** every Houston-area Census tract point, roughly a random residential address.
+- **Hold-out:** spatial, 5 folds by ~13-mile grid cells, so a held-out location's neighbours are not in training.
+- **Controls:** the same cross-validation with income alone, density alone, and shuffled labels.
+
+| Business | Locations | AUC (90% CI) | Hidden in top 30% (chance 30%) | Income alone | Shuffled | Votes? |
+|---|---|---|---|---|---|---|
+| Yoga / pilates | 34 | 0.83 (0.78-0.89) | 85% | 0.80 | 0.45 | yes (small sample) |
+| Gym / fitness | 289 | 0.70 (0.67-0.73) | 59% | 0.69 | 0.50 | yes |
+| Bar / brewery | 490 | 0.67 (0.65-0.69) | 55% | 0.59 | 0.50 | yes |
+| Physical therapy | 75 | 0.66 (0.61-0.71) | 52% | 0.64 | 0.57 | yes |
+| Cafe | 710 | 0.66 (0.64-0.68) | 52% | 0.63 | 0.51 | yes |
+| Pet services | 166 | 0.66 (0.62-0.70) | 57% | 0.65 | 0.51 | yes |
+| Indoor pickleball | 100 | 0.65 (0.61-0.69) | 46% | 0.66 | 0.47 | yes |
+| Dental, salon, restaurant, vet, pharmacy, car wash, medical clinic | 145-3,400 | 0.61-0.63 | 44-50% | 0.57-0.66 | ~0.5 | yes (borderline) |
+| Self storage, tutoring | 140-264 | 0.60 | 43-49% | 0.59-0.61 | ~0.5 | no (just under 0.6) |
+| Childcare (licensed) | 1,936 | 0.57 | 40% | 0.57 | 0.49 | no |
+| Grocery, fast food, laundromat, auto repair, convenience | 288-3,323 | 0.51-0.57 | 32-41% | 0.49-0.53 | ~0.5 | no |
+| Martial arts, dance, climbing, coworking | 2-28 | too few mapped to train and test | | | | no |
+
+How to read this:
+- **No leakage.** Shuffled labels give about 0.5 everywhere.
+- **Where it works:** studios, gyms, bars, cafes and other discretionary, destination businesses. Here the area's
+  residents predict where these businesses are, better than chance.
+- **Mostly income.** For most businesses the model is roughly an income signal: income alone scores about the
+  same. It adds over income for restaurants (0.63 vs 0.57) and bars (0.67 vs 0.59).
+- **Where it fails:** everyday and need-based services such as convenience stores, auto repair, laundromats,
+  fast food, grocery and childcare. They follow roads and population everywhere, so residents cannot tell areas
+  apart. For these the lookalike does not vote, and supply against demand decides.
+- **Intervals are too narrow.** They ignore spatial correlation.
+- **Borderline models.** Businesses near 0.6 can flip with small changes, so treat them as borderline.
+
+**Data checks.**
+- **County totals:** tract sums reproduce the Census Bureau's county totals exactly, for population, under-5 and
+  renters in all 5 counties.
+- **Crosswalk:** moving 2015-19 counts onto 2020 tracts preserves county totals to within 0.01%.
+
+**Speed** (`--bench`, M-series laptop, after `--prepare`):
+- One business: 10 ms.
+- All 26 businesses at once: 11-19 ms (219 ms on the first request after a restart).
+- LangChain agent with an LLM: about 5 s, almost all of it model time.
+- `--prepare all`: about 15 minutes once (Overpass), then 5 s to re-evaluate.
 
 ### Limits
 
-- OpenStreetMap is volunteer-mapped: courts in parks are well covered, and childcare is badly undercounted
-  (167 mapped vs thousands licensed). Absence on the map is not proof of absence.
-- The CoStar kit covers only Matterport-scanned properties (about 1,758 in Houston), so the move-in signal is a
-  sample. Categories come from tenant names (keyword rules; CoStar's own industry code is too coarse here).
-  Fitness has 75 Houston tenancies in the kit and childcare 27, so the signal is often "too few to call".
-- ACS 5-year estimates overlap (2015-19 vs 2020-24) and use different tract boundaries. The trend is computed
-  within the same radius on each vintage's own tracts. Median income is a household-weighted mean of tract
-  medians (an approximation).
-- The thresholds (70th/30th percentile, ±2 points of growth, 0.5x/2x supply) are our rules, set relative to the
-  Houston-area distribution. They are not industry standards.
-- Warehouse, flex, office and retail are not modelled: their demand does not come from nearby residents.
+- **OpenStreetMap is volunteer-mapped and uneven.**
+  - Zero mapped where 5+ are expected is treated as a mapping gap (unknown), not as an opening.
+  - Childcare uses Texas licensing data instead. OSM had 178 places; Texas lists 2,257 centers, and 1,976 were
+    geocoded.
+- **The CoStar kit is a sample** of about 1,758 scanned Houston buildings, so business arrivals are often too few
+  to count. They then fall back to the business's group (e.g. sports & fitness) and say so. Industries come from
+  tenant names (keyword rules).
+- **ACS uncertainty.**
+  - Small-area age counts carry large margins of error. Trends vote only outside the 90% margin.
+  - Moving 2015-19 counts onto 2020 tracts assumes residents are spread evenly within each 2010 tract.
+- **Residents only.** Workers, visitors and traffic are not measured, and they drive restaurants and cafes.
+- **Our thresholds.** The cut-offs (70th/30th percentile, ±2 points, 0.5x/2x, p < 0.1, AUC 0.6) are our rules,
+  not industry standards.
+- **B2B uses are not modelled.** Warehouse, flex and office demand doesn't come from nearby residents.
