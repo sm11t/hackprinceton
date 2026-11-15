@@ -18,7 +18,7 @@ outside city limits) only show up after money is spent. MAXIMUS surfaces them be
    |---|---|
    | Every space × every business | 61,620 |
    | The building can host it (size, ceiling, floors, building type) | 13,263 |
-   | Cash to open fits the budget (sourced costs, deposit, rent while building, reserve) | 7,399 |
+   | Cash to open fits the budget (sourced costs, deposit, rent while building, reserve) | ~7,400 |
    | The neighborhood supports it (demand, competitors, who lives there) | 1,265 |
    | A permitting authority is known for the pin | 1,257 |
 
@@ -61,8 +61,16 @@ Put the CoStar sponsor kit at `~/Downloads/costar-hackathon-kit.zip` (leave it z
 python3 playground/with_env.py python3 playground/opportunity.py --kit ~/Downloads/costar-hackathon-kit.zip --build
 ```
 
-That builds the scan index once per laptop. It does one neighborhood investigation per listed building, so it takes
-several minutes the first time; afterwards a $500k scan takes about 150 ms.
+That builds the scan index once per laptop: one neighborhood investigation per listed building (240). On a fresh laptop
+it took about 20 minutes, almost all of it downloading neighborhood data for the first 50 buildings. Then cache who
+permits each of those buildings (Census lookups, about a minute):
+
+```bash
+python3 playground/with_env.py python3 playground/jurisdiction.py --warm-market ~/Downloads/costar-hackathon-kit.zip
+```
+
+Without it the scan still runs, but its last gate shows almost no known authority (the scan never calls the network).
+Afterwards a $500k scan takes under a second.
 
 ```bash
 python3 playground/with_env.py python3 playground/suite_nessie.py --seed     # once: create the Nessie demo account
@@ -76,7 +84,7 @@ python3 playground/with_env.py python3 playground/suite_prep.py --kit ~/Download
 python3 playground/with_env.py python3 playground/suite_prep.py --offline-only --warm-server http://127.0.0.1:8765
 ```
 
-Tests: `python3 playground/with_env.py python3 playground/verify_suite.py` (311 tests; 7 real-kit cases are skipped
+Tests: `python3 playground/with_env.py python3 playground/verify_suite.py` (312 tests; 7 real-kit cases are skipped
 without the kit and cached sponsor responses).
 
 `with_env.py` loads `.env` without printing any value. `.env`, the kit and everything under `playground/output/`
